@@ -16,7 +16,7 @@ const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
 const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash";
 
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
-const PROMPT_VERSION = "v2";
+const PROMPT_VERSION = "v3";
 const CACHE_LIMIT = 12;
 
 const CRITERION_TYPES: CriterionType[] = [
@@ -163,6 +163,8 @@ DEĞİŞMEZ KURALLAR:
 21. Karar kurallarını eksiksiz ve doğru sınıfla: bir sonraki aşamaya geçiş koşulları ve uygunluk şartları effect=gate; minimum toplam puan ile kriter/kategori barajları effect=threshold; sayısal puan kesintileri effect=penalty; doğrudan eleme veya diskalifiye maddeleri type=elimination_review olmalıdır.
 22. aiInterpretation alanında koşul-sonuç ilişkisini tek net cümleyle yaz: neye bakılacak, puan nasıl verilecek, hangi durumda ceza uygulanacak, hangi durumda başarısız sayılacak. "Uygun görünüyor", "değerlendirilebilir" gibi yoruma açık ifadeler kullanma.
 23. Çıktıyı kısa tut: sourceText alıntısı 300 karakteri aşmasın, breakdown satırları tek satır olsun, informationalNotes ve skippedChecks için en fazla 6 kısa madde döndür. Aynı bilgiyi iki alanda tekrar etme.
+24. Aynı sayısal eşiği farklı bağlamlarda tekrarlayan maddeler (örneğin "aşama barajı 10 puan" ve "ödül sıralaması için 10 puan") tek kriter olarak birleştirilmeli; scope alanında her iki bağlam virgülle belirtilmelidir.
+25. Video çözünürlük, süre ve meta veri kontrolleri gibi ölçümler yazılımla otomatize edilebilse bile saha doğrulaması gerektiriyorsa evaluationMethod hybrid olarak sınıflandırılmalıdır.
 `;
 
 type RawCriterion = {
