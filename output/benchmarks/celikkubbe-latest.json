@@ -1,0 +1,714 @@
+{
+  "generatedAt": "2026-08-22T13:24:53.655Z",
+  "model": "gemini-3.5-flash",
+  "expected": {
+    "declaredTotalScore": 500,
+    "scoreGroupCount": 5,
+    "requiredFindingCount": 13,
+    "humanReviewFindingCount": 3
+  },
+  "actual": {
+    "declaredTotalScore": 500,
+    "scoreGroupCount": 5,
+    "criterionCount": 26,
+    "auditStatus": "matched",
+    "auditMessage": "PDF toplamı ile 5 üst düzey puan grubunun toplamı eşleşiyor (500 puan)."
+  },
+  "comparison": {
+    "totalScoreMatched": true,
+    "scoreGroups": [
+      {
+        "expected": "Rapor ve Sunum Puanlaması",
+        "expectedMaxScore": 100,
+        "actual": "Rapor ve Sunum Puanlaması",
+        "actualMaxScore": 100,
+        "matched": true
+      },
+      {
+        "expected": "Ebat Puanlaması",
+        "expectedMaxScore": 20,
+        "actual": "Ebat Puanlaması",
+        "actualMaxScore": 20,
+        "matched": true
+      },
+      {
+        "expected": "1. Aşama Görevleri",
+        "expectedMaxScore": 100,
+        "actual": "1. Aşama Görevleri Puanlaması",
+        "actualMaxScore": 100,
+        "matched": true
+      },
+      {
+        "expected": "2. Aşama Görevleri",
+        "expectedMaxScore": 120,
+        "actual": "2. Aşama Görevleri Puanlaması",
+        "actualMaxScore": 120,
+        "matched": true
+      },
+      {
+        "expected": "3. Aşama Görevleri",
+        "expectedMaxScore": 160,
+        "actual": "3. Aşama Görevleri Puanlaması",
+        "actualMaxScore": 160,
+        "matched": true
+      }
+    ],
+    "requiredFindings": [
+      {
+        "expected": "ÖTR azami 10 sayfa",
+        "matched": true
+      },
+      {
+        "expected": "KTR azami 30 sayfa",
+        "matched": true
+      },
+      {
+        "expected": "Video 720p ve 2-5 dakika",
+        "matched": true
+      },
+      {
+        "expected": "Video bağlantısı sorunu eleme",
+        "matched": true
+      },
+      {
+        "expected": "Sistem boyutu 100 cm altı",
+        "matched": true
+      },
+      {
+        "expected": "60 cm altı 20 puan",
+        "matched": true
+      },
+      {
+        "expected": "Hakem güvenlik uygunluğu",
+        "matched": true
+      },
+      {
+        "expected": "Acil durdurma zorunluluğu",
+        "matched": true
+      },
+      {
+        "expected": "Patlayıcı kullanım yasağı",
+        "matched": true
+      },
+      {
+        "expected": "Aşama 1 barajı 20",
+        "matched": true
+      },
+      {
+        "expected": "Aşama 2 barajı 20",
+        "matched": true
+      },
+      {
+        "expected": "Aşama 3 barajı 10",
+        "matched": true
+      },
+      {
+        "expected": "Aşama 3 ardışık başarısızlık",
+        "matched": true
+      }
+    ],
+    "humanReviewFindings": [
+      {
+        "expected": "Acil durdurma",
+        "actual": "Fiziksel Acil Durdurma Butonu Zorunluluğu",
+        "method": "human",
+        "matched": true
+      },
+      {
+        "expected": "Hakem güvenlik uygunluğu",
+        "actual": "Güvenlik ve Hakem Onayı",
+        "method": "human",
+        "matched": true
+      },
+      {
+        "expected": "Kablo yalıtımı",
+        "actual": null,
+        "method": null,
+        "matched": false
+      }
+    ],
+    "scoreGroupRecall": 1,
+    "requiredFindingRecall": 1,
+    "humanReviewAccuracy": 0.6666666666666666
+  },
+  "analysis": {
+    "criteria": [
+      {
+        "id": "manager-count",
+        "name": "Takım başına en fazla 1 teslim dosyası",
+        "type": "technical_upload",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Jüri incelemesine gönder",
+        "evaluationMethod": "deterministic",
+        "sourcePage": null,
+        "sourceText": "Proje yöneticisinin belge yüklenmeden önce tanımladığı teknik teslim ayarı.",
+        "aiInterpretation": "Bu dosya adedi yöneticinin başlangıç ayarından gelir ve belge bu konuda sessiz kalsa bile uygulanır.",
+        "confidence": "high",
+        "active": true,
+        "origin": "manager",
+        "effect": "gate",
+        "scope": "Teslim"
+      },
+      {
+        "id": "manager-size",
+        "name": "Teslim dosyası en fazla 25 MB olmalıdır",
+        "type": "technical_upload",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Jüri incelemesine gönder",
+        "evaluationMethod": "deterministic",
+        "sourcePage": null,
+        "sourceText": "Proje yöneticisinin belge yüklenmeden önce tanımladığı teknik teslim ayarı.",
+        "aiInterpretation": "Bu sayısal sınır yöneticinin başlangıç ayarından gelir ve yükleme sırasında kesin olarak kontrol edilir.",
+        "confidence": "high",
+        "active": true,
+        "origin": "manager",
+        "effect": "gate",
+        "scope": "Teslim"
+      },
+      {
+        "id": "manager-format",
+        "name": "İzin verilen teslim biçimi: PDF",
+        "type": "technical_upload",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Jüri incelemesine gönder",
+        "evaluationMethod": "deterministic",
+        "sourcePage": null,
+        "sourceText": "Proje yöneticisinin belge yüklenmeden önce tanımladığı teknik teslim ayarı.",
+        "aiInterpretation": "Bu kural belgeden değil, yöneticinin başlangıç ayarından gelir. Belge bu konuda sessiz kalsa bile uygulanır.",
+        "confidence": "high",
+        "active": true,
+        "origin": "manager",
+        "effect": "gate",
+        "scope": "Teslim"
+      },
+      {
+        "id": "criterion-4",
+        "name": "Takım Üye Sayısı Sınırı",
+        "type": "format_rule",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Belirtilmemiş, yönetici/hakem incelemesi gerekir.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 6,
+        "sourceText": "Takımlar en az 3 en fazla 15 kişiden oluşmalıdır. (Bu sayıya danışman dahil değildir.)",
+        "aiInterpretation": "Takım üye sayısının danışman hariç en az 3 ve en fazla 15 kişi olması zorunludur.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Genel",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-5",
+        "name": "Özgünlük ve İntihal Kontrolü",
+        "type": "elimination_review",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Diskalifiye edilir.",
+        "evaluationMethod": "hybrid",
+        "sourcePage": 6,
+        "sourceText": "Takımlar yarışmaya herhangi bir proje raporunun aynısı, benzeri veya kopyası ile katılmaları durumunda diskalifiye edilecektir.",
+        "aiInterpretation": "Başka bir proje raporunun kopyası veya benzeri ile katılım sağlandığı tespit edilirse takım diskalifiye edilir.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Genel",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-6",
+        "name": "Ön Tasarım Raporu Sayfa Sınırı",
+        "type": "format_rule",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Değerlendirmeye alınmaz.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 10,
+        "sourceText": "Ön tasarım raporu en fazla 10 sayfa (kapak, içindekiler, görseller ve referanslar bölümleri dahil) olacaktır. Sayfa sınırına uymayan raporlar değerlendirmeye alınmayacaktır.",
+        "aiInterpretation": "Ön Tasarım Raporunun kapak ve referanslar dahil en fazla 10 sayfa olması gerekir, aksi halde rapor değerlendirilmez.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "ÖTR",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-7",
+        "name": "Kritik Tasarım Raporu Sayfa Sınırı",
+        "type": "format_rule",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Değerlendirmeye alınmaz.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 10,
+        "sourceText": "Kritik tasarım raporu en fazla 30 sayfa (kapak, içindekiler, görsel (teknik resim) ve referanslar bölümleri dahil) olacaktır. Sayfa sınırına uymayan raporlar değerlendirmeye alınmayacaktır.",
+        "aiInterpretation": "Kritik Tasarım Raporunun kapak ve teknik resimler dahil en fazla 30 sayfa olması gerekir, aksi halde rapor değerlendirilmez.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "KTR",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-8",
+        "name": "Görev Kabiliyet Videosu Süre Sınırı",
+        "type": "format_rule",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Belirtilmemiş, yönetici/hakem incelemesi gerekir.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 12,
+        "sourceText": "Videonun çözünürlüğü en az 720p, toplam süresi ise en az 2 dakika, en fazla 5 dakika olmalıdır.",
+        "aiInterpretation": "Görev kabiliyet videosunun süresinin en az 2, en fazla 5 dakika ve çözünürlüğünün en az 720p olması zorunludur.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Video",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-9",
+        "name": "Video Platformu ve Link Geçerliliği",
+        "type": "technical_upload",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Takım elenir.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 12,
+        "sourceText": "Video tek bir video olarak Youtube’a yüklenecektir. Diğer platformlara yüklenen videolar kabul edilmeyecektir... Linkte sorun yaşanması halinde takımlar elenecektir.",
+        "aiInterpretation": "Videonun yalnızca Youtube'a yüklenmesi ve KYS'ye eklenen linkin çalışır durumda olması gerekir, aksi halde takım elenir.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Video",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-10",
+        "name": "Sistem Boyut Sınırı",
+        "type": "format_rule",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Güvenlik ve uygunluk onayı alamayan sistemin yarışmasına izin verilmez.",
+        "evaluationMethod": "human",
+        "sourcePage": 13,
+        "sourceText": "Yarışma ortamında yer alacak Hava Savunma Sistemi’nin her boyutu (E x B x D) 100cm’ den küçük olacaktır. Bu boyutlara sistemin dış kablajı dahil değildir.",
+        "aiInterpretation": "Sistemin dış kablajı hariç tüm boyutlarının (en, boy, yükseklik) 100 cm'den küçük olması zorunludur.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Teknik Kontrol",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-11",
+        "name": "Ebat Puanlaması",
+        "type": "qualitative_score",
+        "maxScore": 20,
+        "weight": null,
+        "required": false,
+        "violationOutcome": "0 puan verilir.",
+        "evaluationMethod": "human",
+        "sourcePage": 14,
+        "sourceText": "Boyut ≤ 60 cm: 20 Puan, 60cm <Boyut <100 cm: 0 Puan",
+        "aiInterpretation": "Sistemin en uzun boyutu 60 cm ve altında ise 20 puan verilir, 60 cm ile 100 cm arasında ise ebat puanı verilmez.",
+        "confidence": "high",
+        "effect": "score",
+        "scope": "Teknik Kontrol",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-12",
+        "name": "Güvenlik ve Hakem Onayı",
+        "type": "elimination_review",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Yarışmaya katılmasına izin verilmez.",
+        "evaluationMethod": "human",
+        "sourcePage": 13,
+        "sourceText": "Güvenlik şartlarının tamamını sağlayarak hakemlerden uygunluk onayını almayan sistemin yarışmasına izin verilmeyecektir.",
+        "aiInterpretation": "Yarışma öncesi hakemlerin yapacağı güvenlik kontrolünden geçemeyen sistemlerin yarışmaya katılması engellenir.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Teknik Kontrol",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-13",
+        "name": "Patlayıcı Kullanım Yasağı",
+        "type": "elimination_review",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Yarışmaya katılmasına izin verilmez.",
+        "evaluationMethod": "human",
+        "sourcePage": 17,
+        "sourceText": "Takımların hedef imha çözümü olarak patlayıcı kullanmaları yasaktır.",
+        "aiInterpretation": "Hedef imhası için patlayıcı madde kullanılması kesinlikle yasaktır ve tespiti halinde takım elenir.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Teknik Kontrol",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-14",
+        "name": "Aşama 1 Baraj Puanı",
+        "type": "elimination_review",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Bir üst aşamaya geçemez.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 19,
+        "sourceText": "1. Aşamada takımların bir üst seviyeye geçebilmesi için en az 20 puan toplaması beklenmektedir.",
+        "aiInterpretation": "Aşama 1'den en az 20 puan alamayan takımlar Aşama 2'ye geçiş hakkı kazanamaz.",
+        "confidence": "high",
+        "effect": "threshold",
+        "scope": "Aşama 1",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-15",
+        "name": "Aşama 2 Baraj Puanı",
+        "type": "elimination_review",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Bir üst aşamaya geçemez.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 20,
+        "sourceText": "2. Aşamada takımların bir üst seviyeye geçebilmesi için en az 20 puan toplaması beklenmektedir.",
+        "aiInterpretation": "Aşama 2'den en az 20 puan alamayan takımlar Aşama 3'e geçiş hakkı kazanamaz.",
+        "confidence": "high",
+        "effect": "threshold",
+        "scope": "Aşama 2",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-16",
+        "name": "Aşama 3 Başarısızlık Koşulu (Ardışık Tur)",
+        "type": "elimination_review",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Aşamadan başarısız sayılır ve 0 puan alır.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 21,
+        "sourceText": "4 ardışık tur boyunca düşman hedef vuramayan yarışmacı takım aşamadan başarısız sayılacak ve 0 puan alacaktır.",
+        "aiInterpretation": "Aşama 3'te üst üste 4 tur boyunca hiçbir düşman hedefi vurulamazsa takım aşamadan elenir ve 0 puan alır.",
+        "confidence": "high",
+        "effect": "threshold",
+        "scope": "Aşama 3",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-17",
+        "name": "Aşama 3 Başarı Barajı",
+        "type": "elimination_review",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Başarısız sayılır.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 21,
+        "sourceText": "Takımların başarılı sayılabilmesi için Aşama-3’ten minimum 10 puan almaları gerekmektedir.",
+        "aiInterpretation": "Aşama 3'ün başarılı tamamlanmış sayılması için bu aşamadan en az 10 puan alınması zorunludur.",
+        "confidence": "high",
+        "effect": "threshold",
+        "scope": "Aşama 3",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-18",
+        "name": "Ödül Sıralaması Barajı",
+        "type": "elimination_review",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Ödül sıralamasına giremez.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 23,
+        "sourceText": "Ödül sıralamasına girebilmek için takımların 3. Aşamadan en az 10 puan almaları gerekmektedir.",
+        "aiInterpretation": "Genel ödül sıralamasına dahil olabilmek için Aşama 3'ten en az 10 puan alınması şarttır.",
+        "confidence": "high",
+        "effect": "threshold",
+        "scope": "Genel",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-19",
+        "name": "Öğrenci ve Danışman Belgesi Yükleme Zorunluluğu",
+        "type": "technical_upload",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Belgede açık bir ihlal sonucu belirtilmemiştir, hakem/yönetici incelemesi gerekir.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 6,
+        "sourceText": "Finale kalan takımların onaylı öğrenci belgelerini, danışmanlar için ise öğretim üyesi/görevlisi veya araştırma görevlisi olduklarını gösteren onaylı belgenin ıslak imzalı olarak TEKNOFEST Yarışmalar Komitesinin açıklayacağı tarihte KYS sistemine yüklenmesi gerekmektedir.",
+        "aiInterpretation": "Finale kalan takımlar öğrenci ve danışman belgelerini ıslak imzalı olarak KYS'ye yüklemek zorundadır.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Genel",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-20",
+        "name": "Tek Takımda Üye Olma Sınırı",
+        "type": "format_rule",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Belgede açık bir ihlal sonucu belirtilmemiştir, hakem/yönetici incelemesi gerekir.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 7,
+        "sourceText": "Her katılımcı en fazla 1 takımda üye (danışman dahil) olarak bulunabilir.",
+        "aiInterpretation": "Bir kişinin birden fazla takımda üye veya danışman olarak yer alması yasaktır.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Genel",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-21",
+        "name": "Video Çözünürlük Sınırı",
+        "type": "format_rule",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Belgede açık bir ihlal sonucu belirtilmemiştir, hakem/yönetici incelemesi gerekir.",
+        "evaluationMethod": "deterministic",
+        "sourcePage": 12,
+        "sourceText": "Videonun çözünürlüğü en az 720p, toplam süresi ise en az 2 dakika, en fazla 5 dakika olmalıdır.",
+        "aiInterpretation": "Gönderilen videonun çözünürlüğü en az 720p olmalıdır, aksi takdirde kural ihlali sayılır.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Video",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-22",
+        "name": "Fiziksel Acil Durdurma Butonu Zorunluluğu",
+        "type": "mandatory_content",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Güvenlik şartlarının tamamını sağlayarak hakemlerden uygunluk onayını almayan sistemin yarışmasına izin verilmeyecektir.",
+        "evaluationMethod": "human",
+        "sourcePage": 17,
+        "sourceText": "Sistemlerde dışarıya çıkacak bir kablo ile güvenli bir konumda acil durdurma butonu (basmalı, çevirmeli, manyetik) olması zorunludur.",
+        "aiInterpretation": "Sistemde dışarıya kablo ile uzanan fiziksel bir acil durdurma butonu bulunması zorunludur, bulunmaması durumunda yarışmaya izin verilmez.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Teknik Kontrol",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-23",
+        "name": "Yasak Bölgeye Dönüş Engeli",
+        "type": "mandatory_content",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Güvenlik şartlarının tamamını sağlayarak hakemlerden uygunluk onayını almayan sistemin yarışmasına izin verilmeyecektir.",
+        "evaluationMethod": "human",
+        "sourcePage": 13,
+        "sourceText": "Sistem, test alanında ortaya yakın konumlandırılacak olup, sistemin sadece hedeflerin yer alacağı tarafa bakmasına izin verilecektir. Kesinlikle tanımlanan yasak bölgeye dönmesine izin verilmeyecek yapıda olacaktır.",
+        "aiInterpretation": "Sistemin fiziksel veya yazılımsal olarak tanımlanan yasak bölgeye dönmesini engelleyecek bir yapıda olması zorunludur, aksi halde yarışmaya katılım engellenir.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Teknik Kontrol",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-24",
+        "name": "Aşama 1 Sıralama İhlali Cezası",
+        "type": "formula",
+        "maxScore": null,
+        "weight": null,
+        "required": false,
+        "violationOutcome": "Zarfta verilen sıralama dışında her hedef imhası durumunda yarışmacı takıma 5 puan ceza verilecektir.",
+        "evaluationMethod": "hybrid",
+        "sourcePage": 18,
+        "sourceText": "Zarfta verilen sıralama dışında her hedef imhası durumunda yarışmacı takıma 5 puan ceza verilecektir.",
+        "aiInterpretation": "Aşama 1'de zarfta belirtilen sıralamaya uyulmadan yapılan her hedef imhası için takımdan 5 puan düşülür.",
+        "confidence": "high",
+        "effect": "penalty",
+        "scope": "Aşama 1",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-25",
+        "name": "Aşama 3 Yakın Mesafe İmha Puan Geçersizliği",
+        "type": "formula",
+        "maxScore": null,
+        "weight": null,
+        "required": false,
+        "violationOutcome": "Yakın mesafede gerçekleştirilen imhalar puan hesabına katılmaz.",
+        "evaluationMethod": "hybrid",
+        "sourcePage": 21,
+        "sourceText": "F16 Hedefi için uygun imha mesafesi 10-15 metredir. 10 Metreden daha yakın mesafede gerçekleştirilen F16 imhası puan hesabına katılmayacaktır. Helikopter ve Balistik Füze hedefleri için uygun imha mesafesi 5-15 metredir. 5 Metreden daha yakın mesafede gerçekleştirilen helikopter ve balistik füze imhası puan hesabına katılmayacaktır.",
+        "aiInterpretation": "Aşama 3'te F16 hedefi 10 metreden, helikopter ve balistik füze hedefleri ise 5 metreden daha yakın mesafede imha edilirse bu imhalardan puan alınamaz.",
+        "confidence": "high",
+        "effect": "threshold",
+        "scope": "Aşama 3",
+        "active": true,
+        "origin": "document"
+      },
+      {
+        "id": "criterion-26",
+        "name": "Toplam Bakım Süresi Sınırı",
+        "type": "format_rule",
+        "maxScore": null,
+        "weight": null,
+        "required": true,
+        "violationOutcome": "Bakım süresi bittiğinde yarışma süresi işlemeye devam eder.",
+        "evaluationMethod": "human",
+        "sourcePage": 17,
+        "sourceText": "3 aşama için kullanılacak toplam bakım süresi 10 dakikadır. Her bakım talebi toplam bakım süresinden minimum 30 saniye götürecektir.",
+        "aiInterpretation": "Takımların 3 aşama boyunca toplamda en fazla 10 dakika bakım süresi hakkı vardır ve her talep en az 30 saniye eksiltir.",
+        "confidence": "high",
+        "effect": "gate",
+        "scope": "Genel",
+        "active": true,
+        "origin": "document"
+      }
+    ],
+    "scorePlan": {
+      "declaredTotalScore": 500,
+      "groups": [
+        {
+          "name": "Rapor ve Sunum Puanlaması",
+          "scope": "Genel",
+          "maxScore": 100,
+          "minimumScore": null,
+          "sourcePage": 14,
+          "sourceText": "Ön Tasarım Raporu: 10 Puan, Kritik Tasarım Raporu: 50 Puan, Final Değerlendirme Sunumu: 40 Puan",
+          "breakdown": [
+            "Ön Tasarım Raporu: 10 Puan",
+            "Kritik Tasarım Raporu: 50 Puan",
+            "Final Değerlendirme Sunumu: 40 Puan"
+          ]
+        },
+        {
+          "name": "Ebat Puanlaması",
+          "scope": "Teknik Kontrol",
+          "maxScore": 20,
+          "minimumScore": null,
+          "sourcePage": 14,
+          "sourceText": "Boyut ≤ 60 cm: 20 Puan, 60cm <Boyut <100 cm: 0 Puan",
+          "breakdown": [
+            "Boyut 60 cm ve altında ise: 20 Puan",
+            "Boyut 60 cm ile 100 cm arasında ise: 0 Puan"
+          ]
+        },
+        {
+          "name": "1. Aşama Görevleri Puanlaması",
+          "scope": "Aşama 1",
+          "maxScore": 100,
+          "minimumScore": 20,
+          "sourcePage": 17,
+          "sourceText": "Yakın Menzil Hedef İmha Puanı: 5 Puan, Orta Menzil Hedef İmha Puanı: 10 Puan, Uzun Menzil Hedef İmha Puanı: 20 Puan, Kazanılabilecek Maksimum Puan: 80 Puan, Bonus Süre Puanı: <20 Puan, Ceza Puanı: -5 Puan",
+          "breakdown": [
+            "Yakın Menzil Hedef İmha: 5 Puan",
+            "Orta Menzil Hedef İmha: 10 Puan",
+            "Uzun Menzil Hedef İmha: 20 Puan",
+            "Görevden kazanılabilecek maksimum temel puan: 80 Puan",
+            "Bonus Süre Puanı (BSP): En fazla 20 Puan (Formül: 20 x (Kalan Süre / 300))",
+            "Yanlış sıradaki hedefin imhası cezası: -5 Puan"
+          ]
+        },
+        {
+          "name": "2. Aşama Görevleri Puanlaması",
+          "scope": "Aşama 2",
+          "maxScore": 120,
+          "minimumScore": 20,
+          "sourcePage": 19,
+          "sourceText": "Tur başına Bir Hedef İmha Puanı: 5 Puan, Tur başına İki Hedef İmha Puanı: 15 Puan, Tur başına Üç Hedef İmha Puanı: 30 Puan, Kazanılabilecek Maksimum Puan: 120 Puan, Ceza Puanı: -5 Puan",
+          "breakdown": [
+            "Tur başına 1 hedef imhası: 5 Puan",
+            "Tur başına 2 hedef imhası: 15 Puan",
+            "Tur başına 3 hedef imhası: 30 Puan",
+            "Tur başına hedef vuramama cezası: -5 Puan",
+            "Toplam 4 tur üzerinden kazanılabilecek maksimum puan: 120 Puan"
+          ]
+        },
+        {
+          "name": "3. Aşama Görevleri Puanlaması",
+          "scope": "Aşama 3",
+          "maxScore": 160,
+          "minimumScore": 10,
+          "sourcePage": 20,
+          "sourceText": "F16 Hedefi İmha Puanı: 30 Puan, Helikopter, Balistik Füze Hedefi İmha Puanı: 20 Puan, Mini/Micro İHA Hedefi İmha Puanı: 10 Puan, Kazanılabilecek Maksimum Puan: 160 Puan, Ceza Puanı: -10 Puan",
+          "breakdown": [
+            "F16 Hedefi İmha (10-15m): 30 Puan",
+            "Helikopter veya Balistik Füze Hedefi İmha (5-15m): 20 Puan",
+            "Mini/Micro İHA Hedefi İmha (0-15m): 10 Puan",
+            "Dost hedef vurulması veya düşman hedef vurulamaması cezası: Tur başına -10 Puan",
+            "Toplam 8 tur üzerinden kazanılabilecek maksimum puan: 160 Puan"
+          ]
+        }
+      ],
+      "auditStatus": "matched",
+      "auditMessage": "PDF toplamı ile 5 üst düzey puan grubunun toplamı eşleşiyor (500 puan)."
+    },
+    "analysisWarnings": [],
+    "skippedChecks": [
+      "Yazı tipi (font) kısıtlaması tanımlanmamıştır.",
+      "Yazı boyutu (punto) kısıtlaması tanımlanmamıştır.",
+      "Satır aralığı kısıtlaması tanımlanmamıştır.",
+      "Rapor kenar boşlukları tanımlanmamıştır.",
+      "Dosya boyutu (MB) sınırı tanımlanmamıştır.",
+      "Video dosya formatı kısıtlaması tanımlanmamıştır."
+    ],
+    "informationalNotes": [
+      "Yarışmaya Türkiye veya yurt dışındaki yükseköğretim öğrencileri katılabilir.",
+      "En İyi Tasarım Ödülü ve En İyi Takım Ruhu Ödülü prestij amaçlı olup maddi karşılığı yoktur.",
+      "Yarışma alanında 220 VAC enerji sağlanacaktır, EMI gereksinimlerini takımlar karşılamalıdır.",
+      "Sistemlerin testlere yükseliş ve yan eksenleri 0 derece olacak şekilde başlaması beklenir.",
+      "Yarışma süresince toplam 10 dakika bakım molası hakkı bulunmaktadır.",
+      "Mülakatlara yalnızca takım üyeleri katılabilir, danışmanlar katılamaz."
+    ],
+    "conflicts": 0,
+    "pageCount": 25,
+    "provider": "api",
+    "model": "gemini-3.5-flash",
+    "analyzedAt": "2026-08-22T13:24:53.640Z",
+    "diagnostics": {
+      "totalMs": 14,
+      "modelMs": 0,
+      "auditMs": 0,
+      "promptTokens": 0,
+      "outputTokens": 0,
+      "cached": true
+    }
+  }
+}
