@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { fold } from "../lib/competitions";
+
+/** Listede aynı anda gösterilecek en fazla seçenek; gerisi sayıyla bildirilir. */
+const RESULT_LIMIT = 50;
 
 /**
  * Arama destekli genel seçim alanı (kategori, aşama, rapor türü…).
- * Yazdıkça seçenekler tr-TR duyarsız filtrelenir; listedeki bir seçenek
- * tıklanarak veya klavyeyle seçilir, listede olmayan değer serbest metin
- * olarak bırakılabilir.
+ * Yazdıkça seçenekler Türkçe aksana ve büyük/küçük harfe duyarsız filtrelenir;
+ * listedeki bir seçenek tıklanarak veya klavyeyle seçilir, listede olmayan
+ * değer serbest metin olarak bırakılabilir.
  */
 export default function SearchSelect({
   value,
@@ -28,13 +32,25 @@ export default function SearchSelect({
   const [highlighted, setHighlighted] = useState(0);
   const [filtering, setFiltering] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();
 
   // Alan yeni açıldığında tüm seçenekler görünür; yazmaya başlayınca filtrelenir.
-  const normalized = value.trim().toLocaleLowerCase("tr-TR");
-  const visible = filtering && normalized
-    ? options.filter((option) => option.toLocaleLowerCase("tr-TR").includes(normalized))
-    : options;
+  const query = filtering ? value.trim() : "";
+  const matches = useMemo(() => {
+    const normalized = fold(query);
+    if (!normalized) return options;
+    const tokens = normalized.split(/\s+/).filter(Boolean);
+    return options.filter((option) => {
+      const haystack = fold(option);
+      return tokens.every((token) => haystack.includes(token));
+    });
+  }, [options, query]);
+
+  const visible = matches.length > RESULT_LIMIT ? matches.slice(0, RESULT_LIMIT) : matches;
+  // Liste kısaldığında imleç listenin dışında kalabilir.
+  const activeIndex = visible.length ? Math.min(highlighted, visible.length - 1) : 0;
+  const hiddenCount = matches.length - visible.length;
 
   useEffect(() => {
     function handlePointerDown(event: MouseEvent) {
@@ -47,10 +63,19 @@ export default function SearchSelect({
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, []);
 
+  // Klavyeyle gezinirken seçili satır her zaman görünür kalır.
+  useEffect(() => {
+    if (!open) return;
+    listRef.current
+      ?.querySelector<HTMLElement>(`[data-index="${activeIndex}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, open]);
+
   function select(option: string) {
     (onPick ?? onChange)(option);
     setOpen(false);
     setFiltering(false);
+    setHighlighted(0);
   }
 
   return (
@@ -60,6 +85,7 @@ export default function SearchSelect({
         aria-expanded={open}
         aria-controls={listId}
         aria-autocomplete="list"
+        aria-activedescendant={open && visible.length ? `${listId}-${activeIndex}` : undefined}
         aria-label={ariaLabel}
         value={value}
         placeholder={placeholder}
@@ -69,13 +95,13 @@ export default function SearchSelect({
           if (!open && (event.key === "ArrowDown" || event.key === "ArrowUp")) { setOpen(true); return; }
           if (event.key === "ArrowDown") {
             event.preventDefault();
-            setHighlighted((current) => Math.min(current + 1, visible.length - 1));
+            setHighlighted(Math.min(activeIndex + 1, visible.length - 1));
           } else if (event.key === "ArrowUp") {
             event.preventDefault();
-            setHighlighted((current) => Math.max(current - 1, 0));
-          } else if (event.key === "Enter" && open && visible[highlighted]) {
+            setHighlighted(Math.max(activeIndex - 1, 0));
+          } else if (event.key === "Enter" && open && visible[activeIndex]) {
             event.preventDefault();
-            select(visible[highlighted]);
+            select(visible[activeIndex]);
           } else if (event.key === "Escape") {
             setOpen(false);
             setFiltering(false);
@@ -84,14 +110,16 @@ export default function SearchSelect({
       />
       <span className="combo-caret" aria-hidden="true">▾</span>
       {open ? (
-        <div className="combo-list" id={listId} role="listbox" aria-label={ariaLabel}>
+        <div className="combo-list" id={listId} role="listbox" aria-label={ariaLabel} ref={listRef}>
           {visible.map((option, index) => (
             <button
               key={option}
+              id={`${listId}-${index}`}
+              data-index={index}
               type="button"
               role="option"
               aria-selected={option === value}
-              className={`combo-option ${index === highlighted ? "highlighted" : ""} ${option === value ? "current" : ""}`}
+              className={`combo-option ${index === activeIndex ? "highlighted" : ""} ${option === value ? "current" : ""}`}
               onMouseEnter={() => setHighlighted(index)}
               onMouseDown={(event) => { event.preventDefault(); select(option); }}
             >
@@ -101,6 +129,10 @@ export default function SearchSelect({
           {!visible.length ? (
             <div className="combo-empty">
               Eşleşen seçenek yok; yazdığınız değer serbest metin olarak kullanılacak.
+            </div>
+          ) : hiddenCount > 0 ? (
+            <div className="combo-footer">
+              {matches.length} eşleşmenin ilk {visible.length} tanesi listelendi · +{hiddenCount} seçenek daha
             </div>
           ) : null}
         </div>

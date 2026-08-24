@@ -2,30 +2,172 @@
   "document": "2026_Celikkubbe_Hava_Savunma_Teknik_Sartnamesi.pdf",
   "declaredTotalScore": 500,
   "scoreGroups": [
-    { "name": "Rapor ve Sunum Puanlaması", "maxScore": 100, "keywords": ["rapor", "sunum"] },
-    { "name": "Ebat Puanlaması", "maxScore": 20, "keywords": ["ebat"] },
-    { "name": "1. Aşama Görevleri", "maxScore": 100, "keywords": ["1", "aşama"] },
-    { "name": "2. Aşama Görevleri", "maxScore": 120, "keywords": ["2", "aşama"] },
-    { "name": "3. Aşama Görevleri", "maxScore": 160, "keywords": ["3", "aşama"] }
+    {
+      "name": "Rapor ve Sunum Puanlaması",
+      "maxScore": 100,
+      "keywords": [
+        "rapor",
+        "sunum"
+      ]
+    },
+    {
+      "name": "Ebat Puanlaması",
+      "maxScore": 20,
+      "keywords": [
+        "ebat"
+      ]
+    },
+    {
+      "name": "1. Aşama Görevleri",
+      "maxScore": 100,
+      "keywords": [
+        "1",
+        "aşama"
+      ]
+    },
+    {
+      "name": "2. Aşama Görevleri",
+      "maxScore": 120,
+      "keywords": [
+        "2",
+        "aşama"
+      ]
+    },
+    {
+      "name": "3. Aşama Görevleri",
+      "maxScore": 160,
+      "keywords": [
+        "3",
+        "aşama"
+      ]
+    }
   ],
   "requiredFindings": [
-    { "name": "ÖTR azami 10 sayfa", "keywords": ["ön tasarım", "10 sayfa"] },
-    { "name": "KTR azami 30 sayfa", "keywords": ["kritik tasarım", "30 sayfa"] },
-    { "name": "Video 720p ve 2-5 dakika", "keywords": ["720p", "5 dakika"] },
-    { "name": "Video bağlantısı sorunu eleme", "keywords": ["link", "elen"] },
-    { "name": "Sistem boyutu 100 cm altı", "keywords": ["100", "boyut"] },
-    { "name": "60 cm altı 20 puan", "keywords": ["60", "20 puan"] },
-    { "name": "Hakem güvenlik uygunluğu", "keywords": ["hakem", "güvenlik"] },
-    { "name": "Acil durdurma zorunluluğu", "keywords": ["acil durdur"] },
-    { "name": "Patlayıcı kullanım yasağı", "keywords": ["patlayıcı", "yasak"] },
-    { "name": "Aşama 1 barajı 20", "keywords": ["aşama 1", "en az 20"] },
-    { "name": "Aşama 2 barajı 20", "keywords": ["aşama 2", "en az 20"] },
-    { "name": "Aşama 3 barajı 10", "keywords": ["aşama 3", "en az 10"] },
-    { "name": "Aşama 3 ardışık başarısızlık", "keywords": ["4 ardışık", "0 puan"] }
+    {
+      "name": "ÖTR azami 10 sayfa",
+      "keywords": [
+        "ön tasarım",
+        "10 sayfa"
+      ],
+      "category": "gate"
+    },
+    {
+      "name": "KTR azami 30 sayfa",
+      "keywords": [
+        "kritik tasarım",
+        "30 sayfa"
+      ],
+      "category": "gate"
+    },
+    {
+      "name": "Video 720p ve 2-5 dakika",
+      "keywords": [
+        "720p",
+        "5 dakika"
+      ],
+      "category": "gate"
+    },
+    {
+      "name": "Video bağlantısı sorunu eleme",
+      "keywords": [
+        "link",
+        "elen"
+      ],
+      "category": "elimination"
+    },
+    {
+      "name": "Sistem boyutu 100 cm altı",
+      "keywords": [
+        "100",
+        "boyut"
+      ],
+      "category": "gate"
+    },
+    {
+      "name": "60 cm altı 20 puan",
+      "keywords": [
+        "60",
+        "20 puan"
+      ],
+      "category": "score"
+    },
+    {
+      "name": "Hakem güvenlik uygunluğu",
+      "keywords": [
+        "hakem",
+        "güvenlik"
+      ],
+      "category": "gate"
+    },
+    {
+      "name": "Acil durdurma zorunluluğu",
+      "keywords": [
+        "acil durdur"
+      ],
+      "category": "gate"
+    },
+    {
+      "name": "Patlayıcı kullanım yasağı",
+      "keywords": [
+        "patlayıcı",
+        "yasak"
+      ],
+      "category": "elimination"
+    },
+    {
+      "name": "Aşama 1 barajı 20",
+      "keywords": [
+        "aşama 1",
+        "en az 20"
+      ],
+      "category": "threshold"
+    },
+    {
+      "name": "Aşama 2 barajı 20",
+      "keywords": [
+        "aşama 2",
+        "en az 20"
+      ],
+      "category": "threshold"
+    },
+    {
+      "name": "Aşama 3 barajı 10",
+      "keywords": [
+        "aşama 3",
+        "en az 10"
+      ],
+      "category": "threshold"
+    },
+    {
+      "name": "Aşama 3 ardışık başarısızlık",
+      "keywords": [
+        "4 ardışık",
+        "0 puan"
+      ],
+      "category": "penalty"
+    }
   ],
   "humanReviewFindings": [
-    { "name": "Acil durdurma", "keywords": ["acil durdur"] },
-    { "name": "Hakem güvenlik uygunluğu", "keywords": ["hakem", "güvenlik"] },
-    { "name": "Kablo yalıtımı", "keywords": ["kablo", "yalıtım"] }
-  ]
+    {
+      "name": "Acil durdurma",
+      "keywords": [
+        "acil durdur"
+      ]
+    },
+    {
+      "name": "Hakem güvenlik uygunluğu",
+      "keywords": [
+        "hakem",
+        "güvenlik"
+      ]
+    },
+    {
+      "name": "Kablo yalıtımı",
+      "keywords": [
+        "kablo",
+        "yalıtım"
+      ]
+    }
+  ],
+  "notes": "Bu dosya resmî Çelikkubbe şartnamesinden elle çıkarılmış YER GERÇEĞİDİR. Model çıktısından türetilmemiştir; benchmark yalnızca buna karşı ölçer."
 }

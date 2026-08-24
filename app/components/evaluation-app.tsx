@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import FileBadge from "./file-badge";
-import { criterionEffectOf, criterionEliminates, normalizeScore } from "../lib/evaluation-summary";
+import DocumentLibraryModal from "./document-library-modal";
+import { criterionEffectOf, criterionEliminates, normalizeScoreDetailed } from "../lib/evaluation-summary";
 import { extractPdfText } from "../lib/pdf-reader";
 import { loadLastApprovedProfile, readProfileFile, saveActiveProfile } from "../lib/profile-loader";
 import { createReportId, deleteReport, listReports, saveReport, type StoredReport } from "../lib/report-pool";
@@ -311,6 +312,7 @@ function PoolView({ profile, profileError, onProfileFile, records, uploadError, 
   const [participant, setParticipant] = useState("");
   const [dragging, setDragging] = useState(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [libraryOpen, setLibraryOpen] = useState(false);
 
   async function accept(file?: File) {
     if (!file) return;
@@ -368,11 +370,23 @@ function PoolView({ profile, profileError, onProfileFile, records, uploadError, 
                   placeholder="Örn. Takım 42 — Hidra"
                 />
               </label>
-              <button type="button" className="secondary-button" onClick={() => inputRef.current?.click()}>PDF seç</button>
+              <div className="eval-upload-buttons">
+                <button type="button" className="secondary-button" onClick={() => inputRef.current?.click()}>PDF seç</button>
+                {/* Havuzdaki örnek yarışmacı raporları kod değişikliği olmadan test için kullanılabilir. */}
+                <button type="button" className="text-button" onClick={() => setLibraryOpen(true)}>Belge havuzundan seç</button>
+              </div>
             </div>
           </div>
         </div>
       ) : null}
+
+      <DocumentLibraryModal
+        open={libraryOpen}
+        usage="rapor"
+        selectedFileName={null}
+        onClose={() => setLibraryOpen(false)}
+        onSelect={(file) => { accept(file); }}
+      />
 
       {uploadError ? (
         <div className="inline-error eval-panel-margin" role="alert">
@@ -536,6 +550,9 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
     return sum + decision.finalScore;
   }, 0);
   const declaredTotal = evaluation.proposedTotals.declaredTotal;
+  // Ham puan, maksimum ham puan ve normalize puan ayrı tutulur; aralık dışı
+  // bir sonuç sessizce kırpılmaz, anomali olarak görünür kılınır.
+  const normalized = normalizeScoreDetailed(finalTotal, declaredTotal ?? 0);
   const flaggedChecks = evaluation.preChecks.filter((check) => check.status === "flagged" || check.status === "failed");
   // Geçiş / baraj / ceza / eleme maddelerinin bu rapordaki durumu: bulgu + görevli kararı.
   const ruleAudit = profile && profileMatches ? (() => {
@@ -636,10 +653,20 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
           <span>AI puan önerisi</span>
         </div>
         <div>
-          <strong>{finalTotal}{declaredTotal ? ` / ${declaredTotal}` : ""}</strong>
-          <span>hakem toplamı{declaredTotal ? ` · ${normalizeScore(finalTotal, declaredTotal)}/100` : ""}</span>
+          <strong>{finalTotal}</strong>
+          <span>ham puan{declaredTotal ? ` / ${declaredTotal}` : ""}</span>
+        </div>
+        <div className={normalized.anomaly ? "summary-warning" : ""}>
+          <strong>{declaredTotal ? normalized.value : "—"}</strong>
+          <span>100 üzerinden</span>
         </div>
       </div>
+
+      {normalized.anomaly ? (
+        <div className="inline-error eval-panel-margin" role="alert">
+          <strong>Puan anomalisi</strong><span>{normalized.anomaly}</span>
+        </div>
+      ) : null}
 
       {!profileMatches ? (
         <div className="inline-error eval-panel-margin" role="alert">
@@ -941,6 +968,9 @@ function ParticipantView({ records, selectedId, onSelect }: {
     if (!finding || finding.maxScore === null || decision.finalScore === null) return sum;
     return sum + decision.finalScore;
   }, 0);
+  // Ham puan, maksimum ham puan ve normalize puan ayrı tutulur; aralık dışı
+  // bir sonuç sessizce kırpılmaz, anomali olarak görünür kılınır.
+  const normalized = normalizeScoreDetailed(finalTotal, declaredTotal ?? 0);
   const feedback: ParticipantFeedback | null = review.feedbackApproved
     ? normalizeFeedback(review.finalFeedback)
     : null;
@@ -975,13 +1005,24 @@ function ParticipantView({ records, selectedId, onSelect }: {
         </div>
         <div className="profile-metrics">
           <div>
-            <strong>{finalTotal}{declaredTotal ? ` / ${declaredTotal}` : ""}</strong>
-            <span>toplam puan</span>
+            <strong>{finalTotal}</strong>
+            <span>ham puan</span>
           </div>
           <div>
-            <strong>{declaredTotal ? normalizeScore(finalTotal, declaredTotal) : "—"}</strong>
+            <strong>{declaredTotal ?? "—"}</strong>
+            <span>maksimum ham puan</span>
+          </div>
+          <div className={normalized.anomaly ? "summary-warning" : ""}>
+            <strong>{declaredTotal ? normalized.value : "—"}</strong>
             <span>100 üzerinden</span>
           </div>
+        </div>
+        {normalized.anomaly ? (
+          <div className="inline-error" role="alert">
+            <strong>Puan anomalisi</strong><span>{normalized.anomaly}</span>
+          </div>
+        ) : null}
+        <div className="profile-metrics">
           <div>
             <strong>{findings.filter((finding) => finding.status === "met").length}</strong>
             <span>karşılanan kriter</span>

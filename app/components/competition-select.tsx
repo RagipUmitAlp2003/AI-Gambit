@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { filterCompetitions } from "../lib/competitions";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { COMPETITIONS, searchCompetitions } from "../lib/competitions";
 
 /**
- * Arama destekli yarışma seçici. Görevli yazdıkça kayıtlı yarışmalar
- * anlık ve büyük/küçük harfe duyarsız filtrelenir; listede olmayan bir
- * ad serbest metin olarak da bırakılabilir.
+ * Arama destekli yarışma seçici. Görevli yazdıkça kayıtlı yarışmalar anlık,
+ * büyük/küçük harfe ve Türkçe aksana duyarsız filtrelenir; listede olmayan bir
+ * ad serbest metin olarak da bırakılabilir. Uzun listelerde yalnızca ilk
+ * eşleşmeler basılır, kalan sayı listenin altında bildirilir.
  */
 export default function CompetitionSelect({
   value,
@@ -20,20 +21,43 @@ export default function CompetitionSelect({
 }) {
   const [open, setOpen] = useState(false);
   const [highlighted, setHighlighted] = useState(0);
+  // Seçimden sonra alan tekrar açıldığında liste tek kayda düşmesin diye
+  // filtre yalnızca görevli yazarken uygulanır.
+  const [filtering, setFiltering] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const options = filterCompetitions(value);
+  const listRef = useRef<HTMLDivElement>(null);
+  const listId = useId();
+
+  const query = filtering ? value : "";
+  const { items, total } = useMemo(() => searchCompetitions(query), [query]);
+  // Liste kısaldığında imleç listenin dışında kalabilir.
+  const activeIndex = items.length ? Math.min(highlighted, items.length - 1) : 0;
+  const hiddenCount = total - items.length;
 
   useEffect(() => {
     function handlePointerDown(event: MouseEvent) {
-      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!wrapRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+        setFiltering(false);
+      }
     }
     document.addEventListener("mousedown", handlePointerDown);
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, []);
 
+  // Klavyeyle gezinirken seçili satır her zaman görünür kalır.
+  useEffect(() => {
+    if (!open) return;
+    listRef.current
+      ?.querySelector<HTMLElement>(`[data-index="${activeIndex}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, open]);
+
   function select(name: string) {
     (onPick ?? onChange)(name);
     setOpen(false);
+    setFiltering(false);
+    setHighlighted(0);
   }
 
   return (
@@ -41,39 +65,43 @@ export default function CompetitionSelect({
       <input
         role="combobox"
         aria-expanded={open}
-        aria-controls="competition-listbox"
+        aria-controls={listId}
         aria-autocomplete="list"
+        aria-activedescendant={open && items.length ? `${listId}-${activeIndex}` : undefined}
         aria-label="Yarışma ara ve seç"
         value={value}
         placeholder="Yarışma adını yazın veya listeden seçin"
-        onFocus={() => setOpen(true)}
-        onChange={(event) => { onChange(event.target.value); setOpen(true); setHighlighted(0); }}
+        onFocus={() => { setOpen(true); setFiltering(false); setHighlighted(0); }}
+        onChange={(event) => { onChange(event.target.value); setOpen(true); setFiltering(true); setHighlighted(0); }}
         onKeyDown={(event) => {
           if (!open && (event.key === "ArrowDown" || event.key === "ArrowUp")) { setOpen(true); return; }
           if (event.key === "ArrowDown") {
             event.preventDefault();
-            setHighlighted((current) => Math.min(current + 1, options.length - 1));
+            setHighlighted(Math.min(activeIndex + 1, items.length - 1));
           } else if (event.key === "ArrowUp") {
             event.preventDefault();
-            setHighlighted((current) => Math.max(current - 1, 0));
-          } else if (event.key === "Enter" && open && options[highlighted]) {
+            setHighlighted(Math.max(activeIndex - 1, 0));
+          } else if (event.key === "Enter" && open && items[activeIndex]) {
             event.preventDefault();
-            select(options[highlighted].name);
+            select(items[activeIndex].name);
           } else if (event.key === "Escape") {
             setOpen(false);
+            setFiltering(false);
           }
         }}
       />
       <span className="combo-caret" aria-hidden="true">▾</span>
       {open ? (
-        <div className="combo-list" id="competition-listbox" role="listbox" aria-label="Kayıtlı yarışmalar">
-          {options.map((option, index) => (
+        <div className="combo-list" id={listId} role="listbox" aria-label="Kayıtlı yarışmalar" ref={listRef}>
+          {items.map((option, index) => (
             <button
               key={option.name}
+              id={`${listId}-${index}`}
+              data-index={index}
               type="button"
               role="option"
               aria-selected={option.name === value}
-              className={`combo-option ${index === highlighted ? "highlighted" : ""}`}
+              className={`combo-option ${index === activeIndex ? "highlighted" : ""} ${option.name === value ? "current" : ""}`}
               onMouseEnter={() => setHighlighted(index)}
               onMouseDown={(event) => { event.preventDefault(); select(option.name); }}
             >
@@ -81,11 +109,19 @@ export default function CompetitionSelect({
               <small>{option.field}</small>
             </button>
           ))}
-          {!options.length ? (
+          {!items.length ? (
             <div className="combo-empty">
               Eşleşen kayıtlı yarışma yok; yazdığınız ad serbest metin olarak kullanılacak.
             </div>
-          ) : null}
+          ) : (
+            <div className="combo-footer">
+              {hiddenCount > 0
+                ? `${total} eşleşmenin ilk ${items.length} tanesi listelendi · +${hiddenCount} yarışma daha, aramayı daraltın`
+                : filtering
+                  ? `${total} eşleşen yarışma`
+                  : `${COMPETITIONS.length} kayıtlı yarışma · yazmaya başlayın`}
+            </div>
+          )}
         </div>
       ) : null}
     </div>

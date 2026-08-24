@@ -16,7 +16,7 @@ const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
 const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash";
 
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
-const PROMPT_VERSION = "v2";
+const PROMPT_VERSION = "v3";
 const CACHE_LIMIT = 12;
 
 /**
@@ -72,6 +72,10 @@ const RESPONSE_SCHEMA = {
             type: "string",
             description: "Kuralın ait olduğu aşama veya teslim: Genel, ÖTR, KTR, Video, Teknik Kontrol, Aşama 1 vb.",
           },
+          scoreGroupIndex: {
+            type: ["integer", "null"],
+            description: "Bu kriter scorePlan.groups içindeki hangi gruba aittir? 0 tabanlı indeks. Puan grubuna ait değilse null.",
+          },
         },
         required: [
           "name",
@@ -87,6 +91,7 @@ const RESPONSE_SCHEMA = {
           "confidence",
           "effect",
           "scope",
+          "scoreGroupIndex",
         ],
       },
     },
@@ -189,6 +194,9 @@ type RawCriterion = {
   confidence?: unknown;
   effect?: unknown;
   scope?: unknown;
+  scoreGroupIndex?: unknown;
+  /** Yalnızca bağımsız denetim turunda bulundu; görevli doğrulaması bekler. */
+  auditOnly?: boolean;
 };
 
 type RawScoreGroup = {
@@ -225,7 +233,14 @@ function safeEnum<T extends string>(value: unknown, allowed: T[], fallback: T): 
   return typeof value === "string" && allowed.includes(value as T) ? value as T : fallback;
 }
 
-function normalizeCriterion(raw: RawCriterion, index: number, pageCount: number): Criterion {
+function normalizeCriterion(raw: RawCriterion, index: number, pageCount: number, groups: ScorePlan["groups"]): Criterion {
+  // Grup bağı indeksle kurulur; isim eşleşmesine hiçbir yerde düşülmez.
+  const groupIndex = typeof raw.scoreGroupIndex === "number" && Number.isInteger(raw.scoreGroupIndex)
+    ? raw.scoreGroupIndex
+    : null;
+  const groupId = groupIndex !== null && groupIndex >= 0 && groupIndex < groups.length
+    ? groups[groupIndex].id ?? null
+    : null;
   const page = typeof raw.sourcePage === "number" ? Math.round(raw.sourcePage) : 1;
   const maxScore = nullableNumber(raw.maxScore);
   const criterionText = `${text(raw.name, "")} ${text(raw.scope, "")} ${text(raw.sourceText, "")}`;
@@ -246,8 +261,14 @@ function normalizeCriterion(raw: RawCriterion, index: number, pageCount: number)
     confidence: safeEnum(raw.confidence, CONFIDENCES, "medium"),
     effect: safeEnum(raw.effect, EFFECTS, maxScore === null ? "advisory" : "score"),
     scope: text(raw.scope, "Genel"),
-    active: true,
+    groupId,
+    // Denetim bulguları pasif başlar: görevli kaynağı görüp etkinleştirmeden
+    // profile giremez, dolayısıyla puanı veya kapsamı değiştiremez.
+    active: raw.auditOnly !== true,
     origin: "document",
+    ...(raw.auditOnly === true
+      ? { issue: "Bağımsız denetim turunda bulundu, birincil çıkarımda yok. Kaynak sayfayı doğrulayıp etkinleştirin." }
+      : {}),
   };
 }
 
@@ -274,17 +295,20 @@ function managerCriterion(
     origin: "manager",
     effect: "gate",
     scope: "Teslim",
+    groupId: null,
   };
 }
 
 function normalizeScorePlan(raw: RawScorePlan | undefined, pageCount: number): ScorePlan {
   const declaredTotalScore = nullableNumber(raw?.declaredTotalScore);
   const groups = Array.isArray(raw?.groups)
-    ? raw.groups.flatMap((group) => {
+    ? raw.groups.flatMap((group, index) => {
       const maxScore = nullableNumber(group.maxScore);
       if (maxScore === null) return [];
       const page = typeof group.sourcePage === "number" ? Math.round(group.sourcePage) : 1;
       return [{
+        // Kararlı kimlik: eşleştirme ve kapsam kararları isim yerine bunu kullanır.
+        id: `group-${index + 1}`,
         name: text(group.name, "İsimsiz puan grubu"),
         scope: text(group.scope, "Genel"),
         maxScore,
@@ -406,20 +430,83 @@ function criterionFingerprint(raw: RawCriterion) {
     .trim();
 }
 
+/**
+ * Denetim turu sonuçlarının birincil çıkarımla birleştirilmesi.
+ *
+ * Denetim turu bağımsız çalıştığı için birincil sonucu SESSİZCE DEĞİŞTİRMEZ:
+ * - birincil listede zaten olan madde → doğrulama sayılır, yok sayılır,
+ * - birincil listede olmayan madde → PASİF bir "denetim bulgusu" olarak
+ *   eklenir ve görevli doğrulaması istenir.
+ *
+ * Böylece denetim turu kendi başına yeni ve doğrulanmamış bir değerlendirme
+ * kuralı yürürlüğe koyamaz; yalnızca eksik olabilecek maddeyi işaretler.
+ */
 function mergeRawCriteria(primary: RawCriterion[], audit: RawCriterion[]) {
   const seen = new Set(primary.map(criterionFingerprint));
   const merged = [...primary];
+  let confirmed = 0;
+  let flagged = 0;
   for (const item of audit) {
     const fingerprint = criterionFingerprint(item);
-    if (!fingerprint || seen.has(fingerprint)) continue;
+    if (!fingerprint) continue;
+    if (seen.has(fingerprint)) { confirmed += 1; continue; }
     seen.add(fingerprint);
-    merged.push(item);
+    merged.push({ ...item, auditOnly: true });
+    flagged += 1;
   }
-  return merged;
+  return { merged, confirmed, flagged };
 }
 
 function delay(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * Belgeyi Gemini Files API'ye BİR KEZ yükler ve `fileUri` döndürür; böylece
+ * birincil analiz ile bağımsız denetim turu aynı yüklemeyi paylaşır ve PDF
+ * baytları iki ayrı isteğe tekrar gömülmez.
+ *
+ * NOT: Bu, yükleme süresini ve ağ trafiğini yarıya indirir; belge her istekte
+ * yeniden tokenize edildiği için GİRDİ TOKEN sayısını tek başına azaltmaz.
+ *
+ * Yükleme başarısız olursa null döner ve çağıran satır içi (inlineData)
+ * gönderime düşer: yeni bir kırılma noktası eklenmez.
+ */
+async function uploadPdfOnce(apiKey: string, bytes: ArrayBuffer, displayName: string): Promise<string | null> {
+  try {
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=media",
+      {
+        method: "POST",
+        headers: {
+          "x-goog-api-key": apiKey,
+          "Content-Type": "application/pdf",
+          "X-Goog-Upload-File-Name": encodeURIComponent(displayName),
+        },
+        body: bytes,
+        signal: AbortSignal.timeout(60_000),
+      },
+    );
+    if (!response.ok) return null;
+    const payload = await response.json() as { file?: { uri?: string; name?: string; state?: string } };
+    const file = payload.file;
+    if (!file?.uri || !file.name) return null;
+
+    // PDF'ler genelde anında ACTIVE olur; değilse kısa süre beklenir.
+    let state = file.state ?? "ACTIVE";
+    for (let attempt = 0; attempt < 5 && state === "PROCESSING"; attempt += 1) {
+      await delay(700);
+      const check = await fetch(`https://generativelanguage.googleapis.com/v1beta/${file.name}`, {
+        headers: { "x-goog-api-key": apiKey },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!check.ok) return null;
+      state = ((await check.json()) as { state?: string }).state ?? "ACTIVE";
+    }
+    return state === "ACTIVE" ? file.uri : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -434,8 +521,56 @@ type CachedExtraction = {
   informationalNotes: string[];
   coverageAuditWarning: string;
   model: string;
+  /** Denetim turunun fiilen kullandığı model; yedeğe düşüldüyse burada görünür. */
+  auditModel?: string;
+  /** Devre kesici nedeniyle bu istekte hiç denenmeyen modeller. */
+  skippedModels?: string[];
   pageCount: number;
 };
+
+/**
+ * Model devre kesici.
+ *
+ * Ölçüm: yanıt vermeyen bir birincil model, her analizde zaman aşımı süresi
+ * kadar (80 sn) ölü bekleme yaratıyor ve bu süre doğrudan kullanıcının gördüğü
+ * gecikmeye ekleniyor. Bir model zaman aşımına uğrarsa kısa süre devre dışı
+ * bırakılır; sonraki analizler doğrudan çalışan modelle başlar.
+ *
+ * Süre dolduğunda model kendiliğinden yeniden denenir: geçici bir kesinti
+ * kalıcı olarak modeli dışlamaz.
+ */
+const MODEL_COOLDOWN_MS = Number(process.env.MODEL_COOLDOWN_MS) > 0
+  ? Number(process.env.MODEL_COOLDOWN_MS)
+  : 10 * 60 * 1000;
+
+const breakerHost = globalThis as unknown as { __kriterModelCooldown?: Map<string, number> };
+
+function modelCooldown(): Map<string, number> {
+  if (!breakerHost.__kriterModelCooldown) breakerHost.__kriterModelCooldown = new Map();
+  return breakerHost.__kriterModelCooldown;
+}
+
+function isModelCooling(model: string): boolean {
+  const until = modelCooldown().get(model);
+  if (!until) return false;
+  if (Date.now() >= until) { modelCooldown().delete(model); return false; }
+  return true;
+}
+
+function markModelUnavailable(model: string) {
+  modelCooldown().set(model, Date.now() + MODEL_COOLDOWN_MS);
+}
+
+function markModelHealthy(model: string) {
+  modelCooldown().delete(model);
+}
+
+/** Denenecek modeller: soğumada olanlar atlanır, hepsi soğumadaysa liste korunur. */
+function usableModels(models: string[]): { models: string[]; skipped: string[] } {
+  const skipped = models.filter(isModelCooling);
+  const usable = models.filter((model) => !isModelCooling(model));
+  return usable.length ? { models: usable, skipped } : { models, skipped: [] };
+}
 
 const cacheHost = globalThis as unknown as { __kriterAnalysisCache?: Map<string, CachedExtraction> };
 
@@ -461,12 +596,16 @@ function extractUsage(payload: unknown) {
 }
 
 function buildResult(extraction: CachedExtraction, setup: SetupData, diagnostics: AnalysisDiagnostics): AnalysisResult {
-  const documentCriteria = extraction.rawCriteria.map((item, index) => normalizeCriterion(item, index, extraction.pageCount));
-  const criteria = mergeManagerRules(documentCriteria, setup);
+  // Puan planı önce kurulur: kriterlerin groupId'si grupların kimliklerine bağlanır.
   const scorePlan = normalizeScorePlan(extraction.rawScorePlan, extraction.pageCount);
+  const documentCriteria = extraction.rawCriteria.map((item, index) => normalizeCriterion(item, index, extraction.pageCount, scorePlan.groups));
+  const criteria = mergeManagerRules(documentCriteria, setup);
   const analysisWarnings = [
     ...(scorePlan.auditStatus === "mismatch" ? [scorePlan.auditMessage] : []),
     ...(extraction.coverageAuditWarning ? [extraction.coverageAuditWarning] : []),
+    ...(extraction.skippedModels?.length
+      ? [`Yanıt vermediği için geçici olarak atlanan model: ${extraction.skippedModels.join(", ")}. Analiz yedek modelle tamamlandı.`]
+      : []),
   ];
   return {
     criteria,
@@ -520,7 +659,17 @@ export async function POST(request: Request) {
       }));
     }
 
-    const pdfData = Buffer.from(pdfBytes).toString("base64");
+    // Belge bir kez yüklenir; başarısız olursa satır içi gönderime düşülür.
+    const uploadStartedAt = Date.now();
+    const fileUri = await uploadPdfOnce(apiKey, pdfBytes, file.name);
+    const uploadMs = Date.now() - uploadStartedAt;
+    const pdfData = fileUri ? "" : Buffer.from(pdfBytes).toString("base64");
+    /** Aynı belge parçası her iki isteğe de referansla girer. */
+    const documentPart = (level: "MEDIA_RESOLUTION_MEDIUM" | "MEDIA_RESOLUTION_LOW") => (
+      fileUri
+        ? { fileData: { mimeType: "application/pdf", fileUri }, mediaResolution: { level } }
+        : { inlineData: { mimeType: "application/pdf", data: pdfData }, mediaResolution: { level } }
+    );
     const prompt = `
 Bu PDF'yi sayfa sayfa incele ve organizatörün onaylayacağı değerlendirme profili taslağını çıkar.
 
@@ -548,10 +697,7 @@ Yanıtı oluşturmadan önce sessizce şu kapsam denetimini yap:
       contents: [{
         role: "user",
         parts: [
-          {
-            inlineData: { mimeType: "application/pdf", data: pdfData },
-            mediaResolution: { level: "MEDIA_RESOLUTION_MEDIUM" },
-          },
+          documentPart("MEDIA_RESOLUTION_MEDIUM"),
           { text: prompt },
         ],
       }],
@@ -564,59 +710,163 @@ Yanıtı oluşturmadan önce sessizce şu kapsam denetimini yap:
       },
     });
 
-    const attempts = [...new Set([PRIMARY_MODEL, FALLBACK_MODEL])];
-    let geminiResponse: Response | null = null;
-    let modelUsed = PRIMARY_MODEL;
-    let lastDetail = "AI belge analizi tamamlanamadı.";
-    const modelStartedAt = Date.now();
+    const allModels = [...new Set([PRIMARY_MODEL, FALLBACK_MODEL])];
+    const { models: attempts, skipped: skippedModels } = usableModels(allModels);
+    let modelUsed = attempts[0];
 
     const failWith = (status: number, detail: string) => {
       recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true });
       return Response.json({ error: detail }, { status });
     };
 
-    for (let attempt = 0; attempt < attempts.length; attempt += 1) {
-      modelUsed = attempts[attempt];
-      try {
-        geminiResponse = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${modelUsed}:generateContent`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-goog-api-key": apiKey,
+    type PrimaryOutcome =
+      | { ok: true; payload: unknown; model: string }
+      | { ok: false; status: number; detail: string };
+
+    /** Birincil çıkarım: model listesi sırayla denenir, geçici hatalarda bir kez beklenir. */
+    const runPrimary = async (): Promise<PrimaryOutcome> => {
+      let lastDetail = "AI belge analizi tamamlanamadı.";
+      for (let attempt = 0; attempt < attempts.length; attempt += 1) {
+        const model = attempts[attempt];
+        let response: Response;
+        try {
+          response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+              body: requestBody,
+              signal: AbortSignal.timeout(model === PRIMARY_MODEL ? 80_000 : 120_000),
             },
-            body: requestBody,
-            signal: AbortSignal.timeout(modelUsed === PRIMARY_MODEL ? 80_000 : 120_000),
-          },
-        );
-      } catch {
-        lastDetail = "AI modeli zaman sınırı içinde yanıt vermedi.";
-        if (attempt === attempts.length - 1) {
-          return failWith(504, lastDetail);
+          );
+        } catch {
+          // Zaman aşımına uğrayan model kısa süre devre dışı bırakılır.
+          markModelUnavailable(model);
+          lastDetail = "AI modeli zaman sınırı içinde yanıt vermedi.";
+          if (attempt === attempts.length - 1) return { ok: false, status: 504, detail: lastDetail };
+          await delay(1200);
+          continue;
         }
+        if (response.ok) {
+          markModelHealthy(model);
+          return { ok: true, payload: await response.json(), model };
+        }
+        const errorPayload = await response.json().catch(() => ({})) as { error?: { message?: string } };
+        lastDetail = errorPayload.error?.message || `AI analiz isteği ${response.status} koduyla başarısız oldu.`;
+        const retryable = [429, 500, 502, 503, 504].includes(response.status);
+        // Sunucu tarafı kesinti: model kısa süre atlanır. 4xx yapılandırma
+        // hatasıdır; modeli suçlamak yanlış olur.
+        if ([500, 502, 503, 504].includes(response.status)) markModelUnavailable(model);
+        if (!retryable || attempt === attempts.length - 1) return { ok: false, status: 502, detail: lastDetail };
         await delay(1200);
-        continue;
       }
+      return { ok: false, status: 502, detail: lastDetail };
+    };
 
-      if (geminiResponse.ok) break;
-      const errorPayload = await geminiResponse.json().catch(() => ({})) as { error?: { message?: string } };
-      lastDetail = errorPayload.error?.message || `AI analiz isteği ${geminiResponse.status} koduyla başarısız oldu.`;
-      const retryable = [429, 500, 502, 503, 504].includes(geminiResponse.status);
-      if (!retryable || attempt === attempts.length - 1) {
-        return failWith(502, lastDetail);
+    /**
+     * Eksik kural denetimi. Birinci turun çıktısını BEKLEMEZ: aynı belgeyi
+     * bağımsız bir gözle, kendi kontrol listesiyle tarar. Sonuçlar parmak izine
+     * göre birleştirildiği için tekrarlar zaten elenir; ardışık çalıştırmaya
+     * göre duvar saati süresi yaklaşık yarıya iner.
+     *
+     * Bu tur bir tamamlayıcıdır, birincil çıkarımın yerine geçmez: düşük
+     * düşünme seviyesi ve düşük medya çözünürlüğü ile token maliyeti de düşük
+     * tutulur. Başarısız olursa analiz iptal edilmez, uyarı eklenir.
+     */
+    const auditEnabled = COVERAGE_AUDIT_ENABLED && pageCount >= COVERAGE_AUDIT_MIN_PAGES;
+    const auditPrompt = `
+Bu PDF için BAĞIMSIZ BİR EKSİK KURAL DENETİMİ yap. Amacın, hızlı bir ilk okumada gözden kaçması muhtemel uygulanabilir kuralları yakalamak.
+
+Özellikle şunları sayfa sayfa kontrol et:
+- fiziksel güvenlik ve hakem uygunluk kontrolleri,
+- zorunlu donanım, yasaklar ve teknik sınırlar,
+- rapor/video teslim şartları ve açık eleme sonuçları,
+- puan cezaları, minimum barajlar, aşama başarısızlıkları ve 0 puan koşulları,
+- tablo dipnotları, istisnalar ve "hariç" ifadeleri,
+- aynı maddenin hem uygunluk hem puan etkisi varsa ikinci etkisi.
+
+Bağlam: ${setup.stage} / ${setup.reportType}. Her kuralı kendi kapsamına göre scope alanında etiketle.
+
+Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri human/hybrid olarak işaretle. Çıktı yalnızca criteria listesini içersin.
+`;
+    const auditBody = auditEnabled
+      ? JSON.stringify({
+        systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+        contents: [{
+          role: "user",
+          parts: [
+            // Denetim turu metin kurallarını arar; düşük çözünürlük görsel
+            // token sayısını belirgin şekilde azaltır.
+            documentPart("MEDIA_RESOLUTION_LOW"),
+            { text: auditPrompt },
+          ],
+        }],
+        generationConfig: {
+          temperature: 0,
+          thinkingConfig: { thinkingLevel: "LOW" },
+          maxOutputTokens: 16384,
+          responseMimeType: "application/json",
+          responseJsonSchema: CRITERIA_AUDIT_SCHEMA,
+        },
+      })
+      : null;
+
+    type AuditOutcome = { ok: true; payload: unknown; model: string } | { ok: false; reason: string };
+
+    /**
+     * Denetim turu önce birincil modelle çalışır; model erişilemez veya geçici
+     * bir hata döndürürse YALNIZCA bir kez yedek modele düşer. İkiden fazla
+     * modele aynı isteği göndermeyerek token maliyeti kontrol altında tutulur.
+     * Denetim turunun başarısız olması ana analizi hiçbir koşulda düşürmez.
+     */
+    const runAudit = async (body: string): Promise<AuditOutcome> => {
+      let lastReason = "Bağımsız denetim tamamlanamadı; birincil çıkarım daha dikkatli incelenmeli.";
+      for (const model of attempts) {
+        try {
+          const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+              body,
+              signal: AbortSignal.timeout(120_000),
+            },
+          );
+          if (response.ok) {
+            markModelHealthy(model);
+            return { ok: true, payload: await response.json(), model };
+          }
+          if ([500, 502, 503, 504].includes(response.status)) markModelUnavailable(model);
+          // Kalıcı hatalarda (400/401/403) yedek modeli denemek boşuna maliyettir.
+          if (![429, 500, 502, 503, 504].includes(response.status)) {
+            return { ok: false, reason: `Bağımsız denetim tamamlanamadı (HTTP ${response.status}); birincil çıkarım daha dikkatli incelenmeli.` };
+          }
+          lastReason = `Bağımsız denetim tamamlanamadı (HTTP ${response.status}); birincil çıkarım daha dikkatli incelenmeli.`;
+        } catch {
+          markModelUnavailable(model);
+          lastReason = "Bağımsız denetim zaman sınırı içinde tamamlanamadı; birincil çıkarım daha dikkatli incelenmeli.";
+        }
       }
-      await delay(1200);
-    }
+      return { ok: false, reason: lastReason };
+    };
 
-    if (!geminiResponse?.ok) {
-      return failWith(502, lastDetail);
-    }
-
-    const payload = await geminiResponse.json();
+    const modelStartedAt = Date.now();
+    let auditMs = 0;
+    const [primaryOutcome, auditOutcome] = await Promise.all([
+      runPrimary(),
+      auditBody
+        ? runAudit(auditBody).then((outcome) => { auditMs = Date.now() - modelStartedAt; return outcome; })
+        : Promise.resolve(null),
+    ]);
     const modelMs = Date.now() - modelStartedAt;
-    const primaryUsage = extractUsage(payload);
-    const rawText = extractGeminiText(payload);
+
+    if (!primaryOutcome.ok) {
+      return failWith(primaryOutcome.status, primaryOutcome.detail);
+    }
+    modelUsed = primaryOutcome.model;
+
+    const primaryUsage = extractUsage(primaryOutcome.payload);
+    const rawText = extractGeminiText(primaryOutcome.payload);
     if (!rawText) {
       return failWith(502, "AI modeli geçerli bir yapılandırılmış çıktı döndürmedi.");
     }
@@ -624,71 +874,28 @@ Yanıtı oluşturmadan önce sessizce şu kapsam denetimini yap:
     const raw = JSON.parse(rawText) as RawAnalysis;
     let rawCriteria = Array.isArray(raw.criteria) ? raw.criteria : [];
     let coverageAuditWarning = "";
-    let auditMs = 0;
     let auditUsage = { prompt: 0, output: 0, total: 0 };
 
-    if (COVERAGE_AUDIT_ENABLED && pageCount >= COVERAGE_AUDIT_MIN_PAGES) {
-      const firstPassNames = rawCriteria.map((item) => text(item.name, "")).filter(Boolean);
-      const auditPrompt = `
-Bu PDF için ilk çıkarım aşağıdaki kriterleri buldu:
-${firstPassNames.map((name) => `- ${name}`).join("\n")}
-
-Şimdi BAĞIMSIZ BİR EKSİK KURAL DENETİMİ yap. İlk listedeki kriterleri tekrar etme; yalnızca atlanan uygulanabilir kuralları döndür.
-
-Özellikle şunları sayfa sayfa kontrol et:
-- fiziksel güvenlik ve hakem uygunluk kontrolleri,
-- zorunlu donanım, yasaklar ve teknik sınırlar,
-- rapor/video teslim şartları ve açık eleme sonuçları,
-- puan cezaları, minimum barajlar, aşama başarısızlıkları ve 0 puan koşulları,
-- aynı maddenin hem uygunluk hem puan etkisi varsa eksik kalan etkisi.
-
-Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri human/hybrid olarak işaretle. Çıktı yalnızca eksik criteria listesini içersin.
-`;
-      const auditBody = JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-        contents: [{
-          role: "user",
-          parts: [
-            {
-              inlineData: { mimeType: "application/pdf", data: pdfData },
-              mediaResolution: { level: "MEDIA_RESOLUTION_MEDIUM" },
-            },
-            { text: auditPrompt },
-          ],
-        }],
-        generationConfig: {
-          temperature: 0,
-          thinkingConfig: { thinkingLevel: "HIGH" },
-          maxOutputTokens: 24576,
-          responseMimeType: "application/json",
-          responseJsonSchema: CRITERIA_AUDIT_SCHEMA,
-        },
-      });
-
-      const auditStartedAt = Date.now();
-      try {
-        const auditResponse = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${modelUsed}:generateContent`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-            body: auditBody,
-            signal: AbortSignal.timeout(120_000),
-          },
-        );
-        if (auditResponse.ok) {
-          const auditPayload = await auditResponse.json();
-          auditUsage = extractUsage(auditPayload);
-          const auditText = extractGeminiText(auditPayload);
-          const auditRaw = auditText ? JSON.parse(auditText) as { criteria?: RawCriterion[] } : {};
-          rawCriteria = mergeRawCriteria(rawCriteria, Array.isArray(auditRaw.criteria) ? auditRaw.criteria : []);
-        } else {
-          coverageAuditWarning = "İkinci eksik-kural denetimi tamamlanamadı; ilk çıkarım yönetici tarafından daha dikkatli incelenmeli.";
+    let auditModel = "";
+    if (auditOutcome) {
+      if (auditOutcome.ok) {
+        auditUsage = extractUsage(auditOutcome.payload);
+        auditModel = auditOutcome.model;
+        const auditText = extractGeminiText(auditOutcome.payload);
+        const auditRaw = auditText ? JSON.parse(auditText) as { criteria?: RawCriterion[] } : {};
+        // Birincil çıkarım önceliklidir; denetim turu yalnızca doğrulama yapar
+        // veya pasif bir bulgu ekler — hiçbir kuralı sessizce değiştirmez.
+        const merge = mergeRawCriteria(rawCriteria, Array.isArray(auditRaw.criteria) ? auditRaw.criteria : []);
+        rawCriteria = merge.merged;
+        if (merge.flagged > 0) {
+          coverageAuditWarning = `Bağımsız denetim turu ${merge.flagged} olası eksik madde işaretledi (${merge.confirmed} madde doğrulandı). Bu maddeler PASİF olarak eklendi; kaynak sayfalarını görüp etkinleştirmeniz gerekir.`;
         }
-      } catch {
-        coverageAuditWarning = "İkinci eksik-kural denetimi zaman aşımına uğradı; ilk çıkarım yönetici tarafından daha dikkatli incelenmeli.";
+        if (auditModel !== PRIMARY_MODEL) {
+          coverageAuditWarning = `${coverageAuditWarning ? `${coverageAuditWarning} ` : ""}Denetim turu yedek model (${auditModel}) ile çalıştırıldı.`.trim();
+        }
+      } else {
+        coverageAuditWarning = auditOutcome.reason;
       }
-      auditMs = Date.now() - auditStartedAt;
     }
 
     const extraction: CachedExtraction = {
@@ -698,6 +905,8 @@ Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri hu
       informationalNotes: Array.isArray(raw.informationalNotes) ? raw.informationalNotes.map((item) => text(item, "")).filter(Boolean) : [],
       coverageAuditWarning,
       model: modelUsed,
+      auditModel,
+      skippedModels,
       pageCount,
     };
 
@@ -721,6 +930,7 @@ Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri hu
       error: false,
     });
 
+    const apiCalls = 1 + (auditOutcome ? 1 : 0);
     return Response.json(buildResult(extraction, setup, {
       totalMs,
       modelMs,
@@ -728,6 +938,12 @@ Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri hu
       promptTokens,
       outputTokens,
       cached: false,
+      uploadMs: fileUri ? uploadMs : 0,
+      apiCalls,
+      // Files API ile belge bir kez taşınır; satır içi gönderimde her çağrıda tekrar.
+      documentTransfers: fileUri ? 1 : apiCalls,
+      documentDelivery: fileUri ? "file_uri" : "inline",
+      auditModel: auditModel || undefined,
     }));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Beklenmeyen analiz hatası.";

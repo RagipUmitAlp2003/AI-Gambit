@@ -16,9 +16,19 @@ function formatBytes(bytes: number) {
 }
 
 /**
- * Sağ panel canlı önizlemesi: seçilen yarışma, belge, girilen değerler ve
- * kriterlerden oluşan değerlendirme şablonunun küçük bir görünümü.
- * Soldaki her değişiklik bu panele anında yansır.
+ * Profilin hangi aşamada olduğunu tek bakışta veren durum rozeti.
+ * Soldaki her adım ilerledikçe rozet de canlı olarak değişir.
+ */
+function previewState(file: File | null, result: AnalysisResult | null) {
+  if (result) return { tone: "done", label: `${result.pageCount} sayfa analiz edildi` };
+  if (file) return { tone: "ready", label: "Analize hazır" };
+  return { tone: "draft", label: "Bilgi giriliyor" };
+}
+
+/**
+ * Sağ panel canlı önizlemesi: seçilen yarışma, değerlendirme profili, belge
+ * türü, girilen teslim ayarları ve çıkarılan kriterlerden oluşan şablonun
+ * küçük bir görünümü. Soldaki her değişiklik bu panele anında yansır.
  */
 export default function TemplatePreview({
   setup,
@@ -37,16 +47,23 @@ export default function TemplatePreview({
   const scoreGroups = scorePlan?.groups ?? [];
   const rules = active.length ? deriveDecisionRules(criteria, scorePlan) : null;
   const scoreCriterionCount = active.filter((item) => criterionEffectOf(item) === "score").length;
+  const state = previewState(file, result);
+  // Profil kimliği görevlinin girdiği yıl/aşama değerlerinden anlık kurulur.
+  const profileId = [setup.year, setup.stage].filter(Boolean).join(" / ") || "Tanımlanmadı";
 
   return (
     <div className="template-preview">
-      <span className="preview-label">Canlı önizleme</span>
+      <div className="preview-topline">
+        <span className="preview-label">Canlı önizleme</span>
+        <span className={`preview-state ${state.tone}`}>{state.label}</span>
+      </div>
+
       <div className="template-head">
         <FileBadge fileName={file?.name ?? "sablon.pdf"} mimeType={file?.type} size="lg" />
         <div>
           <h2>{setup.reportType || "Rapor türü bekleniyor"}</h2>
           <p>{setup.competition || "Yarışma adı bekleniyor"}</p>
-          <small>{[setup.category, setup.stage, setup.year].filter(Boolean).join(" · ")}</small>
+          <small>Profil {profileId} · v1.0</small>
         </div>
       </div>
 
@@ -65,7 +82,11 @@ export default function TemplatePreview({
       )}
 
       <dl>
-        <div><dt>Format</dt><dd>PDF</dd></div>
+        <div><dt>Kategori</dt><dd>{setup.category || "—"}</dd></div>
+        <div><dt>Aşama</dt><dd>{setup.stage || "—"}</dd></div>
+        <div><dt>Yıl</dt><dd>{setup.year || "—"}</dd></div>
+        {/* Format satırı başlangıç ayarından okunur; sabit "PDF" varsayılmaz. */}
+        <div><dt>Format</dt><dd>{setup.allowedFormats.join(", ") || "—"}</dd></div>
         <div><dt>Boyut</dt><dd>≤ {setup.maxFileSizeMb || 0} MB</dd></div>
         <div><dt>Dosya</dt><dd>≤ {setup.maxFileCount || 0}</dd></div>
         <div><dt>İhlal</dt><dd>{ACTION_LABELS[setup.defaultViolationAction]}</dd></div>
@@ -105,7 +126,15 @@ export default function TemplatePreview({
             </div>
           ) : null}
         </div>
-      ) : null}
+      ) : (
+        <div className="template-structure pending">
+          <span className="preview-label">Değerlendirme yapısı</span>
+          <p>
+            Kriterler, puan grupları ve baraj/ceza kuralları kaynak belge analiz edildikten
+            sonra burada listelenir.
+          </p>
+        </div>
+      )}
 
       <div className="preview-note">
         <span>i</span>

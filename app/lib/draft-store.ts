@@ -14,7 +14,9 @@ export type DraftSnapshot = {
   result: AnalysisResult | null;
   criteria: Criterion[];
   profile: ProfileExport | null;
-  /** Değerlendirmeye dahil edilen puan grupları; eski taslaklarda bulunmaz (tümü dahil sayılır). */
+  /** Değerlendirmeye dahil edilen puan gruplarının kimlikleri; eski taslaklarda bulunmaz. */
+  includedGroupIds?: string[];
+  /** @deprecated İsim tabanlı kapsam; eski taslakları okuyup kimliğe göç ettirmek için. */
   includedGroups?: string[];
 };
 

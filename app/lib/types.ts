@@ -29,6 +29,12 @@ export type CriterionOrigin = "document" | "manager";
 export type CriterionEffect = "gate" | "score" | "penalty" | "threshold" | "advisory";
 
 export type ScoreGroup = {
+  /**
+   * Benzersiz ve kararlı kimlik. Kapsam kararları, kriter bağlama ve toplama
+   * işlemleri YALNIZCA bu alan üzerinden yapılır; `name` sadece gösterimdir.
+   * Eski analizlerde bulunmayabilir (o profillerde isme düşülür).
+   */
+  id?: string;
   name: string;
   scope: string;
   maxScore: number;
@@ -64,6 +70,11 @@ export type Criterion = {
   effect?: CriterionEffect;
   /** Kuralın ait olduğu rapor, video, teknik kontrol veya görev aşaması. */
   scope?: string;
+  /**
+   * Kriterin bağlı olduğu puan grubunun kimliği (ScoreGroup.id).
+   * Hiçbir puan grubuna bağlı değilse null. Kapsam daraltma bu alanı kullanır.
+   */
+  groupId?: string | null;
   issue?: string;
 };
 
@@ -75,6 +86,16 @@ export type AnalysisDiagnostics = {
   promptTokens: number;
   outputTokens: number;
   cached: boolean;
+  /** Belgenin Files API'ye yüklenmesi için geçen süre; satır içi gönderimde 0. */
+  uploadMs?: number;
+  /** Bu analizde modele yapılan üretim çağrısı sayısı (yükleme hariç). */
+  apiCalls?: number;
+  /** PDF baytlarının ağ üzerinden kaç kez taşındığı. Files API ile 1, satır içi gönderimde çağrı sayısı kadar. */
+  documentTransfers?: number;
+  /** Belge referansla mı gönderildi (Files API) yoksa satır içi mi? */
+  documentDelivery?: "file_uri" | "inline";
+  /** Denetim turunun fiilen kullandığı model; yedeğe düşüldüyse birincilden farklıdır. */
+  auditModel?: string;
 };
 
 export type AnalysisResult = {
@@ -110,13 +131,18 @@ export type ProfileExport = {
     /** Belgede ilan edilen genel toplam (ör. saha görevleri dahil 315). */
     declaredTotal: number | null;
     /**
-     * Bu profilde fiilen değerlendirilecek toplam. Şartname birden çok aşamayı
-     * (rapor, parkur, teknik kontrol) tek belgede topluyorsa yönetici yalnızca
-     * ilgili puan gruplarını kapsama alır; 100'e normalizasyon bu toplamla yapılır.
+     * MAKSİMUM HAM PUAN — 100'e normalizasyonun paydası.
+     * Kapsamdaki aktif puan kriterlerinin azami puanlarının toplamıdır; grup
+     * toplamından değil kriterlerden hesaplanır ki pay ile payda aynı kümeden
+     * gelsin ve normalize puan 100'ü aşamasın.
      */
     evaluationTotal?: number | null;
-    /** Kapsama alınan puan gruplarının adları. Boşsa tüm gruplar dahildir. */
+    /** Kapsama alınan puan gruplarının kimlikleri (ScoreGroup.id). */
+    includedGroupIds?: string[];
+    /** @deprecated İsim tabanlı kapsam; yalnızca eski profillerin okunabilmesi için tutulur. */
     includedGroups?: string[];
+    /** Belgedeki grup toplamı ile kriter toplamı çelişiyorsa görevliye gösterilecek uyarı. */
+    scopeAnomaly?: string | null;
     normalizedTo: 100;
     formula: string;
   };
@@ -215,8 +241,9 @@ export type ReportEvaluation = {
   /** Profildeki her aktif kriter için tam olarak bir bulgu bulunur. */
   findings: CriterionFinding[];
   proposedTotals: {
-    /** Puan önerilerinin toplamı; hiç öneri yoksa null. */
+    /** Puan önerilerinin toplamı (HAM PUAN); hiç öneri yoksa null. */
     rawScore: number | null;
+    /** MAKSİMUM HAM PUAN: normalizasyonun paydası. */
     declaredTotal: number | null;
     scoredCriteria: number;
     pendingCriteria: number;

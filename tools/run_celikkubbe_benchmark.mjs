@@ -1,3 +1,15 @@
+// BİR KERELİK DOĞRULUK BENCHMARKI — normal kullanıcı akışında çalışmaz.
+//
+// Resmî Çelikkubbe şartnamesinden elle çıkarılmış yer gerçeğini (docs/benchmarks/
+// celikkubbe-expected.json) analiz motorunun çıktısıyla karşılaştırır: puan
+// grupları ve puanları, ilan edilen toplam, barajlar, cezalar, geçiş/eleme
+// koşulları ve görevli kararı gerektiren maddeler. Amaç değerlendirme
+// mantığının gerçekten kaynaktan geldiğini doğrulamaktır.
+//
+// Kullanım (sunucu çalışırken):
+//   node tools/run_celikkubbe_benchmark.mjs [http://127.0.0.1:3000/api/analyze]
+//   node tools/run_celikkubbe_benchmark.mjs --reuse   (son çıktıyı yeniden ölçer)
+
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -58,10 +70,24 @@ const criterionCorpus = (analysis.criteria || []).map((criterion) => [
   criterion.violationOutcome
 ].join(" ")).join("\n");
 const corpus = `${criterionCorpus}\n${JSON.stringify(analysis.scorePlan || {})}`;
-const findingMatches = expected.requiredFindings.map((item) => ({
-  expected: item.name,
-  matched: includesAll(corpus, item.keywords)
-}));
+/** Tam / kısmi / eksik ayrımı: anahtar kelimelerin kaçının tuttuğuna bakılır. */
+const classify = (text, keywords) => {
+  const hits = keywords.filter((keyword) => lower(text).includes(lower(keyword))).length;
+  if (hits === keywords.length) return { verdict: "tam", hits };
+  if (hits > 0) return { verdict: "kismi", hits };
+  return { verdict: "eksik", hits };
+};
+
+const findingMatches = expected.requiredFindings.map((item) => {
+  const { verdict, hits } = classify(corpus, item.keywords);
+  return {
+    expected: item.name,
+    category: item.category || "gate",
+    verdict,
+    keywordHits: `${hits}/${item.keywords.length}`,
+    matched: verdict === "tam"
+  };
+});
 const humanReviewMatches = expected.humanReviewFindings.map((item) => {
   const match = (analysis.criteria || []).find((criterion) => includesAll([
     criterion.name,
@@ -78,9 +104,77 @@ const humanReviewMatches = expected.humanReviewFindings.map((item) => {
   };
 });
 
+const CATEGORY_LABELS = {
+  gate: "Geçiş / uygunluk koşulu",
+  threshold: "Baraj",
+  penalty: "Ceza",
+  elimination: "Eleme / diskalifiye",
+  score: "Puan kuralı"
+};
+
+// Kategori bazlı kapsam: puan, baraj, ceza ve geçiş ayrı ayrı ölçülür.
+const byCategory = {};
+for (const item of findingMatches) {
+  byCategory[item.category] ??= {
+    label: CATEGORY_LABELS[item.category] || item.category,
+    total: 0, matched: 0, partial: 0, missing: []
+  };
+  const bucket = byCategory[item.category];
+  bucket.total += 1;
+  if (item.verdict === "tam") bucket.matched += 1;
+  else if (item.verdict === "kismi") { bucket.partial += 1; bucket.missing.push(`${item.expected} (kısmi ${item.keywordHits})`); }
+  else bucket.missing.push(item.expected);
+}
+for (const bucket of Object.values(byCategory)) {
+  bucket.recall = bucket.total ? bucket.matched / bucket.total : 1;
+}
+
+// Puan matematiği: grupların toplamı belgede ilan edilen toplamla tutmalı.
+const expectedGroupSum = expected.scoreGroups.reduce((sum, item) => sum + item.maxScore, 0);
+const actualGroupSum = actualGroups.reduce((sum, group) => sum + (group.maxScore || 0), 0);
+const scoreMath = {
+  expectedGroupSum,
+  expectedDeclaredTotal: expected.declaredTotalScore,
+  expectedConsistent: expectedGroupSum === expected.declaredTotalScore,
+  actualGroupSum,
+  actualDeclaredTotal: analysis.scorePlan?.declaredTotalScore ?? null,
+  actualConsistent: actualGroupSum === (analysis.scorePlan?.declaredTotalScore ?? null),
+  // 100'lük gösterim yalnızca payda doğruysa anlamlıdır.
+  normalizationDenominator: analysis.scorePlan?.declaredTotalScore ?? null
+};
+
+// Dayanaksız kriter: modelin kaynak alıntı veremediği veya belge dışı sayfaya
+// işaret ettiği maddeler. Resmî belgede karşılığı doğrulanamaz.
+const pageCount = analysis.pageCount || 0;
+const unsupported = (analysis.criteria || []).filter((criterion) => (
+  criterion.origin === "document" && (
+    !criterion.sourceText
+    || /döndürülmedi/i.test(criterion.sourceText)
+    || (pageCount > 0 && criterion.sourcePage !== null && criterion.sourcePage > pageCount)
+  )
+)).map((criterion) => ({ name: criterion.name, sourcePage: criterion.sourcePage }));
+
+// Bağımsız denetim turunun işaretlediği, görevli onayı bekleyen pasif maddeler.
+const auditFlagged = (analysis.criteria || [])
+  .filter((criterion) => criterion.issue && /denetim turunda bulundu/i.test(criterion.issue))
+  .map((criterion) => criterion.name);
+
+// Beklenti dosyasında "olmamalı" diye işaretlenmiş ifadeler (varsa).
+const forbiddenHits = (expected.forbiddenFindings || [])
+  .filter((item) => includesAll(corpus, item.keywords))
+  .map((item) => item.name);
+
+const scoreGroupRecall = groupMatches.filter((item) => item.matched).length / groupMatches.length;
+const partialCount = findingMatches.filter((item) => item.verdict === "kismi").length;
+const missingCount = findingMatches.filter((item) => item.verdict === "eksik").length;
+const requiredFindingRecall = findingMatches.filter((item) => item.matched).length / findingMatches.length;
+const humanReviewAccuracy = humanReviewMatches.filter((item) => item.matched).length / humanReviewMatches.length;
+
 const result = {
   generatedAt: new Date().toISOString(),
   model: analysis.model,
+  // Süre ve token: performans çalışmasının öncesi/sonrası karşılaştırması için.
+  diagnostics: analysis.diagnostics ?? null,
   expected: {
     declaredTotalScore: expected.declaredTotalScore,
     scoreGroupCount: expected.scoreGroups.length,
@@ -96,15 +190,58 @@ const result = {
   },
   comparison: {
     totalScoreMatched: analysis.scorePlan?.declaredTotalScore === expected.declaredTotalScore,
+    scoreMath,
     scoreGroups: groupMatches,
+    byCategory,
     requiredFindings: findingMatches,
     humanReviewFindings: humanReviewMatches,
-    scoreGroupRecall: groupMatches.filter((item) => item.matched).length / groupMatches.length,
-    requiredFindingRecall: findingMatches.filter((item) => item.matched).length / findingMatches.length,
-    humanReviewAccuracy: humanReviewMatches.filter((item) => item.matched).length / humanReviewMatches.length
+    scoreGroupRecall,
+    requiredFindingRecall,
+    humanReviewAccuracy,
+    coverage: {
+      tamEslesme: findingMatches.filter((item) => item.verdict === "tam").length,
+      kismiEslesme: partialCount,
+      eksik: missingCount,
+      dayanaksizKriter: unsupported,
+      denetimIsaretli: auditFlagged,
+      yasakliIfade: forbiddenHits
+    }
   },
   analysis
 };
 
 await writeFile(outputPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
-console.log(JSON.stringify({ outputPath, ...result.actual, ...result.comparison }, null, 2));
+
+const pct = (value) => `${Math.round(value * 1000) / 10}%`;
+const lines = [
+  `Model            : ${analysis.model || "-"}`,
+  `Süre             : ${analysis.diagnostics ? `${analysis.diagnostics.totalMs} ms (birincil ${analysis.diagnostics.modelMs} ms, denetim ${analysis.diagnostics.auditMs} ms, yükleme ${analysis.diagnostics.uploadMs ?? 0} ms${analysis.diagnostics.cached ? ", ÖNBELLEKTEN" : ""})` : "-"}`,
+  `Token            : ${analysis.diagnostics ? `${analysis.diagnostics.promptTokens} giriş + ${analysis.diagnostics.outputTokens} çıkış` : "-"}`,
+  `API çağrısı      : ${analysis.diagnostics?.apiCalls ?? "-"} · belge taşıma ${analysis.diagnostics?.documentTransfers ?? "-"} (${analysis.diagnostics?.documentDelivery ?? "-"})`,
+  `Denetim modeli   : ${analysis.diagnostics?.auditModel ?? "-"}`,
+  `Toplam puan      : beklenen ${expected.declaredTotalScore} · bulunan ${scoreMath.actualDeclaredTotal} ${result.comparison.totalScoreMatched ? "✓" : "✗"}`,
+  `Puan matematiği  : gruplar ${actualGroupSum} / ilan ${scoreMath.actualDeclaredTotal} ${scoreMath.actualConsistent ? "✓ tutarlı" : "✗ TUTARSIZ"}`,
+  `Puan grupları    : ${pct(scoreGroupRecall)}`,
+  `Görevli kararı   : ${pct(humanReviewAccuracy)}`,
+  `Kural kapsamı    : ${pct(requiredFindingRecall)} · tam ${findingMatches.length - partialCount - missingCount} / kısmi ${partialCount} / eksik ${missingCount}`,
+  `Dayanaksız kriter: ${unsupported.length}${unsupported.length ? ` → ${unsupported.slice(0, 5).map((item) => item.name).join(", ")}` : ""}`,
+  `Denetim işaretli : ${auditFlagged.length} (pasif, görevli onayı bekliyor)`,
+  `Yasaklı ifade    : ${forbiddenHits.length ? forbiddenHits.join(", ") : "yok"}`
+];
+for (const bucket of Object.values(byCategory)) {
+  lines.push(`  ${bucket.label.padEnd(24)} tam ${bucket.matched}/${bucket.total}${bucket.partial ? ` · kısmi ${bucket.partial}` : ""}${bucket.missing.length ? ` · ${bucket.missing.join(", ")}` : ""}`);
+}
+lines.push(`Çıktı            : ${outputPath}`);
+console.log(lines.join("\n"));
+
+// Kritik ölçütlerden biri düşerse çıkış kodu 1: CI veya elle çalıştırmada fark edilir.
+const passed = result.comparison.totalScoreMatched
+  && scoreMath.actualConsistent
+  && scoreGroupRecall === 1
+  && humanReviewAccuracy === 1
+  && requiredFindingRecall >= 0.9
+  && forbiddenHits.length === 0;
+if (!passed) {
+  console.error("\nBENCHMARK DÜŞTÜ: yukarıdaki eksik ölçütleri inceleyin.");
+  process.exitCode = 1;
+}

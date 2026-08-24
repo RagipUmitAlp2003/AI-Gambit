@@ -1,0 +1,36 @@
+{
+  "_not": "Gerçek API ölçümü. Sonraki önbellekli doğrulama koşusu celikkubbe-latest.json dosyasının teşhis alanlarını ezdiği için ölçüm buraya ayrıca kaydedildi. Kaynak: benchmark konsol çıktısı + sunucu [usage] logu.",
+  "olculduAt": "2026-08-24",
+  "endpoint": "http://localhost:3000/api/analyze",
+  "belge": "2026_Celikkubbe_Hava_Savunma_Teknik_Sartnamesi.pdf (25 sayfa)",
+  "mimari": "paralel birincil + bagimsiz denetim, Files API tek yukleme",
+  "diagnostics": {
+    "totalMs": 151659,
+    "modelMs": 149692,
+    "auditMs": 134687,
+    "uploadMs": 1948,
+    "promptTokens": 22393,
+    "outputTokens": 20365,
+    "totalTokens": 42758,
+    "apiCalls": 2,
+    "documentTransfers": 1,
+    "documentDelivery": "file_uri",
+    "model": "gemini-3.5-flash",
+    "auditModel": "gemini-3.5-flash",
+    "cached": false
+  },
+  "bulgu": "GEMINI_MODEL=gemini-3.7-flash hic yanit dondurmuyor (8 token'lik istekte bile 300 sn+ header timeout). Her iki cagri da 80 sn / 120 sn zaman asimini bekleyip yedek modele dustu. Olculen surenin buyuk bolumu bu olu bekleme.",
+  "dogruluk": {
+    "toplamPuan": "500/500 dogru",
+    "puanMatematigi": "gruplar 500 = ilan 500, tutarli",
+    "puanGruplariRecall": 1.0,
+    "kuralKapsamiRecall": 1.0,
+    "tamEslesme": 13,
+    "kismiEslesme": 0,
+    "eksik": 0,
+    "gorevliKarariDogrulugu": 0.667,
+    "dayanaksizKriter": 0,
+    "denetimIsaretliPasif": 8,
+    "yasakliIfade": 0
+  }
+}

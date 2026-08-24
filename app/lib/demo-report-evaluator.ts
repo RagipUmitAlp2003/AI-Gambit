@@ -1,4 +1,4 @@
-import { criterionEffectOf, criterionEliminates } from "./evaluation-summary";
+import { criterionEffectOf, criterionEliminates, maxRawScoreOf } from "./evaluation-summary";
 import {
   buildFileGateChecks,
   buildHeadingsCheck,
@@ -182,10 +182,21 @@ export function evaluateReportOffline(input: {
 
   const scoreCriteria = activeCriteria.filter((item) => criterionEffectOf(item) === "score");
   const proposals = findings.filter((finding) => finding.proposedScore !== null);
-  // Kapsam daraltıldıysa payda, belgedeki genel toplam değil değerlendirme toplamıdır.
-  const declaredTotal = profile.normalization?.evaluationTotal
-    ?? profile.scorePlan?.declaredTotalScore
-    ?? null;
+  /**
+   * MAKSİMUM HAM PUAN: profildeki AKTİF puan kriterlerinin azami toplamı.
+   * Belgede ilan edilen genel toplama düşülmez — pay bu kriterlerden geldiği
+   * için payda da aynı kümeden gelmelidir, aksi hâlde normalize puan 100'ü
+   * aşabilir. Eski profillerde normalization yoksa buradan hesaplanır.
+   */
+  const maxRawScore = profile.normalization?.evaluationTotal ?? maxRawScoreOf(profile.criteria);
+  const declaredTotal = maxRawScore > 0 ? maxRawScore : null;
+  // Her öneri kendi kriterinin azamisiyle sınırlanır; toplam yapısal olarak taşamaz.
+  const rawScore = proposals.length
+    ? proposals.reduce((sum, finding) => {
+      const proposed = Math.max(0, finding.proposedScore ?? 0);
+      return sum + (finding.maxScore !== null ? Math.min(proposed, finding.maxScore) : proposed);
+    }, 0)
+    : null;
 
   return {
     version: "1.0",
@@ -200,9 +211,7 @@ export function evaluateReportOffline(input: {
     preChecks,
     findings,
     proposedTotals: {
-      rawScore: proposals.length
-        ? proposals.reduce((sum, finding) => sum + (finding.proposedScore ?? 0), 0)
-        : null,
+      rawScore,
       declaredTotal,
       scoredCriteria: proposals.length,
       pendingCriteria: Math.max(0, scoreCriteria.length - proposals.length),
