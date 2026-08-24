@@ -383,7 +383,7 @@ function PoolView({ profile, profileError, onProfileFile, records, uploadError, 
       <DocumentLibraryModal
         open={libraryOpen}
         usage="rapor"
-        selectedFileName={null}
+        selectedFile={null}
         onClose={() => setLibraryOpen(false)}
         onSelect={(file) => { accept(file); }}
       />
@@ -550,8 +550,8 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
     return sum + decision.finalScore;
   }, 0);
   const declaredTotal = evaluation.proposedTotals.declaredTotal;
-  // Ham puan, maksimum ham puan ve normalize puan ayrı tutulur; aralık dışı
-  // bir sonuç sessizce kırpılmaz, anomali olarak görünür kılınır.
+  // Yardımcı hesap yalnızca resmî aralık dışı sonucu anomali olarak yakalamak
+  // için kullanılır; kullanıcıya otomatik 100'lük puan gösterilmez.
   const normalized = normalizeScoreDetailed(finalTotal, declaredTotal ?? 0);
   const flaggedChecks = evaluation.preChecks.filter((check) => check.status === "flagged" || check.status === "failed");
   // Geçiş / baraj / ceza / eleme maddelerinin bu rapordaki durumu: bulgu + görevli kararı.
@@ -653,12 +653,8 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
           <span>AI puan önerisi</span>
         </div>
         <div>
-          <strong>{finalTotal}</strong>
-          <span>ham puan{declaredTotal ? ` / ${declaredTotal}` : ""}</span>
-        </div>
-        <div className={normalized.anomaly ? "summary-warning" : ""}>
-          <strong>{declaredTotal ? normalized.value : "—"}</strong>
-          <span>100 üzerinden</span>
+          <strong>{finalTotal}{declaredTotal ? ` / ${declaredTotal}` : ""}</strong>
+          <span>hakem toplamı · resmî ölçek</span>
         </div>
       </div>
 
@@ -968,8 +964,8 @@ function ParticipantView({ records, selectedId, onSelect }: {
     if (!finding || finding.maxScore === null || decision.finalScore === null) return sum;
     return sum + decision.finalScore;
   }, 0);
-  // Ham puan, maksimum ham puan ve normalize puan ayrı tutulur; aralık dışı
-  // bir sonuç sessizce kırpılmaz, anomali olarak görünür kılınır.
+  // Yardımcı hesap yalnızca resmî aralık dışı sonucu anomali olarak yakalamak
+  // için kullanılır; sonuç PDF'deki puan ölçeğiyle gösterilir.
   const normalized = normalizeScoreDetailed(finalTotal, declaredTotal ?? 0);
   const feedback: ParticipantFeedback | null = review.feedbackApproved
     ? normalizeFeedback(review.finalFeedback)
@@ -1005,16 +1001,12 @@ function ParticipantView({ records, selectedId, onSelect }: {
         </div>
         <div className="profile-metrics">
           <div>
-            <strong>{finalTotal}</strong>
-            <span>ham puan</span>
+            <strong>{finalTotal}{declaredTotal ? ` / ${declaredTotal}` : ""}</strong>
+            <span>toplam puan · resmî ölçek</span>
           </div>
           <div>
             <strong>{declaredTotal ?? "—"}</strong>
-            <span>maksimum ham puan</span>
-          </div>
-          <div className={normalized.anomaly ? "summary-warning" : ""}>
-            <strong>{declaredTotal ? normalized.value : "—"}</strong>
-            <span>100 üzerinden</span>
+            <span>resmî azami puan</span>
           </div>
         </div>
         {normalized.anomaly ? (

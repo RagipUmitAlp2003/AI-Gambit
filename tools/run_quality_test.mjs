@@ -3,6 +3,8 @@
 //   node tools/run_quality_test.mjs [http://localhost:3000/api/analyze]
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { requireQuality } from "./quality-assertions.mjs";
+import { idaExpectation, syntheticExpectation } from "./quality-expectations.mjs";
 
 const root = process.cwd();
 const endpoint = process.argv.find((argument) => argument.startsWith("http")) || "http://localhost:3000/api/analyze";
@@ -23,6 +25,7 @@ const jobs = [
       maxFileCount: 1,
       defaultViolationAction: "block",
     },
+    expected: syntheticExpectation,
   },
   {
     pdf: path.join(root, "output", "pdf", "official", "2026_Insansiz_Deniz_Araci_Sartnamesi.pdf"),
@@ -39,6 +42,7 @@ const jobs = [
       maxFileCount: 1,
       defaultViolationAction: "jury",
     },
+    expected: idaExpectation,
   },
 ];
 
@@ -52,6 +56,7 @@ for (const job of jobs) {
   const response = await fetch(endpoint, { method: "POST", body: form });
   const analysis = await response.json();
   if (!response.ok) throw new Error(`${path.basename(job.out)}: ${analysis.error || response.status}`);
+  requireQuality(analysis, job.expected, path.basename(job.out));
   await writeFile(job.out, `${JSON.stringify(analysis, null, 2)}\n`, "utf8");
   console.log(JSON.stringify({
     out: path.basename(job.out),

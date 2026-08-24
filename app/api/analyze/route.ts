@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { acquireAnalysisPermit, requestBodyTooLarge } from "../../lib/request-guard";
 import { recordUsage } from "../../lib/usage-metrics";
 import type {
   AnalysisDiagnostics,
@@ -16,8 +17,11 @@ const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
 const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash";
 
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
-const PROMPT_VERSION = "v3";
+const PROMPT_VERSION = "v5";
 const CACHE_LIMIT = 12;
+const MAX_PDF_BYTES = 18 * 1024 * 1024;
+// Multipart sınırına dosya dışında profil JSON'u ve başlıklar için küçük pay eklenir.
+const MAX_MULTIPART_BYTES = MAX_PDF_BYTES + 512 * 1024;
 
 /**
  * İkinci "eksik kural denetimi" turu, uzun belgelerde kapsamı artırır ancak
@@ -178,6 +182,11 @@ DEĞİŞMEZ KURALLAR:
 21. Karar kurallarını eksiksiz ve doğru sınıfla: bir sonraki aşamaya geçiş koşulları ve uygunluk şartları effect=gate; minimum toplam puan ile kriter/kategori barajları effect=threshold; sayısal puan kesintileri effect=penalty; doğrudan eleme veya diskalifiye maddeleri type=elimination_review olmalıdır.
 22. aiInterpretation alanında koşul-sonuç ilişkisini tek net cümleyle yaz: neye bakılacak, puan nasıl verilecek, hangi durumda ceza uygulanacak, hangi durumda başarısız sayılacak. "Uygun görünüyor", "değerlendirilebilir" gibi yoruma açık ifadeler kullanma.
 23. Çıktıyı kısa tut: sourceText alıntısı 300 karakteri aşmasın, breakdown satırları tek satır olsun, informationalNotes ve skippedChecks için en fazla 6 kısa madde döndür. Aynı bilgiyi iki alanda tekrar etme.
+24. Bir koşulun "0 puan" getirmesi eleme değildir. Belgede ayrıca açıkça eleme/diskalifiye yazmıyorsa effect=score veya penalty kullan; type=elimination_review kullanma.
+25. Aynı sayısal eşik tablo, dipnot ve açıklamada tekrarlanıyorsa tek kriterde birleştir. Ancak farklı aşama, teslim veya ölçüm bağlamındaki eşikleri ayrı tut.
+26. Video süresi, çözünürlük, dosya biçimi gibi metadata kuralları teknik olarak ölçülebilir olsa da belgeden veya yükleme sisteminden güvenilir doğrulama gerektiriyorsa deterministic ya da hybrid seç; hakem kararı gerekiyorsa human/hybrid seç.
+27. Ceza tablosundaki her bağımsız sayısal kesinti kuralını çıkar. Ceza miktarı hakem takdirine bırakılmışsa uydurma puan yazma ve evaluationMethod=human kullan.
+28. Her fiziksel güvenlik şartını, bağımsız doğrulanabilen bir yükümlülükse ayrı kriter yap. Bunları tek genel "güvenlik" kriterinde eritme.
 `;
 
 type RawCriterion = {
@@ -231,6 +240,55 @@ function nullableNumber(value: unknown) {
 
 function safeEnum<T extends string>(value: unknown, allowed: T[], fallback: T): T {
   return typeof value === "string" && allowed.includes(value as T) ? value as T : fallback;
+}
+
+function requiredText(value: unknown, fieldName: string, maxLength = 160) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${fieldName} alanı zorunludur.`);
+  }
+  return value.trim().slice(0, maxLength);
+}
+
+function parseSetup(value: string): SetupData {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(value);
+  } catch {
+    throw new Error("Profil ayarları geçerli JSON biçiminde değil.");
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Profil ayarları geçersiz.");
+  }
+  const item = raw as Record<string, unknown>;
+  const allowedFormats = Array.isArray(item.allowedFormats)
+    ? item.allowedFormats
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean)
+      .slice(0, 12)
+    : [];
+  const maxFileSizeMb = Number(item.maxFileSizeMb);
+  const maxFileCount = Number(item.maxFileCount);
+  return {
+    competition: requiredText(item.competition, "Yarışma"),
+    category: requiredText(item.category, "Kategori"),
+    stage: requiredText(item.stage, "Aşama"),
+    reportType: requiredText(item.reportType, "Rapor türü"),
+    year: requiredText(item.year, "Yıl", 16),
+    allowedFormats: allowedFormats.length ? allowedFormats : ["pdf"],
+    maxFileSizeMb: Number.isFinite(maxFileSizeMb) && maxFileSizeMb > 0
+      ? Math.min(maxFileSizeMb, 1024)
+      : 18,
+    maxFileCount: Number.isInteger(maxFileCount) && maxFileCount > 0
+      ? Math.min(maxFileCount, 100)
+      : 1,
+    defaultViolationAction: safeEnum(item.defaultViolationAction, ["block", "warn", "jury"], "jury"),
+  };
+}
+
+function looksLikePdf(bytes: ArrayBuffer) {
+  if (bytes.byteLength < 5) return false;
+  return Buffer.from(bytes, 0, Math.min(bytes.byteLength, 1024)).includes(Buffer.from("%PDF-"));
 }
 
 function normalizeCriterion(raw: RawCriterion, index: number, pageCount: number, groups: ScorePlan["groups"]): Criterion {
@@ -472,7 +530,24 @@ function delay(milliseconds: number) {
  * Yükleme başarısız olursa null döner ve çağıran satır içi (inlineData)
  * gönderime düşer: yeni bir kırılma noktası eklenmez.
  */
-async function uploadPdfOnce(apiKey: string, bytes: ArrayBuffer, displayName: string): Promise<string | null> {
+async function deleteGeminiFile(apiKey: string, name: string) {
+  try {
+    await fetch(`https://generativelanguage.googleapis.com/v1beta/${name}`, {
+      method: "DELETE",
+      headers: { "x-goog-api-key": apiKey },
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    // Geçici dosya temizliği ana analiz sonucunu etkilememelidir.
+  }
+}
+
+async function uploadPdfOnce(
+  apiKey: string,
+  bytes: ArrayBuffer,
+  displayName: string,
+): Promise<{ uri: string; name: string } | null> {
+  let uploadedName = "";
   try {
     const response = await fetch(
       "https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=media",
@@ -491,6 +566,7 @@ async function uploadPdfOnce(apiKey: string, bytes: ArrayBuffer, displayName: st
     const payload = await response.json() as { file?: { uri?: string; name?: string; state?: string } };
     const file = payload.file;
     if (!file?.uri || !file.name) return null;
+    uploadedName = file.name;
 
     // PDF'ler genelde anında ACTIVE olur; değilse kısa süre beklenir.
     let state = file.state ?? "ACTIVE";
@@ -500,11 +576,17 @@ async function uploadPdfOnce(apiKey: string, bytes: ArrayBuffer, displayName: st
         headers: { "x-goog-api-key": apiKey },
         signal: AbortSignal.timeout(15_000),
       });
-      if (!check.ok) return null;
+      if (!check.ok) {
+        await deleteGeminiFile(apiKey, uploadedName);
+        return null;
+      }
       state = ((await check.json()) as { state?: string }).state ?? "ACTIVE";
     }
-    return state === "ACTIVE" ? file.uri : null;
+    if (state === "ACTIVE") return { uri: file.uri, name: file.name };
+    await deleteGeminiFile(apiKey, uploadedName);
+    return null;
   } catch {
+    if (uploadedName) await deleteGeminiFile(apiKey, uploadedName);
     return null;
   }
 }
@@ -624,11 +706,27 @@ function buildResult(extraction: CachedExtraction, setup: SetupData, diagnostics
 
 export async function POST(request: Request) {
   const startedAt = Date.now();
+  const permit = acquireAnalysisPermit(request);
+  if (!permit.ok) {
+    const message = permit.reason === "concurrency"
+      ? "Aynı anda çok fazla belge analiz ediliyor. Lütfen birkaç saniye sonra yeniden deneyin."
+      : "Analiz istek sınırına ulaşıldı. Lütfen daha sonra yeniden deneyin.";
+    return Response.json(
+      { error: message },
+      { status: 429, headers: { "Retry-After": String(permit.retryAfterSeconds) } },
+    );
+  }
+  let uploadedGeminiFileName = "";
+  let cleanupApiKey = "";
   try {
+    if (requestBodyTooLarge(request, MAX_MULTIPART_BYTES)) {
+      return Response.json({ error: "Gönderilen analiz isteği izin verilen boyutu aşıyor." }, { status: 413 });
+    }
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       return Response.json({ error: "AI servis anahtarı sunucu ortamında bulunamadı." }, { status: 503 });
     }
+    cleanupApiKey = apiKey;
 
     const formData = await request.formData();
     const file = formData.get("file");
@@ -639,17 +737,41 @@ export async function POST(request: Request) {
     if (file.type !== "application/pdf" && !file.name.toLocaleLowerCase("tr-TR").endsWith(".pdf")) {
       return Response.json({ error: "Yalnızca PDF değerlendirme belgesi analiz edilebilir." }, { status: 415 });
     }
-    if (file.size > 18 * 1024 * 1024) {
+    if (file.size > MAX_PDF_BYTES) {
       return Response.json({ error: "Bu sürümde doğrudan analiz sınırı 18 MB. Daha büyük kaynak belgeler için dosya akışı desteği etkinleştirilmelidir." }, { status: 413 });
     }
 
-    const setup = JSON.parse(setupJson) as SetupData;
-    const pageCount = Number(formData.get("pageCount")) || 1;
+    let setup: SetupData;
+    try {
+      setup = parseSetup(setupJson);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Profil ayarları geçersiz.";
+      return Response.json({ error: message }, { status: 400 });
+    }
+    const rawPageCount = Number(formData.get("pageCount"));
+    const pageCount = Number.isFinite(rawPageCount)
+      ? Math.min(500, Math.max(1, Math.round(rawPageCount)))
+      : 1;
     const pdfBytes = await file.arrayBuffer();
+    if (!looksLikePdf(pdfBytes)) {
+      return Response.json({ error: "Dosyanın içeriği geçerli bir PDF imzası taşımıyor." }, { status: 415 });
+    }
 
     // Aynı belge + aynı bağlam daha önce analiz edildiyse modeli hiç çağırma.
     const auditMode = COVERAGE_AUDIT_ENABLED ? `audit${COVERAGE_AUDIT_MIN_PAGES}` : "noaudit";
-    const cacheKey = `${PROMPT_VERSION}:${await documentHash(pdfBytes)}:${PRIMARY_MODEL}:${setup.stage}:${setup.reportType}:${auditMode}`;
+    const cacheContext = JSON.stringify({
+      promptVersion: PROMPT_VERSION,
+      document: await documentHash(pdfBytes),
+      models: [PRIMARY_MODEL, FALLBACK_MODEL],
+      auditMode,
+      competition: setup.competition,
+      category: setup.category,
+      stage: setup.stage,
+      reportType: setup.reportType,
+      year: setup.year,
+      pageCount,
+    });
+    const cacheKey = await documentHash(new TextEncoder().encode(cacheContext).buffer);
     const cachedExtraction = analysisCache().get(cacheKey);
     if (cachedExtraction) {
       const totalMs = Date.now() - startedAt;
@@ -661,7 +783,9 @@ export async function POST(request: Request) {
 
     // Belge bir kez yüklenir; başarısız olursa satır içi gönderime düşülür.
     const uploadStartedAt = Date.now();
-    const fileUri = await uploadPdfOnce(apiKey, pdfBytes, file.name);
+    const uploadedFile = await uploadPdfOnce(apiKey, pdfBytes, file.name);
+    const fileUri = uploadedFile?.uri ?? null;
+    uploadedGeminiFileName = uploadedFile?.name ?? "";
     const uploadMs = Date.now() - uploadStartedAt;
     const pdfData = fileUri ? "" : Buffer.from(pdfBytes).toString("base64");
     /** Aynı belge parçası her iki isteğe de referansla girer. */
@@ -702,7 +826,6 @@ Yanıtı oluşturmadan önce sessizce şu kapsam denetimini yap:
         ],
       }],
       generationConfig: {
-        temperature: 0,
         thinkingConfig: { thinkingLevel: "HIGH" },
         maxOutputTokens: 32768,
         responseMimeType: "application/json",
@@ -715,8 +838,12 @@ Yanıtı oluşturmadan önce sessizce şu kapsam denetimini yap:
     let modelUsed = attempts[0];
 
     const failWith = (status: number, detail: string) => {
+      console.error("AI analiz isteği başarısız:", { status, detail });
       recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true });
-      return Response.json({ error: detail }, { status });
+      const publicMessage = status === 504
+        ? "AI modeli zaman sınırı içinde yanıt vermedi. Lütfen yeniden deneyin."
+        : "AI belge analizi tamamlanamadı. Lütfen yeniden deneyin.";
+      return Response.json({ error: publicMessage }, { status });
     };
 
     type PrimaryOutcome =
@@ -802,7 +929,6 @@ Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri hu
           ],
         }],
         generationConfig: {
-          temperature: 0,
           thinkingConfig: { thinkingLevel: "LOW" },
           maxOutputTokens: 16384,
           responseMimeType: "application/json",
@@ -946,8 +1072,13 @@ Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri hu
       auditModel: auditModel || undefined,
     }));
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Beklenmeyen analiz hatası.";
+    console.error("Beklenmeyen analiz hatası:", error);
     recordUsage({ model: PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true });
-    return Response.json({ error: message }, { status: 500 });
+    return Response.json({ error: "Belge analizi sırasında beklenmeyen bir hata oluştu." }, { status: 500 });
+  } finally {
+    if (cleanupApiKey && uploadedGeminiFileName) {
+      await deleteGeminiFile(cleanupApiKey, uploadedGeminiFileName);
+    }
+    permit.release();
   }
 }

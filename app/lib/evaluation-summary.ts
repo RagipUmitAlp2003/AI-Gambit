@@ -62,7 +62,10 @@ export function normalizeScoreDetailed(rawScore: number, maxRawScore: number): N
   return { value: Math.round((rawScore / maxRawScore) * 1000) / 10, rawScore, maxRawScore, anomaly: null };
 }
 
-/** Yalnızca sayısal sonucu döndüren kısayol; ayrıntı için normalizeScoreDetailed. */
+/**
+ * Yalnızca açıkça istenen ikincil gösterimler ve aralık denetimi için kısayol.
+ * Uygulamanın ana puan gösterimi PDF'deki resmî ölçeği korur.
+ */
 export function normalizeScore(score: number, maxRawScore: number): number {
   return normalizeScoreDetailed(score, maxRawScore).value;
 }
@@ -127,10 +130,11 @@ export type DecisionRules = {
 
 /**
  * Eleme ifadeleri kelime başında aranır: aksi hâlde "inceleme"/"denemeye" içindeki
- * "eleme" ve "100 puan" içindeki "0 puan" yanlışlıkla eleme sayılır. Türkçe ekleri
- * tolere etmek için kökten sonrası serbest bırakılır.
+ * "eleme" yanlışlıkla yakalanabilir. "0 puan" ise tek başına eleme değildir;
+ * yalnızca belge açıkça yarışmadan çıkarılma sonucu verirse bu listeye girer.
+ * Türkçe ekleri tolere etmek için kökten sonrası serbest bırakılır.
  */
-const ELIMINATION_PATTERN = /(?:^|[^a-zçğıöşüâîû0-9])(?:diskalifiye|elen[a-zçğıöşü]*|eleme[a-zçğıöşü]*|yarışma dışı|değerlendirmeye alınma[a-zçğıöşü]*|geçersiz sayıl[a-zçğıöşü]*|sıfır puan|0 puan)/;
+const ELIMINATION_PATTERN = /(?:^|[^a-zçğıöşüâîû0-9])(?:diskalifiye[a-zçğıöşü]*|elen[a-zçğıöşü]*|eleme[a-zçğıöşü]*|yarışma dışı|değerlendirmeye alınma(?:z|y[a-zçğıöşü]*|m[a-zçğıöşü]*)|geçersiz sayıl[a-zçğıöşü]*)/;
 
 /**
  * Kriterin eleme/diskalifiye sonucu doğurup doğurmadığı. Bu maddelerde nihai

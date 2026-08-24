@@ -21,7 +21,6 @@ const endpoint = process.argv.find((argument) => argument.startsWith("http")) ||
 const reuseLatest = process.argv.includes("--reuse");
 
 const expected = JSON.parse(await readFile(expectedPath, "utf8"));
-const pdf = await readFile(pdfPath);
 const setup = {
   competition: "Çelikkubbe Hava Savunma Sistemleri Yarışması",
   category: "Üniversite Seviyesi",
@@ -39,6 +38,7 @@ if (reuseLatest) {
   const latest = JSON.parse(await readFile(outputPath, "utf8"));
   analysis = latest.analysis;
 } else {
+  const pdf = await readFile(pdfPath);
   const form = new FormData();
   form.append("file", new Blob([pdf], { type: "application/pdf" }), expected.document);
   form.append("setup", JSON.stringify(setup));
@@ -62,13 +62,15 @@ const groupMatches = expected.scoreGroups.map((item) => {
   };
 });
 
-const criterionCorpus = (analysis.criteria || []).map((criterion) => [
+const criteria = analysis.criteria || [];
+const criterionText = (criterion) => [
   criterion.name,
   criterion.scope,
   criterion.sourceText,
   criterion.aiInterpretation,
   criterion.violationOutcome
-].join(" ")).join("\n");
+].join(" ");
+const criterionCorpus = criteria.map(criterionText).join("\n");
 const corpus = `${criterionCorpus}\n${JSON.stringify(analysis.scorePlan || {})}`;
 /** Tam / kısmi / eksik ayrımı: anahtar kelimelerin kaçının tuttuğuna bakılır. */
 const classify = (text, keywords) => {
@@ -78,24 +80,43 @@ const classify = (text, keywords) => {
   return { verdict: "eksik", hits };
 };
 
+// Her beklenen bulgu tek bir gerçek kriterle eşleşir. Bütün kriterleri tek bir
+// metne birleştirmek, anahtar sözcüklerin farklı maddelerden toplanıp yanlış
+// bir "tam eşleşme" üretmesine yol açıyordu.
+const claimedCriteria = new Set();
 const findingMatches = expected.requiredFindings.map((item) => {
-  const { verdict, hits } = classify(corpus, item.keywords);
+  let bestIndex = -1;
+  let bestHits = 0;
+  for (let index = 0; index < criteria.length; index += 1) {
+    if (claimedCriteria.has(index)) continue;
+    const hits = classify(criterionText(criteria[index]), item.keywords).hits;
+    if (hits > bestHits) {
+      bestIndex = index;
+      bestHits = hits;
+    }
+  }
+  const match = bestIndex >= 0 ? criteria[bestIndex] : null;
+  const disallowedType = Boolean(match && (item.disallowedTypes || []).includes(match.type));
+  const verdict = bestHits === item.keywords.length && !disallowedType
+    ? "tam"
+    : bestHits > 0
+      ? "kismi"
+      : "eksik";
+  if (verdict === "tam") claimedCriteria.add(bestIndex);
   return {
     expected: item.name,
     category: item.category || "gate",
     verdict,
-    keywordHits: `${hits}/${item.keywords.length}`,
+    keywordHits: `${bestHits}/${item.keywords.length}`,
+    actual: match?.name || null,
+    actualType: match?.type || null,
+    actualEffect: match?.effect || null,
+    typeViolation: disallowedType,
     matched: verdict === "tam"
   };
 });
 const humanReviewMatches = expected.humanReviewFindings.map((item) => {
-  const match = (analysis.criteria || []).find((criterion) => includesAll([
-    criterion.name,
-    criterion.scope,
-    criterion.sourceText,
-    criterion.aiInterpretation,
-    criterion.violationOutcome
-  ].join(" "), item.keywords));
+  const match = criteria.find((criterion) => includesAll(criterionText(criterion), item.keywords));
   return {
     expected: item.name,
     actual: match?.name || null,
@@ -210,7 +231,9 @@ const result = {
   analysis
 };
 
-await writeFile(outputPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+if (!reuseLatest) {
+  await writeFile(outputPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+}
 
 const pct = (value) => `${Math.round(value * 1000) / 10}%`;
 const lines = [
@@ -239,7 +262,7 @@ const passed = result.comparison.totalScoreMatched
   && scoreMath.actualConsistent
   && scoreGroupRecall === 1
   && humanReviewAccuracy === 1
-  && requiredFindingRecall >= 0.9
+  && requiredFindingRecall === 1
   && forbiddenHits.length === 0;
 if (!passed) {
   console.error("\nBENCHMARK DÜŞTÜ: yukarıdaki eksik ölçütleri inceleyin.");

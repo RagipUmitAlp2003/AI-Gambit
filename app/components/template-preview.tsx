@@ -1,7 +1,7 @@
 "use client";
 
 import FileBadge from "./file-badge";
-import { criterionEffectOf, deriveDecisionRules, normalizeScore } from "../lib/evaluation-summary";
+import { criterionEffectOf, deriveDecisionRules } from "../lib/evaluation-summary";
 import type { AnalysisResult, Criterion, SetupData, ViolationAction } from "../lib/types";
 
 const ACTION_LABELS: Record<ViolationAction, string> = {
@@ -100,17 +100,16 @@ export default function TemplatePreview({
             <div><strong>{scoreGroups.length || scoreCriterionCount}</strong><span>puan grubu</span></div>
             <div>
               <strong>{declaredTotal ?? "—"}</strong>
-              <span>{declaredTotal ? "puan → 100" : "toplam puan"}</span>
+              <span>{declaredTotal ? "resmî toplam puan" : "toplam puan"}</span>
             </div>
           </div>
           {scoreGroups.length ? (
             <ul className="template-groups">
               {scoreGroups.slice(0, 4).map((group) => (
-                <li key={`${group.name}-${group.sourcePage}`}>
+                <li key={group.id ?? `${group.name}-${group.sourcePage}`}>
                   <span>{group.name}</span>
                   <strong>
                     {group.maxScore}p
-                    {declaredTotal ? <em> ≈ {normalizeScore(group.maxScore, declaredTotal)}/100</em> : null}
                   </strong>
                 </li>
               ))}

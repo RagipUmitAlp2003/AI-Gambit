@@ -14,7 +14,7 @@ bileşenleri). Bu belge ile tipler çelişirse tipler geçerlidir.
 dosyasındadır ve şu an geçerli istekler için `501` döndürür. Motor bu dosyada
 geliştirilecektir. Referans uygulama: `app/api/analyze/route.ts` (Gemini
 çağrısı, `responseJsonSchema` ile sınırlandırılmış çıktı, alan alan
-normalizasyon, `globalThis` önbelleği, `recordUsage()` gözlemi). Aynı kalıplar
+doğrulama, `globalThis` önbelleği, `recordUsage()` gözlemi). Aynı kalıplar
 birebir kopyalanmalıdır.
 
 ### İstek: `multipart/form-data`

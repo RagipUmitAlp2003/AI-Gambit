@@ -144,7 +144,10 @@
         "4 ardışık",
         "0 puan"
       ],
-      "category": "penalty"
+      "category": "penalty",
+      "disallowedTypes": [
+        "elimination_review"
+      ]
     }
   ],
   "humanReviewFindings": [

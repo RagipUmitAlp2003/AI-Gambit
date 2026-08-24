@@ -15,6 +15,8 @@ import {
 import { SAMPLE_DOCUMENTS, type SampleDocument } from "../lib/sample-documents";
 import type { SetupData } from "../lib/types";
 
+const MAX_ANALYSIS_BYTES = 18 * 1024 * 1024;
+
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -34,7 +36,7 @@ function isPdfLike(fileName: string, mimeType?: string) {
  */
 type LibraryModalProps = {
   usage: "kriter" | "rapor";
-  selectedFileName: string | null;
+  selectedFile: File | null;
   onClose: () => void;
   onSelect: (file: File) => void;
   /** Yalnızca Kriter Atölyesi'nde: hazır belge seçilince başlangıç ayarları da uygulanır. */
@@ -48,7 +50,7 @@ export default function DocumentLibraryModal({ open, ...props }: LibraryModalPro
 
 function LibraryDialog({
   usage,
-  selectedFileName,
+  selectedFile,
   onClose,
   onSelect,
   onSelectSample,
@@ -164,8 +166,17 @@ function LibraryDialog({
   }
 
   function pickDocument(item: LibraryDocument) {
-    onSelect(new File([item.file], item.fileName, { type: item.mimeType || "application/pdf" }));
+    onSelect(item.file);
     onClose();
+  }
+
+  function isSelectedDocument(item: LibraryDocument) {
+    return Boolean(
+      selectedFile
+      && selectedFile.name === item.fileName
+      && selectedFile.size === item.size
+      && selectedFile.lastModified === item.file.lastModified,
+    );
   }
 
   const totalVisible = visibleSamples.length + visibleDocuments.length;
@@ -216,7 +227,7 @@ function LibraryDialog({
                   onChange={(event) => {
                     const selected = event.target.files?.[0] ?? null;
                     setPendingFile(selected);
-                    setNotice(selected && selected.size > 18 * 1024 * 1024
+                    setNotice(selected && selected.size > MAX_ANALYSIS_BYTES
                       ? "18 MB üzerindeki belgeler analizde kullanılamaz; yalnızca havuzda saklanır."
                       : "");
                   }}
@@ -256,7 +267,7 @@ function LibraryDialog({
               </div>
               <div className="sample-document-list">
                 {visibleSamples.map((sample) => (
-                  <article key={sample.path} className={selectedFileName === sample.name ? "selected" : ""}>
+                  <article key={sample.path} className={selectedFile?.name === sample.name ? "selected" : ""}>
                     <FileBadge fileName={sample.name} mimeType="application/pdf" size="sm" />
                     <div className="sample-copy">
                       <span>{sample.source} · {sample.pages} sayfa</span>
@@ -268,10 +279,10 @@ function LibraryDialog({
                       <button
                         type="button"
                         className="secondary-button"
-                        disabled={selectedFileName === sample.name}
+                        disabled={selectedFile?.name === sample.name}
                         onClick={() => pickSample(sample)}
                       >
-                        {selectedFileName === sample.name ? "Seçildi" : "Bu belgeyi seç"}
+                        {selectedFile?.name === sample.name ? "Seçildi" : "Bu belgeyi seç"}
                       </button>
                     </div>
                   </article>
@@ -290,9 +301,11 @@ function LibraryDialog({
             ) : visibleDocuments.length ? (
               <div className="sample-document-list">
                 {visibleDocuments.map((item) => {
-                  const selectable = isPdfLike(item.fileName, item.mimeType);
+                  const selected = isSelectedDocument(item);
+                  const pdfLike = isPdfLike(item.fileName, item.mimeType);
+                  const selectable = pdfLike && item.size <= MAX_ANALYSIS_BYTES;
                   return (
-                    <article key={item.id} className={selectedFileName === item.fileName ? "selected" : ""}>
+                    <article key={item.id} className={selected ? "selected" : ""}>
                       <FileBadge fileName={item.fileName} mimeType={item.mimeType} size="sm" />
                       <div className="sample-copy">
                         <span>{DOCUMENT_TYPE_LABELS[item.docType]} · {formatBytes(item.size)}</span>
@@ -309,11 +322,11 @@ function LibraryDialog({
                         <button
                           type="button"
                           className="secondary-button"
-                          disabled={!selectable || selectedFileName === item.fileName}
-                          title={selectable ? undefined : "Analiz için yalnızca PDF belgeler seçilebilir."}
+                          disabled={!selectable || selected}
+                          title={!pdfLike ? "Analiz için yalnızca PDF belgeler seçilebilir." : item.size > MAX_ANALYSIS_BYTES ? "Analiz sınırı 18 MB'dir." : undefined}
                           onClick={() => pickDocument(item)}
                         >
-                          {selectedFileName === item.fileName ? "Seçildi" : selectable ? "Bu belgeyi seç" : "PDF değil"}
+                          {selected ? "Seçildi" : selectable ? "Bu belgeyi seç" : pdfLike ? "18 MB sınırı" : "PDF değil"}
                         </button>
                         {confirmingId === item.id ? (
                           <span className="delete-confirm">

@@ -10,11 +10,11 @@ TEKNOFEST benzeri yarışmalarda organizatörün yüklediği değerlendirme PDF'
 4. İlan edilen puan toplamı ve birbirini örtmeyen puan grupları ayrıca çıkarılır; grup toplamı ile PDF toplamı otomatik karşılaştırılır.
 5. Kriter adı, kapsam/aşama, etki türü, puanı, zorunluluğu, ihlal sonucu, değerlendirme yöntemi, kaynak sayfası, ilgili metin ve sistem önerisi yöneticiye gösterilir.
 6. Fiziksel güvenlik ve hakem uygunluğu maddelerinde sistem nihai karar vermez; bulgu üretir ve insan onayı ister.
-7. Yönetici kriterleri düzenleyebilir, pasifleştirebilir, yenisini ekleyebilir veya manuel eklediği kriteri onaylı bir silme akışıyla kaldırabilir. Geçiş koşulları, barajlar, cezalar ve eleme maddeleri "Karar kuralları" bölümünde ayrıca gösterilir. İlan edilen toplam puan varsa sonuçların 100 üzerinden gösterimi için normalizasyon formülü profile eklenir (orijinal puan sistemi korunur).
-8. Çok aşamalı şartnamelerde (rapor + saha görevleri aynı belgede) yönetici, hangi puan gruplarının bu profilde değerlendirileceğini seçer. Kapsam dışı bırakılan gruplar 100'e normalizasyonda paydaya girmez: örneğin İnsansız Deniz Aracı şartnamesi 315 puan ilan eder, ancak yalnızca "Rapor Puanlaması" kapsama alınırsa değerlendirme 15 puan üzerinden yapılır. Belgede ilan edilen genel toplam profilde ayrıca korunur.
+7. Yönetici kriterleri düzenleyebilir, pasifleştirebilir, yenisini ekleyebilir veya manuel eklediği kriteri onaylı bir silme akışıyla kaldırabilir. Geçiş koşulları, barajlar, cezalar ve eleme maddeleri "Karar kuralları" bölümünde ayrıca gösterilir. Sonuçlar, PDF'de ilan edilen resmî puan ölçeğiyle gösterilir; sistem kendiliğinden 100'lük ölçeğe dönüştürmez.
+8. Çok aşamalı şartnamelerde (rapor + saha görevleri aynı belgede) yönetici, hangi puan gruplarının bu profilde değerlendirileceğini seçer. Örneğin İnsansız Deniz Aracı şartnamesi 315 puan ilan eder, ancak yalnızca "Rapor Puanlaması" kapsama alınırsa değerlendirme resmî 15 puanlık grup üzerinden yapılır. Belgede ilan edilen genel toplam profilde ayrıca korunur.
 9. Yönetici kaynakları ve çakışmaları doğruladıktan sonra profil onaylanır ve JSON olarak indirilebilir. Ayrı aşamalara ait puanlar bulunan şartnamelerde toplamın 100 olması zorunlu tutulmaz.
 
-Seçilen PDF, analiz taslağı ve kriter düzenlemeleri tarayıcıda yerel olarak saklanır. Yönetici önceki adımlara dönebilir veya sayfayı yenileyebilir; yalnızca yeni bir belge seçmesi ya da “Taslağı sıfırla” işlemi mevcut analizi temizler.
+Seçilen PDF, analiz taslağı ve kriter düzenlemeleri bu prototipte yalnızca tarayıcıda yerel olarak saklanır. Yönetici önceki adımlara dönebilir veya sayfayı yenileyebilir; yalnızca yeni bir belge seçmesi ya da “Taslağı sıfırla” işlemi mevcut analizi temizler. Bu kayıtlar başka cihaz veya görevliyle paylaşılmaz; hesap/yetki modülü birleştirilirken kalıcı kayıtlar D1'e, PDF dosyaları R2'ye taşınmalıdır.
 
 ## Değerlendirme Atölyesi (`/degerlendirme`)
 
@@ -34,7 +34,7 @@ Yerel ortam değişkenleri `.env.example` örneğine göre tanımlanır. Bu prot
 
 Maliyet kontrolü: 12 sayfadan uzun belgelerde ikinci bir "eksik kural denetimi" turu çalışır ve kapsamı artırır, ancak token maliyetini ve süreyi yaklaşık iki katına çıkarır (İDA şartnamesinde 105 sn / 56 bin token). Bu tur `COVERAGE_AUDIT=off` ile kapatılabilir, `COVERAGE_AUDIT_MIN_PAGES` ile eşiği yükseltilebilir; ayar önbellek anahtarına dahildir.
 
-Aynı belge + aynı bağlam yeniden analiz edilirse sunucu içi önbellek (SHA-256 hash) sayesinde model tekrar çağrılmaz. Her analiz için süre ve token kullanımı `diagnostics` alanında döner; oturum toplamları (istek sayısı, giriş/çıkış token, ortalama süre, hata oranı) `GET /api/metrics` ucundan okunur. Resmî kota takibi Google AI Studio üzerinden yapılır. Kullanıcı arayüzünde model/sağlayıcı adı gösterilmez.
+Aynı belge + yarışma + kategori + aşama + rapor türü + yıl + sayfa bağlamı yeniden analiz edilirse sunucu içi önbellek (SHA-256 hash) sayesinde model tekrar çağrılmaz. Analiz ucunda geçici istek ve eşzamanlılık sınırı vardır; hesap modülü bağlandığında bunun kullanıcı/kurum kotasıyla tamamlanması gerekir. Her analiz için süre ve token kullanımı `diagnostics` alanında döner. Yerel geliştirmede oturum toplamları `GET /api/metrics` ucundan okunabilir; üretimde bu uç varsayılan olarak kapalıdır. Resmî kota takibi Google AI Studio üzerinden yapılır. Kullanıcı arayüzünde model/sağlayıcı adı gösterilmez.
 
 ## Yerel çalıştırma
 
@@ -73,7 +73,7 @@ Belgelerin tümü uygulamadaki “Hazır test belgeleri” bölümünden seçile
 - `app/components/document-library-panel.tsx`: görevli belge havuzu yönetimi
 - `app/components/file-badge.tsx`: dosya türüne göre renkli ikon
 - `app/lib/competitions.ts`: kayıtlı yarışma listesi ve filtreleme
-- `app/lib/evaluation-summary.ts`: 100'e normalizasyon ve geçiş/baraj/ceza/eleme kural çıkarımı
+- `app/lib/evaluation-summary.ts`: geçiş/baraj/ceza/eleme kural çıkarımı ve eski profil uyumluluğu
 - `app/lib/document-library.ts`: tarayıcı içi belge havuzu deposu
 - `app/lib/usage-metrics.ts` + `app/api/metrics/route.ts`: API kullanım sayaçları
 - `app/api/analyze/route.ts`: güvenli Gemini çağrısı, yapılandırılmış çıktı, önbellek ve yönetici kuralı birleştirme
@@ -95,3 +95,14 @@ node tools/run_celikkubbe_benchmark.mjs http://localhost:3000/api/analyze
 ```
 
 Sonuç `output/benchmarks/celikkubbe-latest.json` dosyasına yazılır.
+Test; her beklenen bulgunun anahtarlarını aynı kriter kaydında arar, tek kriteri iki ayrı kural yerine kullanmaz ve bütün eşikler karşılanmazsa başarısız durum kodu döndürür.
+
+Hızlı regresyon kontrolleri:
+
+```bash
+npm test
+npm run test:quality:saved
+npm run test:benchmark:celikkubbe
+```
+
+`test:quality:saved`, kayıtlı eski model çıktılarını güncel cevap anahtarıyla karşılaştırır. Mevcut İDA kaydı, görev/komut ihlali ile etik davranış cezalarını atladığı için bilinçli olarak başarısızdır; yeni ve döndürülmüş bir API anahtarıyla `node tools/run_quality_test.mjs` çalıştırıldığında çıktı yalnızca bütün beklentiler geçerse yenilenir.

@@ -126,15 +126,13 @@ export type ProfileExport = {
   criteria: Criterion[];
   skippedChecks: string[];
   scorePlan?: ScorePlan;
-  /** Sonuçların 100 üzerinden gösterimi için normalizasyon bilgisi; orijinal puan sistemi korunur. */
+  /** Puan kapsamı bilgisi. Alan adı eski profil dosyalarıyla uyumluluk için korunur. */
   normalization?: {
     /** Belgede ilan edilen genel toplam (ör. saha görevleri dahil 315). */
     declaredTotal: number | null;
     /**
-     * MAKSİMUM HAM PUAN — 100'e normalizasyonun paydası.
-     * Kapsamdaki aktif puan kriterlerinin azami puanlarının toplamıdır; grup
-     * toplamından değil kriterlerden hesaplanır ki pay ile payda aynı kümeden
-     * gelsin ve normalize puan 100'ü aşamasın.
+     * Bu profilde uygulanacak resmî azami puan. Birden çok aşama içeren
+     * şartnamelerde yalnızca kapsama alınan grupların toplamıdır.
      */
     evaluationTotal?: number | null;
     /** Kapsama alınan puan gruplarının kimlikleri (ScoreGroup.id). */
@@ -143,8 +141,10 @@ export type ProfileExport = {
     includedGroups?: string[];
     /** Belgedeki grup toplamı ile kriter toplamı çelişiyorsa görevliye gösterilecek uyarı. */
     scopeAnomaly?: string | null;
-    normalizedTo: 100;
-    formula: string;
+    /** Eski profillerde bulunabilir; yeni profiller otomatik ölçek dönüşümü yapmaz. */
+    normalizedTo?: 100;
+    /** Eski profillerde bulunabilir; yalnızca bilgilendirme amaçlıdır. */
+    formula?: string;
   };
   /** Toplam puanın yanında ayrıca denetlenecek geçiş/baraj/ceza/eleme kuralları. */
   decisionRules?: {

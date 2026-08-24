@@ -6,5 +6,8 @@ import { usageSnapshot } from "../../lib/usage-metrics";
  * üzerinden yapılır; bu uç nokta geliştirme sırasındaki gözlem içindir.
  */
 export function GET() {
+  if (process.env.NODE_ENV === "production" && (process.env.ENABLE_USAGE_METRICS || "off").toLowerCase() !== "on") {
+    return Response.json({ error: "Bulunamadı." }, { status: 404 });
+  }
   return Response.json(usageSnapshot());
 }

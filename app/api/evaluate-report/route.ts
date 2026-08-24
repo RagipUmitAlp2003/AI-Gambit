@@ -1,4 +1,8 @@
 import { validateProfileExport } from "../../lib/profile-loader";
+import { requestBodyTooLarge } from "../../lib/request-guard";
+
+const MAX_REPORT_BYTES = 18 * 1024 * 1024;
+const MAX_MULTIPART_BYTES = MAX_REPORT_BYTES + 512 * 1024;
 
 /**
  * Rapor analiz motoru uç noktası — SÖZLEŞME İSKELETİ.
@@ -20,11 +24,14 @@ import { validateProfileExport } from "../../lib/profile-loader";
  * Hata: { error: string } + anlamlı HTTP durumu (400/413/415/502/503/504).
  *
  * Referans uygulama: app/api/analyze/route.ts (Gemini çağrısı, structured
- * output, normalizasyon katmanı, önbellek ve recordUsage kalıpları oradan
+ * output, doğrulama katmanı, önbellek ve recordUsage kalıpları oradan
  * kopyalanmalıdır). Katılımcı raporları düşmanca içerik taşıyabilir: PDF
  * içeriği veri olarak işlenmeli, komut olarak asla yorumlanmamalıdır.
  */
 export async function POST(request: Request) {
+  if (requestBodyTooLarge(request, MAX_MULTIPART_BYTES)) {
+    return Response.json({ error: "Katılımcı raporu izin verilen boyutu aşıyor." }, { status: 413 });
+  }
   let formData: FormData;
   try {
     formData = await request.formData();
@@ -38,6 +45,9 @@ export async function POST(request: Request) {
   }
   if (file.type !== "application/pdf" && !file.name.toLocaleLowerCase("tr-TR").endsWith(".pdf")) {
     return Response.json({ error: "Katılımcı raporu PDF biçiminde olmalıdır." }, { status: 415 });
+  }
+  if (file.size > MAX_REPORT_BYTES) {
+    return Response.json({ error: "Katılımcı raporu en fazla 18 MB olabilir." }, { status: 413 });
   }
 
   const profileRaw = formData.get("profile");

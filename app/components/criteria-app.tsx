@@ -8,7 +8,7 @@ import { categoriesFor, reportTypesFor, stagesFor } from "../lib/competitions";
 import FileBadge from "./file-badge";
 import TemplatePreview from "./template-preview";
 import { analyzeWithGemini } from "../lib/gemini-analyzer";
-import { criterionEffectOf as criterionEffect, deriveDecisionRules, maxRawScoreOf, normalizeScore, scopeCriteriaToGroups } from "../lib/evaluation-summary";
+import { criterionEffectOf as criterionEffect, deriveDecisionRules, maxRawScoreOf, scopeCriteriaToGroups } from "../lib/evaluation-summary";
 import { getPdfPageCount } from "../lib/pdf-reader";
 import { SAMPLE_DOCUMENTS } from "../lib/sample-documents";
 import {
@@ -472,7 +472,7 @@ function UploadStep({
       <DocumentLibraryModal
         open={libraryOpen}
         usage="kriter"
-        selectedFileName={file?.name ?? null}
+        selectedFile={file}
         onClose={() => setLibraryOpen(false)}
         onSelect={onFile}
         onSelectSample={onSample}
@@ -555,18 +555,20 @@ function CriteriaReview({
   // Rozet, onay kutusu ve hesaplama aynı kaynağı kullanır ki gösterim ile
   // gerçek kapsam birbirinden ayrılmasın.
   const isIncluded = (group: { id?: string }) => (groupsHaveIds ? Boolean(group.id && includedGroupIds.includes(group.id)) : true);
-  // MAKSİMUM HAM PUAN paydası kriterlerden hesaplanır (grup toplamından değil):
-  // pay ve payda aynı kümeden geldiği için normalize puan 100'ü aşamaz.
+  // Kapsam dışı gruplara bağlı kriterler pasifleştirilir. Puan gösterimi PDF'nin
+  // resmî ölçeğini korur; kriter toplamı bu ölçekle uyuşmuyorsa profil onaylanmaz.
   const scopedCriteria = scopeCriteriaToGroups(criteria, groups, includedIds);
-  const evaluationTotal = maxRawScoreOf(scopedCriteria);
+  const criterionTotal = maxRawScoreOf(scopedCriteria);
   const groupTotal = included.reduce((sum, group) => sum + group.maxScore, 0);
-  // Belgedeki grup toplamı ile kriter toplamı çelişiyorsa görevliye söylenir.
-  const scopeAnomaly = groups.length && evaluationTotal !== groupTotal
-    ? `Kapsamdaki puan kriterlerinin toplamı ${evaluationTotal}, kapsamdaki puan gruplarının toplamı ${groupTotal}. Değerlendirme kriter toplamı üzerinden yapılır; farkı inceleyin.`
+  const officialTotal = groups.length ? groupTotal : (displayTotal ?? criterionTotal);
+  // Resmî toplam ile puanlanabilir kriter toplamı çelişiyorsa sessiz bir ölçek
+  // dönüşümü yapılmaz; yönetici kriterleri veya kapsamı düzeltmeden onay veremez.
+  const scopeAnomaly = officialTotal > 0 && criterionTotal !== officialTotal
+    ? `Puanlanabilir aktif kriterlerin azami toplamı ${criterionTotal}, PDF'nin bu kapsam için ilan ettiği resmî toplam ${officialTotal}. Kriter puanlarını veya kapsamdaki grupları eşitleyin.`
     : null;
   // Şartname birden çok aşamayı topluyorsa yalnızca kapsama alınan gruplar puanlanır.
   const scopeNarrowed = groups.length > 1 && included.length > 0 && included.length < groups.length;
-  const canApprove = reviewConfirmed && conflicts === 0 && active.length > 0
+  const canApprove = reviewConfirmed && conflicts === 0 && !scopeAnomaly && active.length > 0
     && (groups.length === 0 || included.length > 0);
 
   function toggleGroup(groupId: string, on: boolean) {
@@ -669,14 +671,9 @@ function CriteriaReview({
                   <span><strong>{group.name}</strong><small>{group.scope} · Sayfa {group.sourcePage}</small></span>
                   <span className="score-group-value">
                     {group.maxScore} puan
-                    {/* Normalize karşılık yalnızca kapsama alınan gruplar için anlamlıdır. */}
-                    {/* Grup bazlı 100'lük karşılık yalnızca kriter toplamı ile grup
-                        toplamı örtüşüyorsa anlamlıdır; çelişki varsa yanıltıcı olur. */}
                     {!isIncluded(group)
                       ? <small>kapsam dışı</small>
-                      : evaluationTotal && !scopeAnomaly
-                        ? <small>≈ {normalizeScore(group.maxScore, evaluationTotal)}/100</small>
-                        : <small>kapsamda</small>}
+                      : <small>resmî ölçekte</small>}
                   </span>
                 </summary>
                 <div>
@@ -689,7 +686,7 @@ function CriteriaReview({
                     />
                     <span>
                       Bu grup değerlendirmeye dahil
-                      <small>Kapsam dışı bırakılan gruplar profile girmez ve 100&apos;e normalizasyonda paydaya eklenmez.</small>
+                      <small>Kapsam dışı bırakılan gruplar bu profilin resmî puan hesabına girmez.</small>
                     </span>
                   </label>
                   {group.minimumScore !== null ? <p><strong>Baraj:</strong> En az {group.minimumScore} puan</p> : null}
@@ -702,19 +699,17 @@ function CriteriaReview({
         ) : (
           <p className="score-plan-empty">PDF’de sayısal puan tablosu bulunmadı. Sistem bu belge için puan üretmedi.</p>
         )}
-        {evaluationTotal ? (
+        {officialTotal ? (
           <p className="normalization-note">
             {scopeNarrowed ? (
               <>
                 Belgede ilan edilen genel toplam {displayTotal} puandır; bu profil yalnızca kapsama alınan
-                {" "}{included.length} grubu değerlendirir. Değerlendirme {evaluationTotal} puan üzerinden yapılır,
-                sonuç (alınan puan ÷ {evaluationTotal}) × 100 formülüyle 100 üzerinden gösterilir.
+                {" "}{included.length} grubu değerlendirir. Sonuç, PDF’nin bu kapsam için tanımladığı
+                {" "}{officialTotal} puanlık resmî ölçekle gösterilir.
               </>
             ) : (
               <>
-                Değerlendirme, kapsamdaki kriterlerin azami puan toplamı olan {evaluationTotal} puan
-                üzerinden yapılır; sonuç (alınan ham puan ÷ {evaluationTotal}) × 100 formülüyle
-                100 üzerinden ayrıca gösterilir.
+                Yarışmanın orijinal puan sistemi korunur; sonuç {officialTotal} puanlık resmî ölçekle gösterilir.
               </>
             )}
           </p>
@@ -977,6 +972,7 @@ function CriteriaReview({
           {!canApprove ? (
             <small>
               {conflicts > 0 && `${conflicts} çakışmayı çözün. `}
+              {scopeAnomaly && "Resmî puan toplamı ile kriter toplamını eşitleyin. "}
               {!reviewConfirmed && "Görevli kontrolünü onaylayın."}
             </small>
           ) : <small className="ready-note">Profil onaya hazır.</small>}
@@ -999,7 +995,7 @@ function ProfileReady({
   const active = profile.criteria.filter((item) => item.active);
   const scoreCriteria = active.filter((item) => criterionEffect(item) === "score");
   const allGroups = profile.scorePlan?.groups ?? [];
-  // MAKSİMUM HAM PUAN: profildeki aktif puan kriterlerinin azami toplamı.
+  // Profilin bu kapsam için sakladığı resmî azami puan.
   const scoreTotal = profile.normalization?.evaluationTotal ?? maxRawScoreOf(profile.criteria);
   const declaredTotal = profile.scorePlan?.declaredTotalScore ?? null;
   const includedGroupCount = profile.normalization?.includedGroupIds?.length ?? allGroups.length;
@@ -1049,7 +1045,7 @@ function ProfileReady({
         <div className="profile-metrics">
           <div><strong>{active.length}</strong><span>aktif kural</span></div>
           <div><strong>{includedGroupCount || scoreCriteria.length}</strong><span>puan grubu</span></div>
-          <div><strong>{scoreTotal || "—"}</strong><span>maksimum ham puan</span></div>
+          <div><strong>{scoreTotal || "—"}</strong><span>resmî azami puan</span></div>
           <div><strong>{profile.sourceDocument.pages}</strong><span>kaynak sayfa</span></div>
         </div>
         {scoreTotal ? (
@@ -1057,10 +1053,8 @@ function ProfileReady({
             <span>Puan gösterimi</span>
             <p>
               {scopeNarrowed
-                ? `Belgede ilan edilen genel toplam ${declaredTotal ?? "belirtilmemiş"} puandır; bu profil ${allGroups.length} puan grubundan ${includedGroupCount} tanesini kapsama aldı. `
-                : `Değerlendirme yarışmanın orijinal puan sistemiyle yapılır. `}
-              Ham puan {scoreTotal} puan üzerinden verilir; sonuç (ham puan ÷ {scoreTotal}) × 100
-              formülüyle 100 üzerinden ayrıca raporlanır.
+                ? `Belgede ilan edilen genel toplam ${declaredTotal ?? "belirtilmemiş"} puandır; bu profil ${allGroups.length} puan grubundan ${includedGroupCount} tanesini kapsama aldı ve ${scoreTotal} puanlık resmî ölçeği kullanır.`
+                : `Değerlendirme belgenin orijinal sistemiyle, ${scoreTotal} puan üzerinden yapılır.`}
             </p>
             {scopeAnomaly ? <p className="score-audit-note warning">{scopeAnomaly}</p> : null}
           </div>
@@ -1209,14 +1203,14 @@ export default function CriteriaApp() {
       : groups;
     const includedIds = new Set(included.map((group) => group.id));
 
-    // Kapsam dışı gruba bağlı kriterler profile PASİF girer: böylece pay
-    // (verilen puanlar) ile payda (azami puanlar) aynı kriter kümesinden gelir
-    // ve normalize puanın 100'ü aşması yapısal olarak imkânsız hâle gelir.
+    // Kapsam dışı gruba bağlı kriterler profile pasif girer. Puan ölçeği PDF'deki
+    // kapsanmış grup toplamıdır; otomatik 100'lük dönüşüm yapılmaz.
     const scopedCriteria = scopeCriteriaToGroups(criteria, groups, includedIds);
-    const evaluationTotal = maxRawScoreOf(scopedCriteria);
+    const criterionTotal = maxRawScoreOf(scopedCriteria);
     const groupTotal = included.reduce((sum, group) => sum + group.maxScore, 0);
-    const scopeAnomaly = groups.length && evaluationTotal !== groupTotal
-      ? `Kapsamdaki puan kriterlerinin toplamı ${evaluationTotal}, kapsamdaki puan gruplarının ilan ettiği toplam ${groupTotal}. Normalizasyon kriter toplamı üzerinden yapılır; farkı inceleyin.`
+    const evaluationTotal = groups.length ? groupTotal : (declaredTotal ?? criterionTotal);
+    const scopeAnomaly = evaluationTotal > 0 && criterionTotal !== evaluationTotal
+      ? `Puanlanabilir aktif kriterlerin azami toplamı ${criterionTotal}, PDF'nin bu kapsam için ilan ettiği resmî toplam ${evaluationTotal}.`
       : null;
 
     const nextProfile: ProfileExport = {
@@ -1237,10 +1231,6 @@ export default function CriteriaApp() {
         evaluationTotal,
         includedGroupIds: included.flatMap((group) => (group.id ? [group.id] : [])),
         scopeAnomaly,
-        normalizedTo: 100,
-        formula: evaluationTotal
-          ? `(alınan ham puan / ${evaluationTotal}) × 100`
-          : "Kapsamda puanlı kriter bulunmadığı için normalizasyon uygulanmaz.",
       },
       decisionRules: deriveDecisionRules(scopedCriteria, result.scorePlan),
     };
