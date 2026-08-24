@@ -30,7 +30,14 @@ export function loadDraftSnapshot(): DraftSnapshot | null {
 }
 
 export function saveDraftSnapshot(snapshot: DraftSnapshot) {
-  localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
+  try {
+    localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
+    return true;
+  } catch {
+    // Depolama kapalı/dolu olduğunda React efektini düşürme. Kaynak PDF ayrıca
+    // IndexedDB'de tutulur; kullanıcı mevcut oturumda çalışmaya devam edebilir.
+    return false;
+  }
 }
 
 export function clearDraftSnapshot() {

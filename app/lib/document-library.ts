@@ -68,14 +68,10 @@ function transaction<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) =
 /** Tarayıcı içi (bu cihaza özel) depo uygulaması. */
 export const indexedDbDocumentRepository: DocumentRepository = {
   async list() {
-    try {
-      const items = await transaction<LibraryDocument[]>("readonly", (store) => store.getAll() as IDBRequest<LibraryDocument[]>);
-      return (items ?? [])
-        .filter((item) => item.file instanceof File)
-        .sort((a, b) => b.addedAt.localeCompare(a.addedAt));
-    } catch {
-      return [];
-    }
+    const items = await transaction<LibraryDocument[]>("readonly", (store) => store.getAll() as IDBRequest<LibraryDocument[]>);
+    return (items ?? [])
+      .filter((item) => item.file instanceof File)
+      .sort((a, b) => b.addedAt.localeCompare(a.addedAt));
   },
 
   async add(input) {

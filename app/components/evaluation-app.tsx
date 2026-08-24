@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import FileBadge from "./file-badge";
 import DocumentLibraryModal from "./document-library-modal";
-import { criterionEffectOf, criterionEliminates, normalizeScoreDetailed } from "../lib/evaluation-summary";
+import { applyPenalties, criterionEffectOf, criterionEliminates, normalizeScoreDetailed } from "../lib/evaluation-summary";
 import { extractPdfText } from "../lib/pdf-reader";
 import { loadLastApprovedProfile, readProfileFile, saveActiveProfile } from "../lib/profile-loader";
 import { createReportId, deleteReport, listReports, saveReport, type StoredReport } from "../lib/report-pool";
@@ -97,6 +97,7 @@ function buildInitialReview(evaluation: ReportEvaluation): JudgeReview {
       criterionId: finding.criterionId,
       verdict: "pending",
       finalScore: null,
+      penaltyPoints: null,
       note: "",
     })),
     overallNote: "",
@@ -526,29 +527,58 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
       ? evaluation.profileRef.profileId === profile.profileId
       : evaluation.profileRef.competition === profile.setup.competition
         && evaluation.profileRef.year === profile.setup.year
+        && evaluation.profileRef.stage === profile.setup.stage
         && evaluation.profileRef.reportType === profile.setup.reportType
   );
   const criterion = profileMatches
     ? profile?.criteria.find((item) => item.id === selectedFinding?.criterionId) ?? null
     : null;
+  const selectedIsPenalty = criterion ? criterionEffectOf(criterion) === "penalty" : false;
 
-  const scoreFindings = findings.filter((finding) => finding.maxScore !== null);
+  const scoreFindings = findings.filter((finding) => {
+    if (finding.maxScore === null) return false;
+    if (!profileMatches) return true;
+    const sourceCriterion = profile?.criteria.find((item) => item.id === finding.criterionId);
+    return sourceCriterion ? criterionEffectOf(sourceCriterion) === "score" : true;
+  });
   const decidedScores = scoreFindings.filter((finding) => {
     const decision = review.decisions.find((item) => item.criterionId === finding.criterionId);
     return decision?.finalScore !== null && decision?.verdict !== "pending";
   });
-  // İnsan yetkisindeki her madde ve "insan kararı bekliyor" işaretli her bulgu
-  // karara bağlanmadan inceleme tamamlanamaz.
-  const humanPending = findings.filter((finding) => {
+  const decisionRuleIds = new Set(
+    profileMatches
+      ? (profile?.criteria ?? [])
+        .filter((item) => {
+          const effect = criterionEffectOf(item);
+          return criterionEliminates(item) || ["gate", "threshold", "penalty"].includes(effect);
+        })
+        .map((item) => item.id)
+      : [],
+  );
+  // İnsan yetkisindeki, olumsuz/kısmi bulunan veya karar kuralına bağlı hiçbir
+  // madde görevli kararı olmadan tamamlanamaz.
+  const decisionPending = findings.filter((finding) => {
     const decision = review.decisions.find((item) => item.criterionId === finding.criterionId);
-    const needsDecision = finding.requiresHuman || finding.status === "needs_human";
+    const needsDecision = finding.requiresHuman
+      || ["needs_human", "not_met", "not_found", "partially_met"].includes(finding.status)
+      || decisionRuleIds.has(finding.criterionId);
     return needsDecision && decision?.verdict === "pending";
   });
-  const finalTotal = review.decisions.reduce((sum, decision) => {
+  const positiveTotal = review.decisions.reduce((sum, decision) => {
     const finding = findings.find((item) => item.criterionId === decision.criterionId);
     if (!finding || finding.maxScore === null || decision.finalScore === null || decision.verdict === "pending") return sum;
+    const sourceCriterion = profileMatches ? profile?.criteria.find((item) => item.id === decision.criterionId) : null;
+    if (sourceCriterion && criterionEffectOf(sourceCriterion) !== "score") return sum;
     return sum + decision.finalScore;
   }, 0);
+  const penaltyTotal = review.decisions.reduce((sum, decision) => {
+    if (decision.verdict === "pending") return sum;
+    const criterion = profileMatches ? profile?.criteria.find((item) => item.id === decision.criterionId) : null;
+    return criterion && criterionEffectOf(criterion) === "penalty"
+      ? sum + Math.max(0, decision.penaltyPoints ?? 0)
+      : sum;
+  }, 0);
+  const { finalRaw: finalTotal, appliedPenalty } = applyPenalties(positiveTotal, penaltyTotal);
   const declaredTotal = evaluation.proposedTotals.declaredTotal;
   // Yardımcı hesap yalnızca resmî aralık dışı sonucu anomali olarak yakalamak
   // için kullanılır; kullanıcıya otomatik 100'lük puan gösterilmez.
@@ -593,7 +623,7 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
   const canComplete =
     reviewConfirmed &&
     decidedScores.length === scoreFindings.length &&
-    humanPending.length === 0;
+    decisionPending.length === 0;
 
   function patchDecision(criterionId: string, patch: Partial<JudgeDecision>) {
     if (!record || !review) return;
@@ -642,8 +672,8 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
       <div className="analysis-summary" aria-label="İnceleme özeti">
         <div><strong>{findings.length}</strong><span>bulgu</span></div>
         <div><strong>{decidedScores.length}/{scoreFindings.length}</strong><span>puan kararı</span></div>
-        <div className={humanPending.length ? "summary-warning" : "summary-ok"}>
-          <strong>{humanPending.length}</strong><span>bekleyen görevli kararı</span>
+        <div className={decisionPending.length ? "summary-warning" : "summary-ok"}>
+          <strong>{decisionPending.length}</strong><span>bekleyen görevli kararı</span>
         </div>
         <div className={flaggedChecks.length ? "summary-warning" : "summary-ok"}>
           <strong>{flaggedChecks.length}</strong><span>işaretli ön kontrol</span>
@@ -654,7 +684,7 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
         </div>
         <div>
           <strong>{finalTotal}{declaredTotal ? ` / ${declaredTotal}` : ""}</strong>
-          <span>hakem toplamı · resmî ölçek</span>
+          <span>{appliedPenalty ? `${appliedPenalty} ceza sonrası · ` : ""}hakem toplamı · resmî ölçek</span>
         </div>
       </div>
 
@@ -810,7 +840,28 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
             <div className="inspector-section">
               <span className="inspector-label">Hakem kararı</span>
               <div className="form-grid two-col">
-                {selectedFinding.maxScore !== null ? (
+                {selectedIsPenalty ? (
+                  <Field label="Uygulanan ceza puanı" hint="Belgedeki ceza kuralını ve tekrar sayısını doğrulayarak toplam düşülecek puanı girin.">
+                    <input
+                      type="number"
+                      min={0}
+                      max={declaredTotal ?? undefined}
+                      value={selectedDecision.penaltyPoints ?? ""}
+                      placeholder="Örn. 5"
+                      onChange={(event) => {
+                        const raw = event.target.value === "" ? null : Number(event.target.value);
+                        const capped = raw === null
+                          ? null
+                          : Math.max(0, Math.min(declaredTotal ?? raw, Number.isFinite(raw) ? raw : 0));
+                        patchDecision(selectedFinding.criterionId, {
+                          penaltyPoints: capped,
+                          finalScore: null,
+                          verdict: capped === null ? "pending" : "adjusted",
+                        });
+                      }}
+                    />
+                  </Field>
+                ) : selectedFinding.maxScore !== null ? (
                   <Field label={`Nihai puan (azami ${selectedFinding.maxScore})`}>
                     <input
                       type="number"
@@ -848,7 +899,9 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
                   />
                 </Field>
               </div>
-              {selectedFinding.maxScore !== null && selectedDecision.finalScore === null ? (
+              {selectedIsPenalty && selectedDecision.penaltyPoints === null ? (
+                <p className="eval-pending-note">Ceza uygulanmayacaksa 0 girin; bu karar verilmeden inceleme tamamlanamaz.</p>
+              ) : selectedFinding.maxScore !== null && selectedDecision.finalScore === null ? (
                 <p className="eval-pending-note">Bu kriter puanlanmadan inceleme tamamlanamaz.</p>
               ) : null}
             </div>
@@ -907,7 +960,7 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
           {!canComplete ? (
             <small>
               {decidedScores.length !== scoreFindings.length && `${scoreFindings.length - decidedScores.length} puan kriteri kararsız. `}
-              {humanPending.length > 0 && `${humanPending.length} görevli kararı bekliyor. `}
+              {decisionPending.length > 0 && `${decisionPending.length} görevli kararı bekliyor. `}
               {!reviewConfirmed && "Hakem kontrolünü onaylayın."}
             </small>
           ) : <small className="ready-note">İnceleme tamamlanmaya hazır.</small>}
@@ -931,7 +984,8 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
   );
 }
 
-function ParticipantView({ records, selectedId, onSelect }: {
+function ParticipantView({ profile, records, selectedId, onSelect }: {
+  profile: ProfileExport | null;
   records: StoredReport[];
   selectedId: string;
   onSelect: (id: string) => void;
@@ -959,11 +1013,29 @@ function ParticipantView({ records, selectedId, onSelect }: {
   const review = record.review;
   const findings = evaluation.findings;
   const declaredTotal = evaluation.proposedTotals.declaredTotal;
-  const finalTotal = review.decisions.reduce((sum, decision) => {
+  const profileMatches = profile !== null && (
+    evaluation.profileRef.profileId
+      ? profile.profileId === evaluation.profileRef.profileId
+      : profile.setup.competition === evaluation.profileRef.competition
+        && profile.setup.year === evaluation.profileRef.year
+        && profile.setup.stage === evaluation.profileRef.stage
+        && profile.setup.reportType === evaluation.profileRef.reportType
+  );
+  const positiveTotal = review.decisions.reduce((sum, decision) => {
     const finding = findings.find((item) => item.criterionId === decision.criterionId);
-    if (!finding || finding.maxScore === null || decision.finalScore === null) return sum;
+    if (!finding || finding.maxScore === null || decision.finalScore === null || decision.verdict === "pending") return sum;
+    const sourceCriterion = profileMatches ? profile.criteria.find((item) => item.id === decision.criterionId) : null;
+    if (sourceCriterion && criterionEffectOf(sourceCriterion) !== "score") return sum;
     return sum + decision.finalScore;
   }, 0);
+  const penaltyTotal = review.decisions.reduce((sum, decision) => {
+    if (decision.verdict === "pending") return sum;
+    const criterion = profileMatches ? profile.criteria.find((item) => item.id === decision.criterionId) : null;
+    return criterion && criterionEffectOf(criterion) === "penalty"
+      ? sum + Math.max(0, decision.penaltyPoints ?? 0)
+      : sum;
+  }, 0);
+  const { finalRaw: finalTotal, appliedPenalty } = applyPenalties(positiveTotal, penaltyTotal);
   // Yardımcı hesap yalnızca resmî aralık dışı sonucu anomali olarak yakalamak
   // için kullanılır; sonuç PDF'deki puan ölçeğiyle gösterilir.
   const normalized = normalizeScoreDetailed(finalTotal, declaredTotal ?? 0);
@@ -1002,7 +1074,7 @@ function ParticipantView({ records, selectedId, onSelect }: {
         <div className="profile-metrics">
           <div>
             <strong>{finalTotal}{declaredTotal ? ` / ${declaredTotal}` : ""}</strong>
-            <span>toplam puan · resmî ölçek</span>
+            <span>{appliedPenalty ? `${appliedPenalty} ceza sonrası · ` : ""}toplam puan · resmî ölçek</span>
           </div>
           <div>
             <strong>{declaredTotal ?? "—"}</strong>
@@ -1091,10 +1163,16 @@ export default function EvaluationApp() {
   useEffect(() => {
     let active = true;
     async function restore() {
-      const stored = await listReports();
-      if (!active) return;
-      setRecords(stored);
-      setProfile(loadLastApprovedProfile());
+      try {
+        const stored = await listReports();
+        if (!active) return;
+        setRecords(stored);
+        setPersistError("");
+      } catch {
+        if (active) reportPersistFailure();
+      } finally {
+        if (active) setProfile(loadLastApprovedProfile());
+      }
     }
     restore();
     return () => { active = false; };
@@ -1247,7 +1325,7 @@ export default function EvaluationApp() {
           />
         ) : null}
         {view === 3 ? (
-          <ParticipantView records={records} selectedId={selectedId} onSelect={setSelectedId} />
+          <ParticipantView profile={profile} records={records} selectedId={selectedId} onSelect={setSelectedId} />
         ) : null}
       </div>
     </main>

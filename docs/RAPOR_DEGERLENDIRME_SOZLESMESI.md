@@ -10,12 +10,12 @@ bileşenleri). Bu belge ile tipler çelişirse tipler geçerlidir.
 
 ## Uç nokta
 
-`POST /api/evaluate-report` — iskelet `app/api/evaluate-report/route.ts`
-dosyasındadır ve şu an geçerli istekler için `501` döndürür. Motor bu dosyada
-geliştirilecektir. Referans uygulama: `app/api/analyze/route.ts` (Gemini
-çağrısı, `responseJsonSchema` ile sınırlandırılmış çıktı, alan alan
-doğrulama, `globalThis` önbelleği, `recordUsage()` gözlemi). Aynı kalıplar
-birebir kopyalanmalıdır.
+`POST /api/evaluate-report` — çalışan motor `app/api/evaluate-report/route.ts`
+dosyasındadır. Gemini çağrısı, yapılandırılmış JSON şeması, profil-kriter
+eşleştirmesi, alan alan sunucu doğrulaması, profil + rapor karmasına bağlı
+önbellek, geçici dosya temizliği ve kullanım gözlemi uygulanır. Model çıktısı
+doğrudan güvenilir kabul edilmez; kriter kimliği, azami puan, insan yetkisi,
+kanıt sayfası ve puan toplamı onaylı profile göre yeniden kurulur.
 
 ### İstek: `multipart/form-data`
 
@@ -26,8 +26,9 @@ birebir kopyalanmalıdır.
 | `pageCount` | string | İstemcinin pdfjs ile saydığı sayfa sayısı. **Danışma amaçlıdır**; sayfa sınırı denetimlerinde motor kendisi saymalıdır. |
 
 İstemci sarmalayıcısı `app/lib/report-evaluator.ts` bu isteği zaten atıyor;
-`501`/`404` aldığında çevrimdışı kesin kontrollere düşüyor. Motor yayına
-girdiğinde ekran tarafında hiçbir değişiklik gerekmez.
+`501`/`404` alan eski dağıtımlarda çevrimdışı kesin kontrollere düşer. Güncel
+dağıtımda motor başarılı olduğunda istemci kendi dosya kapısı ve benzerlik
+kontrollerini sunucu sonucuna ekler.
 
 ### Cevap: `ReportEvaluation` JSON'u
 

@@ -262,6 +262,8 @@ export type JudgeDecision = {
   criterionId: string;
   verdict: "pending" | "accepted" | "adjusted";
   finalScore: number | null;
+  /** Ceza etkili kriterde hakemin toplamdan düşülmesini onayladığı puan. */
+  penaltyPoints?: number | null;
   note: string;
 };
 

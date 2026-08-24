@@ -2,7 +2,13 @@ export const syntheticExpectation = {
   minCriteria: 15,
   declaredTotalScore: 100,
   scoreGroups: [
-    { name: "ÖTR toplamı", maxScore: 100, keywords: ["ön tasarım"] },
+    { name: "Problem tanımı", maxScore: 10, keywords: ["problem", "gereksinim"] },
+    { name: "Özgünlük", maxScore: 20, keywords: ["özgünlük", "yenilik"] },
+    { name: "Teknik tasarım", maxScore: 25, keywords: ["teknik", "tasarım"] },
+    { name: "Doğrulama planı", maxScore: 15, keywords: ["yöntem", "doğrulama"] },
+    { name: "Uygulanabilirlik", maxScore: 15, keywords: ["uygulanabilirlik", "proje"] },
+    { name: "Yaygın etki", maxScore: 10, keywords: ["yaygın", "sürdürülebilirlik"] },
+    { name: "Raporlama", maxScore: 5, keywords: ["raporlama", "kaynak"] },
   ],
   requiredFindings: [
     { name: "Problem tanımı", keywords: ["problem", "gereksinim"], effect: "score", maxScore: 10 },

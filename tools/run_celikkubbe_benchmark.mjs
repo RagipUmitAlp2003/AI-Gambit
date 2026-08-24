@@ -153,6 +153,9 @@ for (const bucket of Object.values(byCategory)) {
 // Puan matematiği: grupların toplamı belgede ilan edilen toplamla tutmalı.
 const expectedGroupSum = expected.scoreGroups.reduce((sum, item) => sum + item.maxScore, 0);
 const actualGroupSum = actualGroups.reduce((sum, group) => sum + (group.maxScore || 0), 0);
+const activeCriterionScoreTotal = criteria
+  .filter((criterion) => criterion.active && (criterion.effect === "score" || (!criterion.effect && criterion.type === "qualitative_score")))
+  .reduce((sum, criterion) => sum + (criterion.maxScore || 0), 0);
 const scoreMath = {
   expectedGroupSum,
   expectedDeclaredTotal: expected.declaredTotalScore,
@@ -160,6 +163,8 @@ const scoreMath = {
   actualGroupSum,
   actualDeclaredTotal: analysis.scorePlan?.declaredTotalScore ?? null,
   actualConsistent: actualGroupSum === (analysis.scorePlan?.declaredTotalScore ?? null),
+  activeCriterionScoreTotal,
+  criteriaConsistent: activeCriterionScoreTotal === actualGroupSum,
   // 100'lük gösterim yalnızca payda doğruysa anlamlıdır.
   normalizationDenominator: analysis.scorePlan?.declaredTotalScore ?? null
 };
@@ -244,6 +249,7 @@ const lines = [
   `Denetim modeli   : ${analysis.diagnostics?.auditModel ?? "-"}`,
   `Toplam puan      : beklenen ${expected.declaredTotalScore} · bulunan ${scoreMath.actualDeclaredTotal} ${result.comparison.totalScoreMatched ? "✓" : "✗"}`,
   `Puan matematiği  : gruplar ${actualGroupSum} / ilan ${scoreMath.actualDeclaredTotal} ${scoreMath.actualConsistent ? "✓ tutarlı" : "✗ TUTARSIZ"}`,
+  `Aktif puan ölçeği: kriterler ${activeCriterionScoreTotal} / gruplar ${actualGroupSum} ${scoreMath.criteriaConsistent ? "✓ tutarlı" : "✗ TUTARSIZ"}`,
   `Puan grupları    : ${pct(scoreGroupRecall)}`,
   `Görevli kararı   : ${pct(humanReviewAccuracy)}`,
   `Kural kapsamı    : ${pct(requiredFindingRecall)} · tam ${findingMatches.length - partialCount - missingCount} / kısmi ${partialCount} / eksik ${missingCount}`,
@@ -260,6 +266,7 @@ console.log(lines.join("\n"));
 // Kritik ölçütlerden biri düşerse çıkış kodu 1: CI veya elle çalıştırmada fark edilir.
 const passed = result.comparison.totalScoreMatched
   && scoreMath.actualConsistent
+  && scoreMath.criteriaConsistent
   && scoreGroupRecall === 1
   && humanReviewAccuracy === 1
   && requiredFindingRecall === 1

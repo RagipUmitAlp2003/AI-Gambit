@@ -24,14 +24,10 @@ function transaction<T>(mode: IDBTransactionMode, run: (store: IDBObjectStore) =
 }
 
 export async function listReports(): Promise<StoredReport[]> {
-  try {
-    const items = await transaction<StoredReport[]>("readonly", (store) => store.getAll() as IDBRequest<StoredReport[]>);
-    return (items ?? [])
-      .filter((item) => item.file instanceof File)
-      .sort((a, b) => b.uploadedAt.localeCompare(a.uploadedAt));
-  } catch {
-    return [];
-  }
+  const items = await transaction<StoredReport[]>("readonly", (store) => store.getAll() as IDBRequest<StoredReport[]>);
+  return (items ?? [])
+    .filter((item) => item.file instanceof File)
+    .sort((a, b) => b.uploadedAt.localeCompare(a.uploadedAt));
 }
 
 export async function saveReport(entry: StoredReport): Promise<void> {

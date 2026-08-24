@@ -13,7 +13,8 @@ import {
   normalizeScoreDetailed,
   scopeCriteriaToGroups,
 } from "../app/lib/evaluation-summary.ts";
-import type { Criterion, ScoreGroup } from "../app/lib/types.ts";
+import { ensureScoreGroupCoverage } from "../app/lib/score-coverage.ts";
+import type { Criterion, ScoreGroup, ScorePlan } from "../app/lib/types.ts";
 
 function criterion(patch: Partial<Criterion> & { id: string }): Criterion {
   return {
@@ -129,6 +130,42 @@ test("maxRawScoreOf: yalnızca aktif puan kriterlerini toplar", () => {
     criterion({ id: "c5", maxScore: null, effect: "score" }),
   ];
   assert.equal(maxRawScoreOf(criteria), 250);
+});
+
+test("puan kapsamı: tamamen eksik resmî grup için hakem kontrollü kriter eklenir", () => {
+  const groups = [group({ id: "group-1", name: "Saha Görevleri", maxScore: 160 })];
+  const completed = ensureScoreGroupCoverage([], groups);
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].maxScore, 160);
+  assert.equal(completed[0].groupId, "group-1");
+  assert.equal(completed[0].evaluationMethod, "human");
+  assert.equal(maxRawScoreOf(completed), 160);
+});
+
+test("puan kapsamı: eksiksiz grup için ikinci kriter üretilmez", () => {
+  const groups = [group({ id: "group-1", maxScore: 100 })];
+  const existing = [criterion({ id: "c1", maxScore: 100, groupId: "group-1" })];
+  assert.deepEqual(ensureScoreGroupCoverage(existing, groups), existing);
+});
+
+test("puan kapsamı: kısmi grupta kalan puan uydurulmaz", () => {
+  const groups = [group({ id: "group-1", maxScore: 100 })];
+  const partial = [criterion({ id: "c1", maxScore: 20, groupId: "group-1" })];
+  const completed = ensureScoreGroupCoverage(partial, groups);
+  assert.equal(completed.length, 1);
+  assert.equal(maxRawScoreOf(completed), 20);
+});
+
+test("puan kapsamı: üretilen bütüncül kriter kimliği mevcut kimlikle çakışmaz", () => {
+  const existing = criterion({ id: "score-group-1", name: "Başka kural", effect: "gate", maxScore: null, groupId: null });
+  const groups: ScorePlan["groups"] = [{
+    id: "group-1", name: "Görev", scope: "Saha", maxScore: 40, minimumScore: null,
+    sourcePage: 4, sourceText: "Görev 40 puandır.", breakdown: [],
+  }];
+  const result = ensureScoreGroupCoverage([existing], groups);
+  assert.equal(result.length, 2);
+  assert.equal(new Set(result.map((item) => item.id)).size, 2);
+  assert.equal(result[1].id, "score-group-1-2");
 });
 
 /* --------------------------------------------------------------------- *

@@ -42,7 +42,7 @@ const DEFAULT_SETUP: SetupData = {
   reportType: reportTypesFor(DEFAULT_COMPETITION, DEFAULT_STAGE)[0],
   year: "2026",
   allowedFormats: ["PDF"],
-  maxFileSizeMb: 25,
+  maxFileSizeMb: 18,
   maxFileCount: 1,
   defaultViolationAction: "block",
 };
@@ -299,7 +299,7 @@ function SetupStep({
                   <input
                     type="number"
                     min={1}
-                    max={500}
+                    max={18}
                     value={setup.maxFileSizeMb}
                     onChange={(event) => onChange({ ...setup, maxFileSizeMb: Number(event.target.value) })}
                   />

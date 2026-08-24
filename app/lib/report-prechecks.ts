@@ -46,7 +46,10 @@ export function buildFileGateChecks(file: File, setup: SetupData, existingFileCo
     evidence: [],
   });
   const sizeMb = file.size / 1024 / 1024;
-  const sizeOk = sizeMb <= setup.maxFileSizeMb;
+  // AI uç noktası ve tarayıcı akışı aynı sınırı kullanır. Eski profillerde
+  // daha yüksek değer bulunsa bile sunucunun 18 MB sınırı sessizce aşılmaz.
+  const effectiveMaxSizeMb = Math.min(setup.maxFileSizeMb, 18);
+  const sizeOk = sizeMb <= effectiveMaxSizeMb;
   checks.push({
     id: "gate-size",
     kind: "file_gate",
@@ -54,8 +57,8 @@ export function buildFileGateChecks(file: File, setup: SetupData, existingFileCo
     status: sizeOk ? "passed" : violationStatus(setup),
     method: "deterministic",
     detail: sizeOk
-      ? `Dosya ${sizeMb.toFixed(1)} MB; ${setup.maxFileSizeMb} MB sınırının altında.`
-      : `Dosya ${sizeMb.toFixed(1)} MB; profildeki ${setup.maxFileSizeMb} MB sınırını aşıyor.`,
+      ? `Dosya ${sizeMb.toFixed(1)} MB; ${effectiveMaxSizeMb} MB sınırının altında.`
+      : `Dosya ${sizeMb.toFixed(1)} MB; bu sürümde uygulanan ${effectiveMaxSizeMb} MB sınırını aşıyor.`,
     evidence: [],
   });
   const nextCount = existingFileCount + 1;

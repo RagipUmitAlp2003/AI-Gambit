@@ -1,5 +1,11 @@
 import { evaluateReportOffline } from "./demo-report-evaluator";
-import { buildSimilarityCheck, type SimilarityPeer } from "./report-prechecks";
+import {
+  buildHeadingsCheck,
+  buildLanguageCheck,
+  buildSimilarityCheck,
+  buildTemplateCheck,
+  type SimilarityPeer,
+} from "./report-prechecks";
 import type { PreCheck, ProfileExport, ReportEvaluation } from "./types";
 
 /**
@@ -41,9 +47,24 @@ export async function evaluateReport(input: {
 
     if (response.ok && payload && !payload.error && Array.isArray(payload.findings)) {
       const evaluation = payload as ReportEvaluation;
+      // Dosya biçimi/boyutu/adedi istemcide gerçek dosya üzerinden ölçülür;
+      // model bu kesin kontrollerin yerine geçmez. Aynı kimlikli sunucu satırı
+      // varsa yerel ölçüm önceliklidir.
+      const localChecks = [
+        ...(gateChecks ?? []),
+        buildLanguageCheck(pages),
+        buildTemplateCheck(profile, pageCount),
+        buildHeadingsCheck(profile, pages),
+      ];
+      const localIds = new Set(localChecks.map((check) => check.id));
+      evaluation.preChecks = [
+        ...localChecks,
+        ...(Array.isArray(evaluation.preChecks) ? evaluation.preChecks : [])
+          .filter((check) => check.kind !== "file_gate" && !localIds.has(check.id)),
+      ];
       // Benzerlik havuzu sunucuda yoktur; istemci kendi sonucuyla tamamlar.
       const similarity = buildSimilarityCheck(pages.join(" "), peers);
-      const checks = Array.isArray(evaluation.preChecks) ? evaluation.preChecks : [];
+      const checks = evaluation.preChecks;
       const similarityIndex = checks.findIndex((check) => check.kind === "similarity");
       if (similarityIndex >= 0) checks[similarityIndex] = similarity;
       else checks.push(similarity);

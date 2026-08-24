@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { acquireAnalysisPermit, requestBodyTooLarge } from "../../lib/request-guard";
+import { ensureScoreGroupCoverage } from "../../lib/score-coverage";
 import { recordUsage } from "../../lib/usage-metrics";
 import type {
   AnalysisDiagnostics,
@@ -17,7 +18,7 @@ const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
 const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash";
 
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
-const PROMPT_VERSION = "v5";
+const PROMPT_VERSION = "v6";
 const CACHE_LIMIT = 12;
 const MAX_PDF_BYTES = 18 * 1024 * 1024;
 // Multipart sınırına dosya dışında profil JSON'u ve başlıklar için küçük pay eklenir.
@@ -187,6 +188,7 @@ DEĞİŞMEZ KURALLAR:
 26. Video süresi, çözünürlük, dosya biçimi gibi metadata kuralları teknik olarak ölçülebilir olsa da belgeden veya yükleme sisteminden güvenilir doğrulama gerektiriyorsa deterministic ya da hybrid seç; hakem kararı gerekiyorsa human/hybrid seç.
 27. Ceza tablosundaki her bağımsız sayısal kesinti kuralını çıkar. Ceza miktarı hakem takdirine bırakılmışsa uydurma puan yazma ve evaluationMethod=human kullan.
 28. Her fiziksel güvenlik şartını, bağımsız doğrulanabilen bir yükümlülükse ayrı kriter yap. Bunları tek genel "güvenlik" kriterinde eritme.
+29. Tekrarlı saha görevlerinde olay başına puanlar grup azamisini doğrudan oluşturmayabilir. Bu puanları yanlışlıkla toplama; grubun resmî azamisini scorePlan içinde koru. Belgede ayrı ayrı hakem puanı verilecek kalemler açıkça belirtilmişse bunları group index'i bağlı score kriterleri olarak da çıkar.
 `;
 
 type RawCriterion = {
@@ -277,7 +279,7 @@ function parseSetup(value: string): SetupData {
     year: requiredText(item.year, "Yıl", 16),
     allowedFormats: allowedFormats.length ? allowedFormats : ["pdf"],
     maxFileSizeMb: Number.isFinite(maxFileSizeMb) && maxFileSizeMb > 0
-      ? Math.min(maxFileSizeMb, 1024)
+      ? Math.min(maxFileSizeMb, 18)
       : 18,
     maxFileCount: Number.isInteger(maxFileCount) && maxFileCount > 0
       ? Math.min(maxFileCount, 100)
@@ -301,23 +303,36 @@ function normalizeCriterion(raw: RawCriterion, index: number, pageCount: number,
     : null;
   const page = typeof raw.sourcePage === "number" ? Math.round(raw.sourcePage) : 1;
   const maxScore = nullableNumber(raw.maxScore);
-  const criterionText = `${text(raw.name, "")} ${text(raw.scope, "")} ${text(raw.sourceText, "")}`;
+  const name = text(raw.name, `İsimsiz kriter ${index + 1}`);
+  const violationOutcome = text(raw.violationOutcome, "Belgede belirtilmemiş; yönetici kararı gerekli");
+  const sourceText = text(raw.sourceText, "Kaynak metin model tarafından döndürülmedi.");
+  const criterionText = `${name} ${text(raw.scope, "")} ${sourceText} ${violationOutcome}`;
   const physicalOrJuryReview = /hakem|jüri|güvenlik|acil durdur|yalıtım|açık kablo|keskin nokta|patlayıcı|fiziksel boyut|sistem maksimum boyut|yasak bölge|mülakat|dışarıdan (?:yardım|yönlendirme)/i.test(criterionText);
   const proposedMethod = safeEnum(raw.evaluationMethod, METHODS, "hybrid");
+  let criterionType = safeEnum(raw.type, CRITERION_TYPES, "qualitative_score");
+  let effect = safeEnum(raw.effect, EFFECTS, maxScore === null ? "advisory" : "score");
+  // Bir aşamadan 0 puan almak, belge ayrıca yarışmadan çıkarılma sonucu
+  // vermedikçe diskalifiye değildir. Model bu ikisini karıştırırsa güvenli ve
+  // geri alınabilir sınıfa indir: puan kaybı/ceza + görevli doğrulaması.
+  const explicitElimination = /diskalifiye|yarışma dışı|değerlendirmeye alınma(?:z|yacak)|geçersiz sayıl|(?:^|\s)elen(?:ir|ecek|miş|di|me)/i.test(criterionText);
+  if (criterionType === "elimination_review" && !explicitElimination && /0\s*puan|puan(?:ı|i)?\s*0|aşama(?:dan|yı)?\s+başarısız/i.test(criterionText)) {
+    criterionType = "formula";
+    effect = /0\s*puan|puan(?:ı|i)?\s*0/i.test(criterionText) ? "penalty" : "threshold";
+  }
   return {
     id: `criterion-${index + 1}`,
-    name: text(raw.name, `İsimsiz kriter ${index + 1}`),
-    type: safeEnum(raw.type, CRITERION_TYPES, "qualitative_score"),
+    name,
+    type: criterionType,
     maxScore,
     weight: nullableNumber(raw.weight),
     required: raw.required === true,
-    violationOutcome: text(raw.violationOutcome, "Belgede belirtilmemiş; yönetici kararı gerekli"),
+    violationOutcome,
     evaluationMethod: physicalOrJuryReview && proposedMethod === "deterministic" ? "human" : proposedMethod,
     sourcePage: Math.min(Math.max(page, 1), Math.max(pageCount, 1)),
-    sourceText: text(raw.sourceText, "Kaynak metin model tarafından döndürülmedi."),
+    sourceText,
     aiInterpretation: text(raw.aiInterpretation, "Yönetici doğrulaması gerekli."),
     confidence: safeEnum(raw.confidence, CONFIDENCES, "medium"),
-    effect: safeEnum(raw.effect, EFFECTS, maxScore === null ? "advisory" : "score"),
+    effect,
     scope: text(raw.scope, "Genel"),
     groupId,
     // Denetim bulguları pasif başlar: görevli kaynağı görüp etkinleştirmeden
@@ -680,7 +695,8 @@ function extractUsage(payload: unknown) {
 function buildResult(extraction: CachedExtraction, setup: SetupData, diagnostics: AnalysisDiagnostics): AnalysisResult {
   // Puan planı önce kurulur: kriterlerin groupId'si grupların kimliklerine bağlanır.
   const scorePlan = normalizeScorePlan(extraction.rawScorePlan, extraction.pageCount);
-  const documentCriteria = extraction.rawCriteria.map((item, index) => normalizeCriterion(item, index, extraction.pageCount, scorePlan.groups));
+  const normalizedCriteria = extraction.rawCriteria.map((item, index) => normalizeCriterion(item, index, extraction.pageCount, scorePlan.groups));
+  const documentCriteria = ensureScoreGroupCoverage(normalizedCriteria, scorePlan.groups);
   const criteria = mergeManagerRules(documentCriteria, setup);
   const analysisWarnings = [
     ...(scorePlan.auditStatus === "mismatch" ? [scorePlan.auditMessage] : []),
