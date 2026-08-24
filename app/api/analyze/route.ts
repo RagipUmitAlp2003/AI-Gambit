@@ -18,7 +18,7 @@ const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
 const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash";
 
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
-const PROMPT_VERSION = "v6";
+const PROMPT_VERSION = "v7-document-only";
 const CACHE_LIMIT = 12;
 const MAX_PDF_BYTES = 18 * 1024 * 1024;
 // Multipart sınırına dosya dışında profil JSON'u ve başlıklar için küçük pay eklenir.
@@ -51,6 +51,33 @@ const EFFECTS: CriterionEffect[] = ["gate", "score", "penalty", "threshold", "ad
 const RESPONSE_SCHEMA = {
   type: "object",
   properties: {
+    documentProfile: {
+      type: "object",
+      description: "Yarışma ve katılımcı teslim bilgileri. Yalnızca PDF'de açıkça bulunan değerler yazılır.",
+      properties: {
+        competition: { type: ["string", "null"], description: "Yarışmanın PDF'deki adı; yoksa null." },
+        category: { type: ["string", "null"], description: "Kategori veya seviye; yoksa null." },
+        stage: { type: ["string", "null"], description: "Değerlendirme aşaması; yoksa null." },
+        reportType: { type: ["string", "null"], description: "Katılımcının teslim edeceği rapor/belge türü; yoksa null." },
+        year: { type: ["string", "null"], description: "Yarışma yılı; yoksa null." },
+        allowedFormats: {
+          type: "array",
+          items: { type: "string" },
+          description: "PDF'de açıkça izin verilen katılımcı dosya uzantıları; belirtilmemişse boş dizi.",
+        },
+        maxFileSizeMb: { type: ["number", "null"], description: "Katılımcı teslimi için açık MB sınırı; yoksa null." },
+        maxFileCount: { type: ["integer", "null"], description: "Takım/başvuru başına açık dosya adedi sınırı; yoksa null." },
+        defaultViolationAction: {
+          type: "string",
+          enum: ["block", "warn", "jury", "unspecified"],
+          description: "Dosya kuralı ihlalinin PDF'de açık sonucu. Açık sonuç yoksa unspecified.",
+        },
+      },
+      required: [
+        "competition", "category", "stage", "reportType", "year", "allowedFormats",
+        "maxFileSizeMb", "maxFileCount", "defaultViolationAction",
+      ],
+    },
     criteria: {
       type: "array",
       description: "Belgede açık dayanağı bulunan değerlendirme kuralları ve kriterleri.",
@@ -143,7 +170,7 @@ const RESPONSE_SCHEMA = {
       description: "Kriter sanılabilecek ancak yalnızca amaç, beklenti veya bilgi olduğu için kriter yapılmayan önemli cümleler.",
     },
   },
-  required: ["criteria", "scorePlan", "skippedChecks", "informationalNotes"],
+  required: ["documentProfile", "criteria", "scorePlan", "skippedChecks", "informationalNotes"],
 } as const;
 
 const CRITERIA_AUDIT_SCHEMA = {
@@ -189,6 +216,8 @@ DEĞİŞMEZ KURALLAR:
 27. Ceza tablosundaki her bağımsız sayısal kesinti kuralını çıkar. Ceza miktarı hakem takdirine bırakılmışsa uydurma puan yazma ve evaluationMethod=human kullan.
 28. Her fiziksel güvenlik şartını, bağımsız doğrulanabilen bir yükümlülükse ayrı kriter yap. Bunları tek genel "güvenlik" kriterinde eritme.
 29. Tekrarlı saha görevlerinde olay başına puanlar grup azamisini doğrudan oluşturmayabilir. Bu puanları yanlışlıkla toplama; grubun resmî azamisini scorePlan içinde koru. Belgede ayrı ayrı hakem puanı verilecek kalemler açıkça belirtilmişse bunları group index'i bağlı score kriterleri olarak da çıkar.
+30. documentProfile alanını yalnızca PDF'den doldur. Yarışma, kategori, aşama, rapor türü, yıl, izin verilen format, azami MB, dosya adedi veya ihlal sonucu açıkça yazmıyorsa null, boş dizi ya da unspecified kullan; varsayım üretme.
+31. Katılımcının teslim kuralı ile bu kaynak PDF'nin kendi dosya özelliğini karıştırma. Örneğin yüklenen kaynak PDF'nin 8 MB olması, katılımcı sınırının 8 MB olduğu anlamına gelmez.
 `;
 
 type RawCriterion = {
@@ -225,7 +254,20 @@ type RawScorePlan = {
   groups?: RawScoreGroup[];
 };
 
+type RawDocumentProfile = {
+  competition?: unknown;
+  category?: unknown;
+  stage?: unknown;
+  reportType?: unknown;
+  year?: unknown;
+  allowedFormats?: unknown;
+  maxFileSizeMb?: unknown;
+  maxFileCount?: unknown;
+  defaultViolationAction?: unknown;
+};
+
 type RawAnalysis = {
+  documentProfile?: RawDocumentProfile;
   criteria?: RawCriterion[];
   skippedChecks?: unknown[];
   informationalNotes?: unknown[];
@@ -244,47 +286,31 @@ function safeEnum<T extends string>(value: unknown, allowed: T[], fallback: T): 
   return typeof value === "string" && allowed.includes(value as T) ? value as T : fallback;
 }
 
-function requiredText(value: unknown, fieldName: string, maxLength = 160) {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`${fieldName} alanı zorunludur.`);
-  }
-  return value.trim().slice(0, maxLength);
-}
-
-function parseSetup(value: string): SetupData {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(value);
-  } catch {
-    throw new Error("Profil ayarları geçerli JSON biçiminde değil.");
-  }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error("Profil ayarları geçersiz.");
-  }
-  const item = raw as Record<string, unknown>;
-  const allowedFormats = Array.isArray(item.allowedFormats)
+function normalizeDocumentSetup(item: RawDocumentProfile | undefined): SetupData {
+  const unknown = "Belgede belirtilmemiş";
+  const allowedFormats = Array.isArray(item?.allowedFormats)
     ? item.allowedFormats
       .filter((entry): entry is string => typeof entry === "string")
       .map((entry) => entry.trim().toLowerCase())
       .filter(Boolean)
       .slice(0, 12)
     : [];
-  const maxFileSizeMb = Number(item.maxFileSizeMb);
-  const maxFileCount = Number(item.maxFileCount);
+  const maxFileSizeMb = Number(item?.maxFileSizeMb);
+  const maxFileCount = Number(item?.maxFileCount);
   return {
-    competition: requiredText(item.competition, "Yarışma"),
-    category: requiredText(item.category, "Kategori"),
-    stage: requiredText(item.stage, "Aşama"),
-    reportType: requiredText(item.reportType, "Rapor türü"),
-    year: requiredText(item.year, "Yıl", 16),
-    allowedFormats: allowedFormats.length ? allowedFormats : ["pdf"],
+    competition: text(item?.competition, unknown).slice(0, 160),
+    category: text(item?.category, unknown).slice(0, 160),
+    stage: text(item?.stage, unknown).slice(0, 160),
+    reportType: text(item?.reportType, unknown).slice(0, 160),
+    year: text(item?.year, unknown).slice(0, 32),
+    allowedFormats: allowedFormats.map((format) => format.toUpperCase()),
     maxFileSizeMb: Number.isFinite(maxFileSizeMb) && maxFileSizeMb > 0
-      ? Math.min(maxFileSizeMb, 18)
-      : 18,
+      ? Math.min(maxFileSizeMb, 10_000)
+      : 0,
     maxFileCount: Number.isInteger(maxFileCount) && maxFileCount > 0
       ? Math.min(maxFileCount, 100)
-      : 1,
-    defaultViolationAction: safeEnum(item.defaultViolationAction, ["block", "warn", "jury"], "jury"),
+      : 0,
+    defaultViolationAction: safeEnum(item?.defaultViolationAction, ["block", "warn", "jury", "unspecified"], "unspecified"),
   };
 }
 
@@ -345,33 +371,6 @@ function normalizeCriterion(raw: RawCriterion, index: number, pageCount: number,
   };
 }
 
-function managerCriterion(
-  id: string,
-  name: string,
-  outcome: string,
-  interpretation: string,
-): Criterion {
-  return {
-    id,
-    name,
-    type: "technical_upload",
-    maxScore: null,
-    weight: null,
-    required: true,
-    violationOutcome: outcome,
-    evaluationMethod: "deterministic",
-    sourcePage: null,
-    sourceText: "Proje yöneticisinin belge yüklenmeden önce tanımladığı teknik teslim ayarı.",
-    aiInterpretation: interpretation,
-    confidence: "high",
-    active: true,
-    origin: "manager",
-    effect: "gate",
-    scope: "Teslim",
-    groupId: null,
-  };
-}
-
 function normalizeScorePlan(raw: RawScorePlan | undefined, pageCount: number): ScorePlan {
   const declaredTotalScore = nullableNumber(raw?.declaredTotalScore);
   const groups = Array.isArray(raw?.groups)
@@ -412,82 +411,8 @@ function normalizeScorePlan(raw: RawScorePlan | undefined, pageCount: number): S
     auditStatus: matched ? "matched" : "mismatch",
     auditMessage: matched
       ? `PDF toplamı ile ${groups.length} üst düzey puan grubunun toplamı eşleşiyor (${declaredTotalScore} puan).`
-      : `PDF ${declaredTotalScore} puan ilan ediyor; çıkarılan üst düzey gruplar ${groupTotal} puan ediyor. Yönetici eksik veya çakışan grupları incelemeli.`,
+      : `PDF ${declaredTotalScore} puan ilan ediyor; çıkarılan üst düzey gruplar ${groupTotal} puan ediyor. Kaynak tabloda eksik ya da tekrar sayılmış bir grup olabilir; görevli kaynak sayfaları doğrulamalı.`,
   };
-}
-
-function numberNear(value: string, unit: "mb" | "file") {
-  const normalized = value.toLocaleLowerCase("tr-TR");
-  const pattern = unit === "mb" ? /(\d+(?:[.,]\d+)?)\s*mb/ : /(\d+)\s*(?:dosya|rapor dosyası)/;
-  const match = normalized.match(pattern);
-  return match ? Number(match[1].replace(",", ".")) : null;
-}
-
-function mergeManagerRules(criteria: Criterion[], setup: SetupData) {
-  const next = [...criteria];
-  const outcome = setup.defaultViolationAction === "block"
-    ? "Yüklemeyi engelle"
-    : setup.defaultViolationAction === "warn"
-      ? "Uyarı oluştur"
-      : "Jüri incelemesine gönder";
-
-  const formatIndex = next.findIndex((item) => item.type === "technical_upload" && /pdf|dosya biçimi|dosya format/i.test(`${item.name} ${item.sourceText}`));
-  if (formatIndex < 0) {
-    next.unshift(managerCriterion(
-      "manager-format",
-      `İzin verilen teslim biçimi: ${setup.allowedFormats.join(", ")}`,
-      outcome,
-      "Bu kural belgeden değil, yöneticinin başlangıç ayarından gelir. Belge bu konuda sessiz kalsa bile uygulanır.",
-    ));
-  } else {
-    const found = next[formatIndex];
-    const documentSaysPdf = /pdf/i.test(`${found.name} ${found.sourceText}`);
-    const managerSaysPdf = setup.allowedFormats.some((format) => format.toUpperCase() === "PDF");
-    if (documentSaysPdf !== managerSaysPdf) {
-      next[formatIndex] = { ...found, issue: `Başlangıç format ayarı ${setup.allowedFormats.join(", ")}; belge farklı bir teslim biçimi tanımlıyor.` };
-    } else {
-      next[formatIndex] = { ...found, aiInterpretation: `${found.aiInterpretation} Yönetici başlangıç ayarıyla uyumlu.` };
-    }
-  }
-
-  const sizeIndex = next.findIndex((item) => item.type === "technical_upload" && /mb|dosya büyüklüğü|dosya boyutu/i.test(`${item.name} ${item.sourceText}`));
-  if (sizeIndex < 0) {
-    next.unshift(managerCriterion(
-      "manager-size",
-      `Teslim dosyası en fazla ${setup.maxFileSizeMb} MB olmalıdır`,
-      outcome,
-      "Bu sayısal sınır yöneticinin başlangıç ayarından gelir ve yükleme sırasında kesin olarak kontrol edilir.",
-    ));
-  } else {
-    const found = next[sizeIndex];
-    const documentSize = numberNear(`${found.name} ${found.sourceText}`, "mb");
-    next[sizeIndex] = documentSize !== null && documentSize !== setup.maxFileSizeMb
-      ? { ...found, issue: `Başlangıç ayarı ${setup.maxFileSizeMb} MB, belgede ise ${documentSize} MB. Geçerli sınırı yönetici seçmelidir.` }
-      : { ...found, aiInterpretation: `${found.aiInterpretation} Yönetici başlangıç ayarıyla uyumlu.` };
-  }
-
-  let countIndex = next.findIndex((item) => item.type === "technical_upload" && /dosya sayısı|dosya adedi|teslim sayısı/i.test(item.name));
-  if (countIndex < 0) {
-    countIndex = next.findIndex((item) => item.type === "technical_upload" && /yalnızca bir.*dosya|tek bir.*dosya/i.test(`${item.name} ${item.sourceText}`));
-  }
-  if (countIndex < 0) {
-    next.unshift(managerCriterion(
-      "manager-count",
-      `Takım başına en fazla ${setup.maxFileCount} teslim dosyası`,
-      outcome,
-      "Bu dosya adedi yöneticinin başlangıç ayarından gelir ve belge bu konuda sessiz kalsa bile uygulanır.",
-    ));
-  } else {
-    const found = next[countIndex];
-    const documentCount = /yalnızca bir|tek bir/i.test(`${found.name} ${found.sourceText}`)
-      ? 1
-      : numberNear(`${found.name} ${found.sourceText}`, "file");
-    next[countIndex] = documentCount !== null && documentCount !== setup.maxFileCount
-      ? { ...found, issue: `Başlangıç ayarı en fazla ${setup.maxFileCount} dosya, belgede ise ${documentCount} dosya. Geçerli sayı yönetici tarafından seçilmelidir.` }
-      : { ...found, aiInterpretation: `${found.aiInterpretation} Yönetici başlangıç ayarıyla uyumlu.` };
-  }
-
-  return next.map((item, index) => ({ ...item, id: item.id.startsWith("manager-") ? item.id : `criterion-${index + 1}` }));
 }
 
 function extractGeminiText(payload: unknown) {
@@ -612,6 +537,7 @@ async function uploadPdfOnce(
  * güncel ayarlarla yeniden birleştirilir.
  */
 type CachedExtraction = {
+  rawDocumentProfile?: RawDocumentProfile;
   rawCriteria: RawCriterion[];
   rawScorePlan?: RawScorePlan;
   skippedChecks: string[];
@@ -692,12 +618,11 @@ function extractUsage(payload: unknown) {
   };
 }
 
-function buildResult(extraction: CachedExtraction, setup: SetupData, diagnostics: AnalysisDiagnostics): AnalysisResult {
+function buildResult(extraction: CachedExtraction, diagnostics: AnalysisDiagnostics): AnalysisResult {
   // Puan planı önce kurulur: kriterlerin groupId'si grupların kimliklerine bağlanır.
   const scorePlan = normalizeScorePlan(extraction.rawScorePlan, extraction.pageCount);
   const normalizedCriteria = extraction.rawCriteria.map((item, index) => normalizeCriterion(item, index, extraction.pageCount, scorePlan.groups));
-  const documentCriteria = ensureScoreGroupCoverage(normalizedCriteria, scorePlan.groups);
-  const criteria = mergeManagerRules(documentCriteria, setup);
+  const criteria = ensureScoreGroupCoverage(normalizedCriteria, scorePlan.groups);
   const analysisWarnings = [
     ...(scorePlan.auditStatus === "mismatch" ? [scorePlan.auditMessage] : []),
     ...(extraction.coverageAuditWarning ? [extraction.coverageAuditWarning] : []),
@@ -706,12 +631,12 @@ function buildResult(extraction: CachedExtraction, setup: SetupData, diagnostics
       : []),
   ];
   return {
+    setup: normalizeDocumentSetup(extraction.rawDocumentProfile),
     criteria,
     scorePlan,
     analysisWarnings,
     skippedChecks: extraction.skippedChecks,
     informationalNotes: extraction.informationalNotes,
-    conflicts: criteria.filter((item) => Boolean(item.issue)).length,
     pageCount: extraction.pageCount,
     provider: "api",
     model: extraction.model,
@@ -746,9 +671,8 @@ export async function POST(request: Request) {
 
     const formData = await request.formData();
     const file = formData.get("file");
-    const setupJson = formData.get("setup");
-    if (!(file instanceof File) || typeof setupJson !== "string") {
-      return Response.json({ error: "PDF dosyası veya profil ayarları eksik." }, { status: 400 });
+    if (!(file instanceof File)) {
+      return Response.json({ error: "Analiz edilecek organizatör PDF'si eksik." }, { status: 400 });
     }
     if (file.type !== "application/pdf" && !file.name.toLocaleLowerCase("tr-TR").endsWith(".pdf")) {
       return Response.json({ error: "Yalnızca PDF değerlendirme belgesi analiz edilebilir." }, { status: 415 });
@@ -757,13 +681,6 @@ export async function POST(request: Request) {
       return Response.json({ error: "Bu sürümde doğrudan analiz sınırı 18 MB. Daha büyük kaynak belgeler için dosya akışı desteği etkinleştirilmelidir." }, { status: 413 });
     }
 
-    let setup: SetupData;
-    try {
-      setup = parseSetup(setupJson);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Profil ayarları geçersiz.";
-      return Response.json({ error: message }, { status: 400 });
-    }
     const rawPageCount = Number(formData.get("pageCount"));
     const pageCount = Number.isFinite(rawPageCount)
       ? Math.min(500, Math.max(1, Math.round(rawPageCount)))
@@ -773,18 +690,13 @@ export async function POST(request: Request) {
       return Response.json({ error: "Dosyanın içeriği geçerli bir PDF imzası taşımıyor." }, { status: 415 });
     }
 
-    // Aynı belge + aynı bağlam daha önce analiz edildiyse modeli hiç çağırma.
+    // Aynı belge daha önce analiz edildiyse modeli hiç çağırma.
     const auditMode = COVERAGE_AUDIT_ENABLED ? `audit${COVERAGE_AUDIT_MIN_PAGES}` : "noaudit";
     const cacheContext = JSON.stringify({
       promptVersion: PROMPT_VERSION,
       document: await documentHash(pdfBytes),
       models: [PRIMARY_MODEL, FALLBACK_MODEL],
       auditMode,
-      competition: setup.competition,
-      category: setup.category,
-      stage: setup.stage,
-      reportType: setup.reportType,
-      year: setup.year,
       pageCount,
     });
     const cacheKey = await documentHash(new TextEncoder().encode(cacheContext).buffer);
@@ -792,7 +704,7 @@ export async function POST(request: Request) {
     if (cachedExtraction) {
       const totalMs = Date.now() - startedAt;
       recordUsage({ model: cachedExtraction.model, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: totalMs, cached: true, error: false });
-      return Response.json(buildResult(cachedExtraction, setup, {
+      return Response.json(buildResult(cachedExtraction, {
         totalMs, modelMs: 0, auditMs: 0, promptTokens: 0, outputTokens: 0, cached: true,
       }));
     }
@@ -813,14 +725,7 @@ export async function POST(request: Request) {
     const prompt = `
 Bu PDF'yi sayfa sayfa incele ve organizatörün onaylayacağı değerlendirme profili taslağını çıkar.
 
-Yönetici bağlamı:
-- Yarışma: ${setup.competition}
-- Kategori: ${setup.category}
-- Aşama: ${setup.stage}
-- Rapor türü: ${setup.reportType}
-- Yıl: ${setup.year}
-
-Yönetici teknik teslim ayarları ayrıca sistem tarafından birleştirilecek. Sen yalnızca PDF'de açıkça bulunan kuralları çıkar. PDF ile yönetici ayarları arasındaki olası farkları saklama; her belgesel kuralı kendi kaynağıyla döndür.
+Yarışma, kategori, aşama, rapor türü, yıl ve katılımcı tesliminin format/boyut/adet kuralları da yalnızca bu PDF'den çıkarılacak. Belge sessizse değer uydurma; documentProfile alanında null, boş dizi veya unspecified kullan.
 
 Özellikle tablo hücrelerini, dipnotları, istisnaları, "hariç" ifadelerini, eleme sonuçlarını ve puansız alt kriterleri dikkatle değerlendir. Belge belirli bir yazı tipi veya punto istemiyorsa bunları kriter üretme.
 
@@ -829,7 +734,7 @@ Yanıtı oluşturmadan önce sessizce şu kapsam denetimini yap:
 2. İlan edilen genel toplamı ve birbirini örtmeyen üst düzey puan gruplarını scorePlan içine yaz.
 3. Alt puanları, bonusları, cezaları ve barajları ilgili grubun breakdown alanına koy.
 4. Uygunluk/teslim kuralları ile fiziksel hakem kontrollerini puan grubu sanma.
-5. Her kuralı kendi ${setup.stage} / ${setup.reportType} bağlamına göre scope alanında açıkça etiketle; belge daha geniş kapsamlıysa diğer aşamaları da kaybetme.
+5. Her kuralı PDF'de yazan kendi aşama ve rapor bağlamına göre scope alanında açıkça etiketle; belge birden çok aşama içeriyorsa hiçbirini kaybetme.
 `;
 
     const requestBody = JSON.stringify({
@@ -891,8 +796,14 @@ Yanıtı oluşturmadan önce sessizce şu kapsam denetimini yap:
           continue;
         }
         if (response.ok) {
+          let payload: unknown;
+          try {
+            payload = await response.json();
+          } catch {
+            return { ok: false, status: 502, detail: "AI servisi geçerli JSON taşımayan bir yanıt döndürdü; aynı belge gereksiz yere ikinci modele gönderilmedi." };
+          }
           markModelHealthy(model);
-          return { ok: true, payload: await response.json(), model };
+          return { ok: true, payload, model };
         }
         const errorPayload = await response.json().catch(() => ({})) as { error?: { message?: string } };
         lastDetail = errorPayload.error?.message || `AI analiz isteği ${response.status} koduyla başarısız oldu.`;
@@ -928,7 +839,7 @@ Bu PDF için BAĞIMSIZ BİR EKSİK KURAL DENETİMİ yap. Amacın, hızlı bir il
 - tablo dipnotları, istisnalar ve "hariç" ifadeleri,
 - aynı maddenin hem uygunluk hem puan etkisi varsa ikinci etkisi.
 
-Bağlam: ${setup.stage} / ${setup.reportType}. Her kuralı kendi kapsamına göre scope alanında etiketle.
+Her kuralı PDF'deki kendi aşama veya teslim kapsamına göre scope alanında etiketle.
 
 Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri human/hybrid olarak işaretle. Çıktı yalnızca criteria listesini içersin.
 `;
@@ -975,8 +886,14 @@ Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri hu
             },
           );
           if (response.ok) {
+            let payload: unknown;
+            try {
+              payload = await response.json();
+            } catch {
+              return { ok: false, reason: "Bağımsız denetim yanıtı geçerli JSON değildi; maliyeti artırmamak için ikinci modele gönderilmedi." };
+            }
             markModelHealthy(model);
-            return { ok: true, payload: await response.json(), model };
+            return { ok: true, payload, model };
           }
           if ([500, 502, 503, 504].includes(response.status)) markModelUnavailable(model);
           // Kalıcı hatalarda (400/401/403) yedek modeli denemek boşuna maliyettir.
@@ -1013,7 +930,12 @@ Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri hu
       return failWith(502, "AI modeli geçerli bir yapılandırılmış çıktı döndürmedi.");
     }
 
-    const raw = JSON.parse(rawText) as RawAnalysis;
+    let raw: RawAnalysis;
+    try {
+      raw = JSON.parse(rawText) as RawAnalysis;
+    } catch {
+      return failWith(502, "AI modeli şemaya uygun olmayan bir JSON metni döndürdü; aynı büyük istek yedek modele tekrarlanmadı.");
+    }
     let rawCriteria = Array.isArray(raw.criteria) ? raw.criteria : [];
     let coverageAuditWarning = "";
     let auditUsage = { prompt: 0, output: 0, total: 0 };
@@ -1024,7 +946,14 @@ Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri hu
         auditUsage = extractUsage(auditOutcome.payload);
         auditModel = auditOutcome.model;
         const auditText = extractGeminiText(auditOutcome.payload);
-        const auditRaw = auditText ? JSON.parse(auditText) as { criteria?: RawCriterion[] } : {};
+        let auditRaw: { criteria?: RawCriterion[] } = {};
+        if (auditText) {
+          try {
+            auditRaw = JSON.parse(auditText) as { criteria?: RawCriterion[] };
+          } catch {
+            coverageAuditWarning = "Bağımsız denetim çıktısı okunamadı; birincil çıkarım korunarak devam edildi.";
+          }
+        }
         // Birincil çıkarım önceliklidir; denetim turu yalnızca doğrulama yapar
         // veya pasif bir bulgu ekler — hiçbir kuralı sessizce değiştirmez.
         const merge = mergeRawCriteria(rawCriteria, Array.isArray(auditRaw.criteria) ? auditRaw.criteria : []);
@@ -1041,6 +970,7 @@ Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri hu
     }
 
     const extraction: CachedExtraction = {
+      rawDocumentProfile: raw.documentProfile,
       rawCriteria,
       rawScorePlan: raw.scorePlan,
       skippedChecks: Array.isArray(raw.skippedChecks) ? raw.skippedChecks.map((item) => text(item, "")).filter(Boolean) : [],
@@ -1073,7 +1003,7 @@ Belgede açıkça bulunmayan sonucu veya puanı uydurma. Fiziksel kontrolleri hu
     });
 
     const apiCalls = 1 + (auditOutcome ? 1 : 0);
-    return Response.json(buildResult(extraction, setup, {
+    return Response.json(buildResult(extraction, {
       totalMs,
       modelMs,
       auditMs,

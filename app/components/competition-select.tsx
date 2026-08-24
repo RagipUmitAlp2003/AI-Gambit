@@ -60,6 +60,11 @@ export default function CompetitionSelect({
     setHighlighted(0);
   }
 
+  function shouldFilterCurrentValue() {
+    const exactSelection = COMPETITIONS.some((competition) => competition.name === value);
+    return Boolean(value.trim()) && !exactSelection;
+  }
+
   return (
     <div className="combo" ref={wrapRef}>
       <input
@@ -71,10 +76,14 @@ export default function CompetitionSelect({
         aria-label="Yarışma ara ve seç"
         value={value}
         placeholder="Yarışma adını yazın veya listeden seçin"
-        onFocus={() => { setOpen(true); setFiltering(false); setHighlighted(0); }}
+        onFocus={() => { setOpen(true); setFiltering(shouldFilterCurrentValue()); setHighlighted(0); }}
         onChange={(event) => { onChange(event.target.value); setOpen(true); setFiltering(true); setHighlighted(0); }}
         onKeyDown={(event) => {
-          if (!open && (event.key === "ArrowDown" || event.key === "ArrowUp")) { setOpen(true); return; }
+          if (!open && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+            setOpen(true);
+            setFiltering(shouldFilterCurrentValue());
+            return;
+          }
           if (event.key === "ArrowDown") {
             event.preventDefault();
             setHighlighted(Math.min(activeIndex + 1, items.length - 1));

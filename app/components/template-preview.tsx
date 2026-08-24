@@ -8,6 +8,7 @@ const ACTION_LABELS: Record<ViolationAction, string> = {
   block: "Yüklemeyi engelle",
   warn: "Uyarı oluştur",
   jury: "Jüri incelemesine gönder",
+  unspecified: "PDF'de açık sonuç yok",
 };
 
 function formatBytes(bytes: number) {
@@ -85,10 +86,9 @@ export default function TemplatePreview({
         <div><dt>Kategori</dt><dd>{setup.category || "—"}</dd></div>
         <div><dt>Aşama</dt><dd>{setup.stage || "—"}</dd></div>
         <div><dt>Yıl</dt><dd>{setup.year || "—"}</dd></div>
-        {/* Format satırı başlangıç ayarından okunur; sabit "PDF" varsayılmaz. */}
-        <div><dt>Format</dt><dd>{setup.allowedFormats.join(", ") || "—"}</dd></div>
-        <div><dt>Boyut</dt><dd>≤ {setup.maxFileSizeMb || 0} MB</dd></div>
-        <div><dt>Dosya</dt><dd>≤ {setup.maxFileCount || 0}</dd></div>
+        <div><dt>Format</dt><dd>{setup.allowedFormats.join(", ") || "PDF'de yok"}</dd></div>
+        <div><dt>Boyut</dt><dd>{setup.maxFileSizeMb > 0 ? `≤ ${setup.maxFileSizeMb} MB` : "PDF'de yok"}</dd></div>
+        <div><dt>Dosya</dt><dd>{setup.maxFileCount > 0 ? `≤ ${setup.maxFileCount}` : "PDF'de yok"}</dd></div>
         <div><dt>İhlal</dt><dd>{ACTION_LABELS[setup.defaultViolationAction]}</dd></div>
       </dl>
 
@@ -118,10 +118,10 @@ export default function TemplatePreview({
           ) : null}
           {rules ? (
             <div className="template-rules">
-              <span>Geçiş {rules.gates.length}</span>
-              <span>Baraj {rules.thresholds.length}</span>
-              <span>Ceza {rules.penalties.length}</span>
-              <span>Eleme {rules.eliminations.length}</span>
+              <span>Uygunluk koşulu {rules.gates.length}</span>
+              <span>En düşük sonuç {rules.thresholds.length}</span>
+              <span>Puan kesintisi {rules.penalties.length}</span>
+              <span>Eleme incelemesi {rules.eliminations.length}</span>
             </div>
           ) : null}
         </div>
@@ -129,7 +129,7 @@ export default function TemplatePreview({
         <div className="template-structure pending">
           <span className="preview-label">Değerlendirme yapısı</span>
           <p>
-            Kriterler, puan grupları ve baraj/ceza kuralları kaynak belge analiz edildikten
+            Kriterler, puan grupları, devam koşulları ve puan kesintileri kaynak belge analiz edildikten
             sonra burada listelenir.
           </p>
         </div>

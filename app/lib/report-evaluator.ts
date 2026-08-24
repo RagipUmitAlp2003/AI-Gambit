@@ -1,5 +1,6 @@
 import { evaluateReportOffline } from "./demo-report-evaluator";
 import {
+  buildFileGateChecks,
   buildHeadingsCheck,
   buildLanguageCheck,
   buildSimilarityCheck,
@@ -51,7 +52,7 @@ export async function evaluateReport(input: {
       // model bu kesin kontrollerin yerine geçmez. Aynı kimlikli sunucu satırı
       // varsa yerel ölçüm önceliklidir.
       const localChecks = [
-        ...(gateChecks ?? []),
+        ...(gateChecks ?? buildFileGateChecks(file, profile.setup)),
         buildLanguageCheck(pages),
         buildTemplateCheck(profile, pageCount),
         buildHeadingsCheck(profile, pages),
@@ -72,8 +73,10 @@ export async function evaluateReport(input: {
       return evaluation;
     }
 
-    if (response.status === 501 || response.status === 404) {
-      offlineReason = "AI analiz motoru bu ortamda bağlı değil; yalnızca kesin kontroller çalıştırıldı.";
+    if (response.status === 501 || response.status === 404 || response.status === 503) {
+      offlineReason = response.status === 503
+        ? "AI servis anahtarı bu ortamda kullanılamıyor; yalnızca kesin kontroller çalıştırıldı."
+        : "AI analiz motoru bu ortamda bağlı değil; yalnızca kesin kontroller çalıştırıldı.";
     } else {
       throw new ReportEngineError(
         payload?.error || `Analiz motoru beklenmedik bir cevap döndürdü (HTTP ${response.status}).`,

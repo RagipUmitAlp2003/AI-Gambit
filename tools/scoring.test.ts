@@ -148,12 +148,26 @@ test("puan kapsamı: eksiksiz grup için ikinci kriter üretilmez", () => {
   assert.deepEqual(ensureScoreGroupCoverage(existing, groups), existing);
 });
 
-test("puan kapsamı: kısmi grupta kalan puan uydurulmaz", () => {
+test("puan kapsamı: kısmi grupta yalnızca PDF grup toplamından kalan fark tamamlanır", () => {
   const groups = [group({ id: "group-1", maxScore: 100 })];
   const partial = [criterion({ id: "c1", maxScore: 20, groupId: "group-1" })];
   const completed = ensureScoreGroupCoverage(partial, groups);
-  assert.equal(completed.length, 1);
-  assert.equal(maxRawScoreOf(completed), 20);
+  assert.equal(completed.length, 2);
+  assert.equal(completed[1].maxScore, 80);
+  assert.equal(completed[1].evaluationMethod, "human");
+  assert.equal(maxRawScoreOf(completed), 100);
+});
+
+test("puan kapsamı: tekrar sayılan alt kalemler resmî grup azamisini aşmaz", () => {
+  const groups = [group({ id: "group-1", maxScore: 100 })];
+  const repeated = [
+    criterion({ id: "c1", maxScore: 70, groupId: "group-1" }),
+    criterion({ id: "c2", maxScore: 70, groupId: "group-1" }),
+  ];
+  const completed = ensureScoreGroupCoverage(repeated, groups);
+  assert.equal(maxRawScoreOf(completed), 100);
+  assert.equal(completed.filter((item) => item.effect === "score").length, 1);
+  assert.equal(completed.filter((item) => item.effect === "advisory").length, 2);
 });
 
 test("puan kapsamı: üretilen bütüncül kriter kimliği mevcut kimlikle çakışmaz", () => {

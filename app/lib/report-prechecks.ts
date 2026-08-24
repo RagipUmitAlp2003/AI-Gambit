@@ -20,7 +20,7 @@ function wordsOf(text: string): string[] {
 
 /* ----------------------------- Dosya kapısı ----------------------------- */
 
-/** Temel ayarlardaki ihlal davranışını kontrol durumuna çevirir. */
+/** PDF'den çıkarılan ihlal sonucunu kontrol durumuna çevirir. */
 function violationStatus(setup: SetupData): CheckStatus {
   if (setup.defaultViolationAction === "block") return "failed";
   if (setup.defaultViolationAction === "warn") return "warning";
@@ -34,46 +34,84 @@ function violationStatus(setup: SetupData): CheckStatus {
 export function buildFileGateChecks(file: File, setup: SetupData, existingFileCount = 0): PreCheck[] {
   const checks: PreCheck[] = [];
   const isPdf = file.type === "application/pdf" || lower(file.name).endsWith(".pdf");
+  const lastDot = file.name.lastIndexOf(".");
+  const extension = lastDot > 0 && lastDot < file.name.length - 1
+    ? file.name.slice(lastDot + 1).toUpperCase()
+    : "";
+
+  // Mevcut değerlendirme motorunun teknik kabul koşulu, yarışma kuralından
+  // ayrı gösterilir. Böylece sistem sınırı PDF'deki resmî kurala dönüşmez.
   checks.push({
-    id: "gate-format",
+    id: "engine-format",
     kind: "file_gate",
-    name: "Dosya formatı",
-    status: isPdf ? "passed" : violationStatus(setup),
+    name: "Sistemde analiz edilebilir dosya",
+    status: isPdf ? "passed" : "failed",
     method: "deterministic",
     detail: isPdf
-      ? "Dosya izin verilen PDF formatında."
-      : `Dosya PDF değil. Profil yalnızca şu formatlara izin veriyor: ${setup.allowedFormats.join(", ")}.`,
+      ? "Dosya PDF olduğu için bu sürümde içerik analizi yapılabilir."
+      : "Bu sürümün içerik analiz motoru yalnızca PDF dosyalarını okuyabilir.",
     evidence: [],
   });
+
   const sizeMb = file.size / 1024 / 1024;
-  // AI uç noktası ve tarayıcı akışı aynı sınırı kullanır. Eski profillerde
-  // daha yüksek değer bulunsa bile sunucunun 18 MB sınırı sessizce aşılmaz.
-  const effectiveMaxSizeMb = Math.min(setup.maxFileSizeMb, 18);
-  const sizeOk = sizeMb <= effectiveMaxSizeMb;
+  const engineSizeOk = sizeMb <= 50;
   checks.push({
-    id: "gate-size",
+    id: "engine-size",
     kind: "file_gate",
-    name: "Dosya boyutu",
-    status: sizeOk ? "passed" : violationStatus(setup),
+    name: "Sistemde analiz edilebilir boyut",
+    status: engineSizeOk ? "passed" : "failed",
     method: "deterministic",
-    detail: sizeOk
-      ? `Dosya ${sizeMb.toFixed(1)} MB; ${effectiveMaxSizeMb} MB sınırının altında.`
-      : `Dosya ${sizeMb.toFixed(1)} MB; bu sürümde uygulanan ${effectiveMaxSizeMb} MB sınırını aşıyor.`,
+    detail: engineSizeOk
+      ? `Dosya ${sizeMb.toFixed(1)} MB; sistemin 50 MB teknik analiz sınırının altında.`
+      : `Dosya ${sizeMb.toFixed(1)} MB; sistemin 50 MB teknik analiz sınırını aşıyor. Bu sınır yarışma kuralı değil, mevcut analiz motorunun kapasitesidir.`,
     evidence: [],
   });
+
+  if (setup.allowedFormats.length > 0) {
+    const formatOk = setup.allowedFormats.map((format) => format.replace(/^\./, "").toUpperCase()).includes(extension);
+    checks.push({
+      id: "gate-format",
+      kind: "file_gate",
+      name: "PDF'deki teslim formatı",
+      status: formatOk ? "passed" : violationStatus(setup),
+      method: "deterministic",
+      detail: formatOk
+        ? `Dosya ${extension} formatında; PDF'de izin verilen ${setup.allowedFormats.join(", ")} listesine uygun.`
+        : `Dosya ${extension || "uzantısız"}; PDF'de izin verilen formatlar: ${setup.allowedFormats.join(", ")}.`,
+      evidence: [],
+    });
+  }
+
+  if (setup.maxFileSizeMb > 0) {
+    const sizeOk = sizeMb <= setup.maxFileSizeMb;
+    checks.push({
+      id: "gate-size",
+      kind: "file_gate",
+      name: "PDF'deki dosya boyutu sınırı",
+      status: sizeOk ? "passed" : violationStatus(setup),
+      method: "deterministic",
+      detail: sizeOk
+        ? `Dosya ${sizeMb.toFixed(1)} MB; PDF'deki ${setup.maxFileSizeMb} MB sınırının altında.`
+        : `Dosya ${sizeMb.toFixed(1)} MB; PDF'de yazan ${setup.maxFileSizeMb} MB sınırını aşıyor.`,
+      evidence: [],
+    });
+  }
+
   const nextCount = existingFileCount + 1;
-  const countOk = nextCount <= setup.maxFileCount;
-  checks.push({
-    id: "gate-count",
-    kind: "file_gate",
-    name: "Dosya sayısı",
-    status: countOk ? "passed" : violationStatus(setup),
-    method: "deterministic",
-    detail: countOk
-      ? `Bu başvuru için ${nextCount}. dosya; profil en fazla ${setup.maxFileCount} dosyaya izin veriyor.`
-      : `Bu başvuru için ${nextCount}. dosya yükleniyor; profil en fazla ${setup.maxFileCount} dosyaya izin veriyor.`,
-    evidence: [],
-  });
+  if (setup.maxFileCount > 0) {
+    const countOk = nextCount <= setup.maxFileCount;
+    checks.push({
+      id: "gate-count",
+      kind: "file_gate",
+      name: "PDF'deki dosya sayısı sınırı",
+      status: countOk ? "passed" : violationStatus(setup),
+      method: "deterministic",
+      detail: countOk
+        ? `Bu başvuru için ${nextCount}. dosya; PDF en fazla ${setup.maxFileCount} dosyaya izin veriyor.`
+        : `Bu başvuru için ${nextCount}. dosya yükleniyor; PDF en fazla ${setup.maxFileCount} dosyaya izin veriyor.`,
+      evidence: [],
+    });
+  }
   return checks;
 }
 

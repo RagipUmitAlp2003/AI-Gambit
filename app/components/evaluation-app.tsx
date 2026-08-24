@@ -360,8 +360,8 @@ function PoolView({ profile, profileError, onProfileFile, records, uploadError, 
               <div className="upload-symbol" aria-hidden="true">↑</div>
               <h2>Katılımcı raporunu buraya bırakın</h2>
               <p>
-                Kapı kuralları: {profile.setup.allowedFormats.join(", ")} · en fazla {profile.setup.maxFileSizeMb} MB ·
-                ihlalde “{profile.setup.defaultViolationAction === "block" ? "yüklemeyi engelle" : profile.setup.defaultViolationAction === "warn" ? "uyarı oluştur" : "jüri incelemesine gönder"}”
+                PDF belgesinden çıkarılan teslim kuralları: {profile.setup.allowedFormats.join(", ") || "format belirtilmemiş"} · {profile.setup.maxFileSizeMb > 0 ? `en fazla ${profile.setup.maxFileSizeMb} MB` : "boyut belirtilmemiş"} ·
+                ihlal sonucu “{profile.setup.defaultViolationAction === "block" ? "yüklemeyi engelle" : profile.setup.defaultViolationAction === "warn" ? "uyarı oluştur" : profile.setup.defaultViolationAction === "jury" ? "jüri incelemesine gönder" : "PDF'de açıkça belirtilmemiş"}”
               </p>
               <label className="field eval-participant-field">
                 <span className="field-label">Takım / başvuru adı</span>
@@ -1206,7 +1206,7 @@ export default function EvaluationApp() {
     if (gateBlocksUpload(gateChecks)) {
       const failed = gateChecks.filter((check) => check.status === "failed");
       setUploadError(
-        `${failed.map((check) => check.detail).join(" ")} Profil ihlal davranışı "Yüklemeyi engelle" olduğu için dosya havuza alınmadı.`,
+        `${failed.map((check) => check.detail).join(" ")} Dosya bu sürümde analiz edilemediği veya PDF'de açıkça engelleyici bir kural bulunduğu için havuza alınmadı.`,
       );
       return false;
     }

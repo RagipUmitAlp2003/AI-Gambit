@@ -28,10 +28,10 @@ export function validateProfileExport(value: unknown): { profile: ProfileExport 
     return { profile: null, error: "Profilde izin verilen dosya formatları tanımlı değil. Profili yeniden oluşturun." };
   }
   const numberFields: Array<keyof typeof setup> = ["maxFileSizeMb", "maxFileCount"];
-  if (numberFields.some((field) => !Number.isFinite(setup[field] as number) || (setup[field] as number) <= 0)) {
-    return { profile: null, error: "Profildeki dosya boyutu veya dosya sayısı sınırı geçerli bir sayı değil." };
+  if (numberFields.some((field) => !Number.isFinite(setup[field] as number) || (setup[field] as number) < 0)) {
+    return { profile: null, error: "Profildeki dosya boyutu veya dosya sayısı bilgisi geçerli değil." };
   }
-  if (!["block", "warn", "jury"].includes(setup.defaultViolationAction as string)) {
+  if (!["block", "warn", "jury", "unspecified"].includes(setup.defaultViolationAction as string)) {
     return { profile: null, error: "Profildeki ihlal davranışı tanınmadı. Profili Kriter Atölyesi'nden yeniden indirin." };
   }
   if (!Array.isArray(candidate.criteria) || candidate.criteria.length === 0) {

@@ -1,10 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import CompetitionSelect from "./competition-select";
-import SearchSelect from "./search-select";
 import DocumentLibraryModal from "./document-library-modal";
-import { categoriesFor, reportTypesFor, stagesFor } from "../lib/competitions";
 import FileBadge from "./file-badge";
 import TemplatePreview from "./template-preview";
 import { analyzeWithGemini } from "../lib/gemini-analyzer";
@@ -28,30 +25,24 @@ import type {
   ProfileExport,
   SetupData,
   Step,
-  ViolationAction,
 } from "../lib/types";
 
-const DEFAULT_COMPETITION = "Akıllı Ulaşım Sistemleri Yarışması";
-const DEFAULT_CATEGORY = categoriesFor(DEFAULT_COMPETITION)[0];
-const DEFAULT_STAGE = stagesFor(DEFAULT_COMPETITION)[0];
-
 const DEFAULT_SETUP: SetupData = {
-  competition: DEFAULT_COMPETITION,
-  category: DEFAULT_CATEGORY,
-  stage: DEFAULT_STAGE,
-  reportType: reportTypesFor(DEFAULT_COMPETITION, DEFAULT_STAGE)[0],
-  year: "2026",
-  allowedFormats: ["PDF"],
-  maxFileSizeMb: 18,
-  maxFileCount: 1,
-  defaultViolationAction: "block",
+  competition: "Belgede belirtilmemiş",
+  category: "Belgede belirtilmemiş",
+  stage: "Belgede belirtilmemiş",
+  reportType: "Belgede belirtilmemiş",
+  year: "Belgede belirtilmemiş",
+  allowedFormats: [],
+  maxFileSizeMb: 0,
+  maxFileCount: 0,
+  defaultViolationAction: "unspecified",
 };
 
 const STEPS = [
-  { id: 1, title: "Temel ayarlar", short: "Yarışma ve teslim kapısı" },
-  { id: 2, title: "Kaynak belge", short: "Resmî kriter PDF'si" },
-  { id: 3, title: "Kriter inceleme", short: "AI çıkarımlarını doğrula" },
-  { id: 4, title: "Profil onayı", short: "Sürümü kaydet" },
+  { id: 1, title: "Kaynak belge", short: "Resmî kriter PDF'si" },
+  { id: 2, title: "Kriter inceleme", short: "Belgeden çıkan kuralları doğrula" },
+  { id: 3, title: "Profil onayı", short: "Sürümü kaydet" },
 ] as const;
 
 const TYPE_LABELS: Record<CriterionType, string> = {
@@ -72,10 +63,10 @@ const METHOD_LABELS: Record<EvaluationMethod, string> = {
 };
 
 const EFFECT_LABELS: Record<CriterionEffect, string> = {
-  gate: "Uygunluk / geçiş şartı",
+  gate: "Sağlanması gereken uygunluk koşulu",
   score: "Puan kazandırır",
-  penalty: "Ceza puanı",
-  threshold: "Baraj / devam şartı",
+  penalty: "Toplamdan puan düşüren kural",
+  threshold: "Devam etmek için gereken en düşük sonuç",
   advisory: "Bilgi ve öneri",
 };
 
@@ -83,12 +74,6 @@ const CONFIDENCE_LABELS: Record<Confidence, string> = {
   high: "Yüksek güven",
   medium: "Orta güven",
   low: "Düşük güven",
-};
-
-const ACTION_LABELS: Record<ViolationAction, string> = {
-  block: "Yüklemeyi engelle",
-  warn: "Uyarı oluştur",
-  jury: "Jüri incelemesine gönder",
 };
 
 function formatBytes(bytes: number) {
@@ -185,201 +170,18 @@ function Topbar({ step }: { step: Step }) {
   );
 }
 
-function SetupStep({
-  setup,
-  onChange,
-  onContinue,
-  file,
-  result,
-  criteria,
-}: {
-  setup: SetupData;
-  onChange: (value: SetupData) => void;
-  onContinue: () => void;
-  file: File | null;
-  result: AnalysisResult | null;
-  criteria: Criterion[];
-}) {
-  const canContinue = setup.competition.trim() && setup.stage.trim() && setup.reportType.trim();
-  const categoryOptions = categoriesFor(setup.competition);
-  const stageOptions = stagesFor(setup.competition);
-  const reportOptions = reportTypesFor(setup.competition, setup.stage);
-
-  // Yarışma → Kategori → Aşama → Rapor türü zinciri: üst alan listeden
-  // seçildiğinde alt alanlar yeni seçeneklere göre güncellenir; mevcut değer
-  // hâlâ geçerliyse korunur, görevli her değeri sonradan değiştirebilir.
-  function pickCompetition(competition: string) {
-    const categories = categoriesFor(competition);
-    const category = categories.includes(setup.category) ? setup.category : categories[0] ?? setup.category;
-    const stages = stagesFor(competition);
-    const stage = stages.includes(setup.stage) ? setup.stage : stages[0] ?? setup.stage;
-    const reports = reportTypesFor(competition, stage);
-    const reportType = reports.includes(setup.reportType) ? setup.reportType : reports[0] ?? setup.reportType;
-    onChange({ ...setup, competition, category, stage, reportType });
-  }
-
-  function pickStage(stage: string) {
-    const reports = reportTypesFor(setup.competition, stage);
-    const reportType = reports.includes(setup.reportType) ? setup.reportType : reports[0] ?? setup.reportType;
-    onChange({ ...setup, stage, reportType });
-  }
-
-  return (
-    <section className="workspace setup-workspace" aria-labelledby="setup-title">
-      <div className="workspace-heading">
-        <div>
-          <span className="section-kicker">Katılımcı raporundan önce</span>
-          <h1 id="setup-title">Değerlendirme profilinin çerçevesini kurun</h1>
-          <p>
-            Bu üç bölüm, şartnamede unutulabilecek en temel teslim kurallarını güvenceye alır.
-            İçerik ve sayfa düzeni kriterlerini bir sonraki adımda belgeden çıkaracağız.
-          </p>
-        </div>
-        <span className="step-fraction">1 / 4</span>
-      </div>
-
-      <div className="setup-layout">
-        <form className="setup-form" onSubmit={(event) => { event.preventDefault(); onContinue(); }}>
-          <fieldset>
-            <legend><span>1</span> Bu profil ne için hazırlanıyor?</legend>
-            <div className="form-grid two-col">
-              <Field label="Yarışma adı" hint="Yazmaya başlayın; kayıtlı yarışmalar anlık filtrelenir.">
-                <CompetitionSelect
-                  value={setup.competition}
-                  onChange={(competition) => onChange({ ...setup, competition })}
-                  onPick={pickCompetition}
-                />
-              </Field>
-              <Field label="Kategori / seviye" hint="Seçenekler seçilen yarışmaya göre listelenir.">
-                <SearchSelect
-                  value={setup.category}
-                  onChange={(category) => onChange({ ...setup, category })}
-                  options={categoryOptions}
-                  placeholder="Örn. Üniversite Seviyesi"
-                  ariaLabel="Kategori veya seviye seç"
-                />
-              </Field>
-              <Field label="Aşama" hint="Seçenekler yarışma ve kategoriye göre listelenir.">
-                <SearchSelect
-                  value={setup.stage}
-                  onChange={(stage) => onChange({ ...setup, stage })}
-                  onPick={pickStage}
-                  options={stageOptions}
-                  placeholder="Örn. Ön değerlendirme"
-                  ariaLabel="Değerlendirme aşaması seç"
-                />
-              </Field>
-              <Field label="Rapor türü" hint="Seçenekler seçilen aşamaya göre listelenir.">
-                <SearchSelect
-                  value={setup.reportType}
-                  onChange={(reportType) => onChange({ ...setup, reportType })}
-                  options={reportOptions}
-                  placeholder="Örn. Ön Tasarım Raporu (ÖTR)"
-                  ariaLabel="Rapor türü seç"
-                />
-              </Field>
-              <Field label="Yarışma yılı">
-                <input
-                  inputMode="numeric"
-                  value={setup.year}
-                  onChange={(event) => onChange({ ...setup, year: event.target.value })}
-                />
-              </Field>
-            </div>
-          </fieldset>
-
-          <fieldset>
-            <legend><span>2</span> Katılımcı hangi dosyayı yükleyebilir?</legend>
-            <div className="form-grid three-col">
-              <Field label="İzin verilen format" hint="İlk sürümde PDF ile sınırlandı.">
-                <div className="fixed-value"><span>PDF</span><small>Değiştirilemez</small></div>
-              </Field>
-              <Field label="En büyük dosya boyutu">
-                <div className="input-with-unit">
-                  <input
-                    type="number"
-                    min={1}
-                    max={18}
-                    value={setup.maxFileSizeMb}
-                    onChange={(event) => onChange({ ...setup, maxFileSizeMb: Number(event.target.value) })}
-                  />
-                  <span>MB</span>
-                </div>
-              </Field>
-              <Field label="En fazla dosya sayısı">
-                <input
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={setup.maxFileCount}
-                  onChange={(event) => onChange({ ...setup, maxFileCount: Number(event.target.value) })}
-                />
-              </Field>
-            </div>
-          </fieldset>
-
-          <fieldset>
-            <legend><span>3</span> Teknik kurala uyulmazsa ne yapılmalı?</legend>
-            <div className="action-options">
-              {(Object.keys(ACTION_LABELS) as ViolationAction[]).map((action) => (
-                <label key={action} className={`action-option ${setup.defaultViolationAction === action ? "selected" : ""}`}>
-                  <input
-                    type="radio"
-                    name="violation"
-                    value={action}
-                    checked={setup.defaultViolationAction === action}
-                    onChange={() => onChange({ ...setup, defaultViolationAction: action })}
-                  />
-                  <span className="radio-mark" />
-                  <span>
-                    <strong>{ACTION_LABELS[action]}</strong>
-                    <small>
-                      {action === "block" && "Kesin teknik ihlallerde katılımcı dosyası kabul edilmez."}
-                      {action === "warn" && "Dosya alınır, yönetici ekranında açık uyarı oluşur."}
-                      {action === "jury" && "Karar otomatik verilmez; görevliye inceleme açılır."}
-                    </small>
-                  </span>
-                </label>
-              ))}
-            </div>
-          </fieldset>
-
-          <div className="form-actions">
-            <span className="save-note">Ayarlar bu cihazda taslak olarak tutulur.</span>
-            <button className="primary-button" type="submit" disabled={!canContinue}>
-              Kaynak belgeye geç <span aria-hidden="true">→</span>
-            </button>
-          </div>
-        </form>
-
-        <aside className="setup-preview" aria-label="Değerlendirme şablonu canlı önizlemesi">
-          <TemplatePreview setup={setup} file={file} result={result} criteria={criteria} />
-        </aside>
-      </div>
-    </section>
-  );
-}
-
 function UploadStep({
-  setup,
   file,
-  result,
-  criteria,
   onFile,
   onSample,
-  onBack,
   onAnalyze,
   loading,
   loadingMessage,
   error,
 }: {
-  setup: SetupData;
   file: File | null;
-  result: AnalysisResult | null;
-  criteria: Criterion[];
   onFile: (file: File) => void;
-  onSample: (file: File, setup: Partial<SetupData>) => void;
-  onBack: () => void;
+  onSample: (file: File) => void;
   onAnalyze: () => void;
   loading: boolean;
   loadingMessage: string;
@@ -401,7 +203,7 @@ function UploadStep({
           <h1 id="upload-title">Resmî değerlendirme belgesini yükleyin</h1>
           <p>Buraya katılımcı projesi değil; kriterleri, yazım kurallarını ve ihlal sonuçlarını anlatan PDF yüklenir.</p>
         </div>
-        <span className="step-fraction">2 / 4</span>
+        <span className="step-fraction">1 / 3</span>
       </div>
 
       <div className="source-explainer">
@@ -413,7 +215,7 @@ function UploadStep({
         <span className="draft-safe-note">Geri dönerseniz seçilen belge ve analiz taslağı korunur.</span>
       </div>
 
-      <div className="upload-layout">
+      <div className="upload-layout source-only">
         <div
           className={`drop-zone ${dragging ? "dragging" : ""} ${file ? "has-file" : ""}`}
           onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
@@ -451,9 +253,6 @@ function UploadStep({
           )}
         </div>
 
-        <aside className="setup-preview upload-preview" aria-label="Değerlendirme şablonu canlı önizlemesi">
-          <TemplatePreview setup={setup} file={file} result={result} criteria={criteria} />
-        </aside>
       </div>
 
       <section className="library-shortcut" aria-labelledby="library-shortcut-title">
@@ -489,7 +288,7 @@ function UploadStep({
       ) : null}
 
       <div className="workspace-actions">
-        <button type="button" className="back-button" onClick={onBack}>← Temel ayarlara dön <small>Taslak korunur</small></button>
+        <span className="source-limit-note">Kaynak PDF analiz motoru için teknik yükleme sınırı: 18 MB.</span>
         <button type="button" className="primary-button" disabled={!file || loading} onClick={onAnalyze}>
           Belgeyi analiz et <span aria-hidden="true">→</span>
         </button>
@@ -500,7 +299,6 @@ function UploadStep({
 
 function CriteriaReview({
   setup,
-  setSetup,
   file,
   documentUrl,
   result,
@@ -510,9 +308,9 @@ function CriteriaReview({
   setIncludedGroupIds,
   onBack,
   onApprove,
+  approvalError,
 }: {
   setup: SetupData;
-  setSetup: (setup: SetupData) => void;
   file: File;
   documentUrl: string;
   result: AnalysisResult;
@@ -522,6 +320,7 @@ function CriteriaReview({
   setIncludedGroupIds: (groupIds: string[]) => void;
   onBack: () => void;
   onApprove: () => void;
+  approvalError: string;
 }) {
   const [selectedId, setSelectedId] = useState(criteria[0]?.id ?? "");
   const [query, setQuery] = useState("");
@@ -541,7 +340,6 @@ function CriteriaReview({
   const scoreGroupCount = scorePlan?.groups.length ?? active.filter((item) => criterionEffect(item) === "score").length;
   const humanReviewCount = active.filter((item) => ["human", "hybrid"].includes(item.evaluationMethod)).length;
   const deterministicCount = active.filter((item) => item.evaluationMethod === "deterministic").length;
-  const conflicts = active.filter((item) => item.issue).length;
   const decisionRules = deriveDecisionRules(criteria, scorePlan);
   const groups = scorePlan?.groups ?? [];
   // Kapsam kararı yalnızca kimlik üzerinden verilir; aynı isimli iki grup karışmaz.
@@ -561,14 +359,14 @@ function CriteriaReview({
   const criterionTotal = maxRawScoreOf(scopedCriteria);
   const groupTotal = included.reduce((sum, group) => sum + group.maxScore, 0);
   const officialTotal = groups.length ? groupTotal : (displayTotal ?? criterionTotal);
-  // Resmî toplam ile puanlanabilir kriter toplamı çelişiyorsa sessiz bir ölçek
-  // dönüşümü yapılmaz; yönetici kriterleri veya kapsamı düzeltmeden onay veremez.
-  const scopeAnomaly = officialTotal > 0 && criterionTotal !== officialTotal
-    ? `Puanlanabilir aktif kriterlerin azami toplamı ${criterionTotal}, PDF'nin bu kapsam için ilan ettiği resmî toplam ${officialTotal}. Kriter puanlarını veya kapsamdaki grupları eşitleyin.`
+  // Eski kayıtlarda veya görevli düzenlemesinden sonra toplam farklılaşırsa
+  // bilgi verilir; yeni analizlerde puan kapsamı motor tarafından dengelenir.
+  const scoreDifferenceNote = officialTotal > 0 && criterionTotal !== officialTotal
+    ? `Aktif puan kriterleri ${criterionTotal}, PDF'nin seçili grupları ${officialTotal} puan ediyor. Onaydan önce puan alanlarını gözden geçirmeniz önerilir.`
     : null;
   // Şartname birden çok aşamayı topluyorsa yalnızca kapsama alınan gruplar puanlanır.
   const scopeNarrowed = groups.length > 1 && included.length > 0 && included.length < groups.length;
-  const canApprove = reviewConfirmed && conflicts === 0 && !scopeAnomaly && active.length > 0
+  const canApprove = reviewConfirmed && active.length > 0
     && (groups.length === 0 || included.length > 0);
 
   function toggleGroup(groupId: string, on: boolean) {
@@ -616,27 +414,15 @@ function CriteriaReview({
     setReviewConfirmed(false);
   }
 
-  function resolveConflict(useDocumentValue: boolean) {
-    const match = selected.name.match(/(\d+)\s*MB/i);
-    if (useDocumentValue && match) {
-      setSetup({ ...setup, maxFileSizeMb: Number(match[1]) });
-    }
-    update({
-      issue: undefined,
-      aiInterpretation: `${selected.aiInterpretation} Yönetici çakışmayı inceledi ve ${useDocumentValue ? "belgedeki değeri" : "başlangıç ayarını"} geçerli kabul etti.`,
-    });
-    setReviewConfirmed(false);
-  }
-
   return (
     <section className="workspace review-workspace" aria-labelledby="review-title">
       <div className="review-heading">
         <div>
-          <span className="section-kicker">AI çıkarım taslağı</span>
+          <span className="section-kicker">Belgeden çıkarılan taslak</span>
           <h1 id="review-title">Kriterleri doğrulayın ve kesinleştirin</h1>
           <p>{file.name} · {result.pageCount} sayfa · Her çıkarım kaynağıyla birlikte gösteriliyor.</p>
         </div>
-        <span className="step-fraction">3 / 4</span>
+        <span className="step-fraction">2 / 3</span>
       </div>
 
       <div className="analysis-summary" aria-label="Analiz özeti">
@@ -644,7 +430,7 @@ function CriteriaReview({
         <div><strong>{scoreGroupCount}</strong><span>puan grubu</span></div>
         <div><strong>{deterministicCount}</strong><span>kesin kontrol</span></div>
         <div><strong>{humanReviewCount}</strong><span>görevli onayı</span></div>
-        <div className={conflicts ? "summary-warning" : "summary-ok"}><strong>{conflicts}</strong><span>açık çakışma</span></div>
+        <div className="summary-ok"><strong>{result.provider === "api" ? "AI" : "Demo"}</strong><span>çıkarım kaynağı</span></div>
         <div><strong>{displayTotal ?? "—"}</strong><span>PDF toplam puanı</span></div>
       </div>
 
@@ -660,7 +446,7 @@ function CriteriaReview({
             <p>Sistem puanı değiştirmez; PDF’de ilan edilen grupları, barajları ve alt kalemleri görünür kılar.</p>
           </div>
           <span className={`score-audit ${scorePlan?.auditStatus ?? "not_declared"}`}>
-            {scorePlan?.auditStatus === "matched" ? "Toplam doğrulandı" : scorePlan?.auditStatus === "mismatch" ? "Eksik veya çakışan puan" : "Genel toplam belirtilmemiş"}
+            {scorePlan?.auditStatus === "matched" ? "Toplam doğrulandı" : scorePlan?.auditStatus === "mismatch" ? "Toplam yeniden kontrol edilmeli" : "Genel toplam belirtilmemiş"}
           </span>
         </div>
         {scorePlan?.groups.length ? (
@@ -725,25 +511,25 @@ function CriteriaReview({
             dahil edilir. Grup bazlı kapsam seçimi için belgeyi yeniden analiz edin.
           </p>
         ) : null}
-        {scopeAnomaly ? <p className="score-audit-note warning">{scopeAnomaly}</p> : null}
+        {scoreDifferenceNote ? <p className="score-audit-note warning">{scoreDifferenceNote}</p> : null}
         <p className={`score-audit-note ${scorePlan?.auditStatus === "mismatch" ? "warning" : ""}`}>
           {scorePlan?.auditMessage ?? "Bu analiz eski veri modeliyle oluşturuldu. Güncel puan denetimi için belgeyi yeniden analiz edin."}
         </p>
       </section>
 
       <section className="decision-rules" aria-labelledby="decision-rules-title">
-        <div className="score-plan-heading">
+        <div className="score-plan-heading decision-heading">
           <div>
-            <h2 id="decision-rules-title">Karar kuralları</h2>
-            <p>Toplam puanın yanında ayrıca denetlenecek geçiş koşulları, barajlar, cezalar ve eleme maddeleri.</p>
+            <h2 id="decision-rules-title">Puan dışında sonucu etkileyen kurallar</h2>
+            <p>Bu kurallar puan satırı değildir. Sistem koşulu kontrol eder, kanıtı gösterir; insan kararı gereken yerde son sözü görevli verir.</p>
           </div>
         </div>
         <div className="decision-rule-grid">
           {([
-            { key: "gates", title: "Geçiş koşulları", items: decisionRules.gates },
-            { key: "thresholds", title: "Barajlar", items: decisionRules.thresholds },
-            { key: "penalties", title: "Cezalar", items: decisionRules.penalties },
-            { key: "eliminations", title: "Eleme / diskalifiye", items: decisionRules.eliminations },
+            { key: "gates", title: "Sağlanması gereken uygunluk koşulları", items: decisionRules.gates },
+            { key: "thresholds", title: "Devam için gereken en düşük sonuçlar", items: decisionRules.thresholds },
+            { key: "penalties", title: "Toplam puandan yapılacak kesintiler", items: decisionRules.penalties },
+            { key: "eliminations", title: "Eleme veya diskalifiye incelemeleri", items: decisionRules.eliminations },
           ] as const).map((column) => (
             <details key={column.key} className={`decision-column ${column.key}`}>
               <summary><strong>{column.items.length}</strong><span>{column.title}</span></summary>
@@ -824,7 +610,6 @@ function CriteriaReview({
                           ? "Geçiş"
                           : "Öneri"}
                 </span>
-                {item.issue ? <span className="row-alert" title="Çakışma var">!</span> : null}
               </button>
             ))}
             {!filtered.length ? <div className="empty-ledger">Bu filtrede kriter bulunamadı.</div> : null}
@@ -850,12 +635,9 @@ function CriteriaReview({
             </div>
 
             {selected.issue ? (
-              <div className="conflict-box" role="alert">
-                <div><strong>Kaynaklar arasında çakışma bulundu</strong><p>{selected.issue}</p></div>
-                <div className="conflict-actions">
-                  <button type="button" onClick={() => resolveConflict(true)}>Belgedeki değeri kullan</button>
-                  <button type="button" onClick={() => resolveConflict(false)}>Başlangıç ayarını koru</button>
-                </div>
+              <div className="audit-note" role="note">
+                <strong>Ek denetim notu</strong>
+                <p>{selected.issue}</p>
               </div>
             ) : null}
 
@@ -971,11 +753,11 @@ function CriteriaReview({
           </label>
           {!canApprove ? (
             <small>
-              {conflicts > 0 && `${conflicts} çakışmayı çözün. `}
-              {scopeAnomaly && "Resmî puan toplamı ile kriter toplamını eşitleyin. "}
+              {groups.length > 0 && included.length === 0 && "En az bir puan grubunu değerlendirmeye dahil edin. "}
               {!reviewConfirmed && "Görevli kontrolünü onaylayın."}
             </small>
           ) : <small className="ready-note">Profil onaya hazır.</small>}
+          {approvalError ? <small className="approval-error" role="alert">{approvalError}</small> : null}
         </div>
         <button type="button" className="primary-button" disabled={!canApprove} onClick={onApprove}>Profili onayla <span>→</span></button>
       </div>
@@ -1060,10 +842,10 @@ function ProfileReady({
           </div>
         ) : null}
         <div className="profile-footer-note">
-          <span>Karar kuralları</span>
+          <span>Puan dışı kurallar</span>
           <p>
-            Geçiş koşulu {decisionRules.gates.length} · Baraj {decisionRules.thresholds.length} ·
-            Ceza {decisionRules.penalties.length} · Eleme {decisionRules.eliminations.length} madde
+            Uygunluk koşulu {decisionRules.gates.length} · En düşük sonuç {decisionRules.thresholds.length} ·
+            Puan kesintisi {decisionRules.penalties.length} · Eleme incelemesi {decisionRules.eliminations.length} madde
             toplam puandan bağımsız olarak ayrıca denetlenir.
           </p>
         </div>
@@ -1093,9 +875,13 @@ export default function CriteriaApp() {
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("");
   const [error, setError] = useState("");
+  const [approvalError, setApprovalError] = useState("");
   const [draftReady, setDraftReady] = useState(false);
 
-  const backgroundLabel = useMemo(() => `${setup.competition} · ${setup.reportType}`, [setup]);
+  const backgroundLabel = useMemo(
+    () => result ? `${setup.competition} · ${setup.reportType}` : "Organizatör PDF'si bekleniyor",
+    [result, setup],
+  );
 
   useEffect(() => {
     let active = true;
@@ -1103,9 +889,16 @@ export default function CriteriaApp() {
       const snapshot = loadDraftSnapshot();
       const storedFile = await loadDraftFile();
       if (!active) return;
-      if (snapshot) {
+      const legacyManagerDraft = Boolean(snapshot && (
+        !snapshot.result?.setup
+        || snapshot.criteria.some((criterion) => (
+          criterion.origin === "manager"
+          && /belge yüklenmeden önce|başlangıç ayar/i.test(`${criterion.sourceText} ${criterion.aiInterpretation}`)
+        ))
+      ));
+      if (snapshot && !legacyManagerDraft) {
         const restoredCriteria = snapshot.criteria.map(applyDecisionSafetyPolicy);
-        setSetup(snapshot.setup);
+        setSetup(snapshot.result?.setup ?? snapshot.setup ?? DEFAULT_SETUP);
         setResult(snapshot.result);
         setCriteria(restoredCriteria);
         // Eski taslaklarda kapsam bilgisi yok; tüm gruplar dahil sayılır.
@@ -1119,19 +912,21 @@ export default function CriteriaApp() {
             : restoredGroups.flatMap((group) => (group.id ? [group.id] : []))),
         );
         setProfile(snapshot.profile ? { ...snapshot.profile, criteria: snapshot.profile.criteria.map(applyDecisionSafetyPolicy) } : null);
+      } else if (legacyManagerDraft) {
+        // Önceki dört adımlı sürümün yönetici ayarları artık geçerli değildir.
+        // Kaynak dosya korunur; belge yeni, yalnızca-PDF akışıyla yeniden analiz edilir.
+        setSetup(DEFAULT_SETUP);
+        setResult(null);
+        setCriteria([]);
+        setProfile(null);
+        setIncludedGroupIds([]);
       }
       if (storedFile) {
         setFile(storedFile);
         setDocumentUrl(URL.createObjectURL(storedFile));
       }
-      if (snapshot) {
-        const safeStep = snapshot.step === 4 && !snapshot.profile
-          ? 3
-          : snapshot.step === 3 && (!snapshot.result || !storedFile)
-            ? 2
-            : snapshot.step;
-        setStep(safeStep);
-      }
+      if (snapshot && !legacyManagerDraft) setStep(snapshot.profile ? 3 : snapshot.result && storedFile ? 2 : 1);
+      else setStep(1);
       setDraftReady(true);
     }
     restoreDraft();
@@ -1175,16 +970,17 @@ export default function CriteriaApp() {
       setLoadingMessage("PDF sayfa yapısı doğrulanıyor…");
       const pageCount = await getPdfPageCount(file);
       setLoadingMessage("PDF, yapısı korunarak AI modele aktarılıyor…");
-      const analysis = await analyzeWithGemini(file, setup, pageCount);
+      const analysis = await analyzeWithGemini(file, pageCount);
       setLoadingMessage("Kaynak sayfaları ve güven açıklamaları eşleştiriliyor…");
       if (!analysis.criteria.length) {
         throw new Error("Belgede güvenilir bir değerlendirme kriteri bulunamadı.");
       }
       setResult(analysis);
+      setSetup(analysis.setup);
       setCriteria(analysis.criteria.map(applyDecisionSafetyPolicy));
       // Varsayılan: belgedeki tüm puan grupları kapsamda; yönetici daraltabilir.
       setIncludedGroupIds((analysis.scorePlan?.groups ?? []).flatMap((group) => (group.id ? [group.id] : [])));
-      setStep(3);
+      setStep(2);
     } catch (analysisError) {
       const message = analysisError instanceof Error ? analysisError.message : "Bilinmeyen bir hata oluştu.";
       setError(`${message} API bağlantısını, kotayı veya kaynak belgenin geçerliliğini kontrol edin.`);
@@ -1195,6 +991,7 @@ export default function CriteriaApp() {
 
   function approve() {
     if (!file || !result) return;
+    setApprovalError("");
     const declaredTotal = result.scorePlan?.declaredTotalScore ?? null;
     const groups = result.scorePlan?.groups ?? [];
     const groupsHaveIds = groups.some((group) => group.id);
@@ -1234,9 +1031,13 @@ export default function CriteriaApp() {
       },
       decisionRules: deriveDecisionRules(scopedCriteria, result.scorePlan),
     };
-    localStorage.setItem("kriter-atolyesi:last-profile", JSON.stringify(nextProfile));
-    setProfile(nextProfile);
-    setStep(4);
+    try {
+      localStorage.setItem("kriter-atolyesi:last-profile", JSON.stringify(nextProfile));
+      setProfile(nextProfile);
+      setStep(3);
+    } catch {
+      setApprovalError("Profil tarayıcıya kaydedilemedi. Gizli modu kapatın veya tarayıcı depolamasında yer açıp yeniden deneyin.");
+    }
   }
 
   function restart() {
@@ -1250,24 +1051,24 @@ export default function CriteriaApp() {
     setProfile(null);
     setIncludedGroupIds([]);
     setError("");
+    setApprovalError("");
     clearDraftSnapshot();
     saveDraftFile(null).catch(() => undefined);
   }
 
   const completedSteps = useMemo(() => {
     const completed = new Set<Step>();
-    if (step > 1 || file) completed.add(1);
-    if (result && file) {
+    if (result && file) completed.add(1);
+    if (profile) {
       completed.add(2);
       completed.add(3);
     }
-    if (profile) completed.add(4);
     return completed;
-  }, [file, profile, result, step]);
+  }, [file, profile, result]);
 
   function navigate(nextStep: Step) {
-    if (nextStep === 3 && (!result || !file)) return;
-    if (nextStep === 4 && !profile) return;
+    if (nextStep === 2 && (!result || !file)) return;
+    if (nextStep === 3 && !profile) return;
     setStep(nextStep);
   }
 
@@ -1276,8 +1077,8 @@ export default function CriteriaApp() {
       {/*
         THESIS: Kaynak belge ile onaylı kural arasındaki zinciri tek çalışma masasında görünür kılar; genel dashboard düzenini reddeder.
         OWN-WORLD: Soğuk beyaz kâğıt yüzey, lacivert mürekkep, turkuaz kanıt bağlantıları, kehribar belirsizlik ve sıkı belge satırları.
-        STORY: Yönetici çerçeveyi kurar, resmî PDF'yi yükler, AI çıkarımlarını kaynaklarıyla düzeltir ve sürümlü profili onaylar.
-        FIRST VIEWPORT: Solda dört adımlı sabit süreç izi; ortada tek aktif görev ve sağda yalnızca o göreve ait özet/kanıt yüzeyi.
+        STORY: Yönetici resmî PDF'yi yükler, belgeden çıkarılan kuralları kaynaklarıyla düzeltir ve sürümlü profili onaylar.
+        FIRST VIEWPORT: Solda üç adımlı sabit süreç izi; ortada tek aktif görev ve yalnızca o göreve ait özet/kanıt yüzeyi.
         FORM: Operasyonel inceleme masası; belge defteri ve karar tutanağı biçimlerinin birleşimi.
       */}
       <StepRail step={step} completedSteps={completedSteps} onNavigate={navigate} />
@@ -1285,37 +1086,19 @@ export default function CriteriaApp() {
         <Topbar step={step} />
         <div className="context-line" aria-hidden="true">{backgroundLabel}</div>
         {step === 1 ? (
-          <SetupStep
-            setup={setup}
-            onChange={setSetup}
-            onContinue={() => setStep(2)}
-            file={file}
-            result={result}
-            criteria={criteria}
-          />
-        ) : null}
-        {step === 2 ? (
           <UploadStep
-            setup={setup}
-            result={result}
-            criteria={criteria}
             file={file}
             onFile={chooseFile}
-            onSample={(sampleFile, sampleSetup) => {
-              setSetup((current) => ({ ...current, ...sampleSetup }));
-              chooseFile(sampleFile);
-            }}
-            onBack={() => setStep(1)}
+            onSample={(sampleFile) => chooseFile(sampleFile)}
             onAnalyze={analyze}
             loading={loading}
             loadingMessage={loadingMessage}
             error={error}
           />
         ) : null}
-        {step === 3 && result && file ? (
+        {step === 2 && result && file ? (
           <CriteriaReview
             setup={setup}
-            setSetup={setSetup}
             file={file}
             documentUrl={documentUrl}
             result={result}
@@ -1323,11 +1106,12 @@ export default function CriteriaApp() {
             setCriteria={setCriteria}
             includedGroupIds={includedGroupIds}
             setIncludedGroupIds={setIncludedGroupIds}
-            onBack={() => setStep(2)}
+            onBack={() => setStep(1)}
             onApprove={approve}
+            approvalError={approvalError}
           />
         ) : null}
-        {step === 4 && profile ? <ProfileReady profile={profile} onEdit={() => setStep(3)} onRestart={restart} /> : null}
+        {step === 3 && profile ? <ProfileReady profile={profile} onEdit={() => setStep(2)} onRestart={restart} /> : null}
       </div>
     </main>
   );

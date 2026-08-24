@@ -76,7 +76,10 @@ export function detectFileKind(fileName: string, mimeType?: string): FileKindInf
     else if (mimeType.includes("presentationml") || mimeType === "application/vnd.ms-powerpoint") kind = "powerpoint";
     else if (mimeType.includes("zip") || mimeType.includes("compressed")) kind = "archive";
   }
-  const extension = fileName.split(".").pop()?.toLocaleLowerCase("tr-TR") ?? "";
+  const lastDot = fileName.lastIndexOf(".");
+  const extension = lastDot > 0 && lastDot < fileName.length - 1
+    ? fileName.slice(lastDot + 1).toLowerCase()
+    : "";
   if (!kind) kind = EXTENSION_MAP[extension] ?? "other";
   const info = KIND_INFO[kind];
   // Uzantı kısa ve okunaklıysa aile etiketi yerine onu göster (DOCX, XLSX, ZIP…).
@@ -86,6 +89,6 @@ export function detectFileKind(fileName: string, mimeType?: string): FileKindInf
     color: info.color,
     tint: info.tint,
     description: info.description,
-    label: useExtension ? extension.toLocaleUpperCase("tr-TR") : info.label,
+    label: useExtension ? extension.toUpperCase() : info.label,
   };
 }

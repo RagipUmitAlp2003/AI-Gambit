@@ -1,6 +1,6 @@
-export type Step = 1 | 2 | 3 | 4;
+export type Step = 1 | 2 | 3;
 
-export type ViolationAction = "block" | "warn" | "jury";
+export type ViolationAction = "block" | "warn" | "jury" | "unspecified";
 
 export type SetupData = {
   competition: string;
@@ -99,10 +99,11 @@ export type AnalysisDiagnostics = {
 };
 
 export type AnalysisResult = {
+  /** Yarışma ve teslim bilgileri yalnızca organizatör PDF'sinden çıkarılır. */
+  setup: SetupData;
   criteria: Criterion[];
   skippedChecks: string[];
   informationalNotes: string[];
-  conflicts: number;
   pageCount: number;
   provider: "demo" | "api";
   model?: string;

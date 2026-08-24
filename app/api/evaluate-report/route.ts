@@ -20,7 +20,8 @@ import { recordUsage } from "../../lib/usage-metrics";
 const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
 const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash";
 const PROMPT_VERSION = "report-v2";
-const MAX_REPORT_BYTES = 18 * 1024 * 1024;
+const MAX_REPORT_BYTES = 50 * 1024 * 1024;
+const MAX_INLINE_REPORT_BYTES = 18 * 1024 * 1024;
 const MAX_MULTIPART_BYTES = MAX_REPORT_BYTES + 2 * 1024 * 1024;
 const CACHE_LIMIT = 12;
 
@@ -429,7 +430,7 @@ export async function POST(request: Request) {
     if (file.type !== "application/pdf" && !file.name.toLocaleLowerCase("tr-TR").endsWith(".pdf")) {
       return Response.json({ error: "Katılımcı raporu PDF biçiminde olmalıdır." }, { status: 415 });
     }
-    if (file.size > MAX_REPORT_BYTES) return Response.json({ error: "Katılımcı raporu en fazla 18 MB olabilir." }, { status: 413 });
+    if (file.size > MAX_REPORT_BYTES) return Response.json({ error: "Bu sürümde analiz edilebilen katılımcı raporu en fazla 50 MB olabilir." }, { status: 413 });
 
     const profileRaw = formData.get("profile");
     if (typeof profileRaw !== "string") return Response.json({ error: "Onaylı profil eksik." }, { status: 400 });
@@ -462,6 +463,11 @@ export async function POST(request: Request) {
     const uploaded = await uploadPdf(apiKey, bytes, file.name);
     uploadedName = uploaded?.name || "";
     const uploadMs = Date.now() - uploadStarted;
+    if (!uploaded && file.size > MAX_INLINE_REPORT_BYTES) {
+      return Response.json({
+        error: "Büyük rapor geçici dosya aktarım servisine yüklenemedi. Dosya yarışma sınırına uygun olabilir; analizi yeniden deneyin veya PDF'yi sıkıştırın.",
+      }, { status: 502 });
+    }
     const documentPart = uploaded
       ? { fileData: { mimeType: "application/pdf", fileUri: uploaded.uri }, mediaResolution: { level: "MEDIA_RESOLUTION_MEDIUM" } }
       : { inlineData: { mimeType: "application/pdf", data: Buffer.from(bytes).toString("base64") }, mediaResolution: { level: "MEDIA_RESOLUTION_MEDIUM" } };

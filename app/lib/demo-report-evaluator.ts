@@ -42,7 +42,9 @@ function buildFinding(criterion: Criterion, pages: string[], pageCount: number, 
   const base = {
     criterionId: criterion.id,
     criterionName: criterion.name,
-    maxScore: criterion.maxScore,
+    // Geçiş/baraj/ceza kriterlerinde eski veya hatalı maxScore değeri bulunsa
+    // bile görevliye puan alanı gösterilmez; yalnızca score etkisi puanlanır.
+    maxScore: criterionEffectOf(criterion) === "score" ? criterion.maxScore : null,
     requiresHuman: requiresHumanDecision(criterion),
   };
 
@@ -219,8 +221,8 @@ export function evaluateReportOffline(input: {
     feedbackDraft: buildFeedbackDraft(findings),
     analysisWarnings: [
       "Bu sonuç çevrimdışı kesin kontrollerle üretildi; anlamsal kriter analizi AI motoru bağlandığında eklenecek.",
-      ...(file.size > 18 * 1024 * 1024
-        ? ["Dosya 18 MB'den büyük; sunucu tarafındaki AI analizi için sıkıştırma veya dosya aktarım modu gerekecek."]
+      ...(file.size > 50 * 1024 * 1024
+        ? ["Dosya 50 MB'den büyük; mevcut sunucu analiz sınırı için sıkıştırılması gerekecek."]
         : []),
     ],
     provider: "demo",

@@ -1,13 +1,11 @@
-import type { AnalysisResult, SetupData } from "./types";
+import type { AnalysisResult } from "./types";
 
 export async function analyzeWithGemini(
   file: File,
-  setup: SetupData,
   pageCount: number,
 ): Promise<AnalysisResult> {
   const formData = new FormData();
   formData.append("file", file);
-  formData.append("setup", JSON.stringify(setup));
   formData.append("pageCount", String(pageCount));
 
   const response = await fetch("/api/analyze", {

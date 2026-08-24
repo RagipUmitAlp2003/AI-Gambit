@@ -65,7 +65,7 @@ Arayüz, Türkçe karakterleri güçlü ve küçük boyutta okunaklı gösteren 
 
 ## Layout
 
-Masaüstünde sabit bir üst şerit, solda dört adımlı süreç izi ve ortada tek ana görev yüzeyi bulunur. İnceleme aşamasında kriter listesi ile ayrıntı/kanıt paneli yan yana çalışır. Küçük ekranlarda süreç izi yatay özet hâline gelir ve paneller tek sütuna iner.
+Masaüstünde sabit bir üst şerit, solda üç adımlı süreç izi ve ortada tek ana görev yüzeyi bulunur. İlk ekranda tek ana eylem resmî PDF yüklemektir. İnceleme aşamasında önce belgenin puan yapısı ve puan dışı sonuç kuralları açıklanır; ardından kriter listesi ile ayrıntı/kanıt paneli çalışır. Küçük ekranlarda süreç izi yatay özet hâline gelir ve paneller tek sütuna iner.
 
 ## Elevation & Depth
 

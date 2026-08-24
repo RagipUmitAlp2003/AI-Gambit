@@ -3,7 +3,6 @@ import type {
   Confidence,
   Criterion,
   EvaluationMethod,
-  SetupData,
 } from "./types";
 
 const lowerTR = (value: string) => value.toLocaleLowerCase("tr-TR");
@@ -118,7 +117,6 @@ const scoringDefinitions: Array<{
 
 export async function analyzeWithDemoProvider(
   pages: string[],
-  setup: SetupData,
 ): Promise<AnalysisResult> {
   // API geldiğinde yalnızca bu sağlayıcı değişecek. Arayüz ve kriter veri modeli aynı kalacak.
   const fullText = clean(pages.join(" "));
@@ -142,9 +140,6 @@ export async function analyzeWithDemoProvider(
   const sizeMatch = fullText.match(/en fazla\s+(\d+)\s*MB/i);
   if (sizeMatch) {
     const documentLimit = Number(sizeMatch[1]);
-    const issue = documentLimit !== setup.maxFileSizeMb
-      ? `Başlangıç ayarı ${setup.maxFileSizeMb} MB, belgede ise ${documentLimit} MB. Geçerli sınırı yönetici seçmelidir.`
-      : undefined;
     addIf(criteria, true, {
       name: `Dosya büyüklüğü en fazla ${documentLimit} MB olmalıdır`,
       type: "technical_upload",
@@ -157,7 +152,6 @@ export async function analyzeWithDemoProvider(
       sourceText: quoteAround(pages, sizeMatch[0], `Yüklenen dosya en fazla ${documentLimit} MB olabilir.`),
       aiInterpretation: "Sayısal sınır açıkça verildiği için dosya boyutu kod ile kesin olarak kontrol edilebilir.",
       confidence: "high",
-      issue,
     }, pages);
   }
 
@@ -297,12 +291,22 @@ export async function analyzeWithDemoProvider(
   });
 
   return {
+    setup: {
+      competition: "Belgede belirtilmemiş",
+      category: "Belgede belirtilmemiş",
+      stage: "Belgede belirtilmemiş",
+      reportType: contains(fullText, "ön tasarım raporu") ? "Ön Tasarım Raporu" : "Belgede belirtilmemiş",
+      year: fullText.match(/\b20\d{2}\b/)?.[0] ?? "Belgede belirtilmemiş",
+      allowedFormats: contains(fullText, "pdf") ? ["PDF"] : [],
+      maxFileSizeMb: sizeMatch ? Number(sizeMatch[1]) : 0,
+      maxFileCount: contains(fullText, "yalnızca bir rapor dosyası") ? 1 : 0,
+      defaultViolationAction: "unspecified",
+    },
     criteria,
     skippedChecks,
     informationalNotes: contains(fullText, "tek başına ek bir puanlama kriteri oluşturmaz")
       ? ["Genel amaç bölümündeki toplumsal fayda beklentisi, belge açıkça kriter olmadığını söylediği için ayrı kriter yapılmadı."]
       : [],
-    conflicts: criteria.filter((item) => Boolean(item.issue)).length,
     pageCount: pages.length,
     provider: "demo",
     analyzedAt: new Date().toISOString(),

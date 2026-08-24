@@ -8,7 +8,7 @@ web
 
 ## Users
 
-Birincil kullanıcı, bir TEKNOFEST yarışmasının değerlendirme sürecini kuran yarışma yöneticisi veya yetkilidir. Kullanıcı; yarışma, kategori, aşama ve rapor türünü tanımlar, resmî değerlendirme PDF'sini yükler, yapay zekânın çıkardığı kuralları denetler ve onaylı bir değerlendirme profili oluşturur.
+Birincil kullanıcı, bir TEKNOFEST yarışmasının değerlendirme sürecini kuran yarışma yöneticisi veya yetkilidir. Kullanıcı yalnızca resmî değerlendirme PDF'sini yükler; sistem yarışma bağlamını, teslim sınırlarını ve değerlendirme kurallarını belgeden çıkarır. Yetkili kaynakları denetleyip gerekli düzeltmeleri yaptıktan sonra onaylı değerlendirme profilini oluşturur.
 
 ## Product Purpose
 
@@ -20,12 +20,13 @@ Sabit bir puanlama şablonu sunmaz. Belgedeki biçim kurallarını, zorunlu içe
 
 ## Operating Context
 
-İlk modül dört adımdan oluşur: temel yarışma ve dosya ayarları, resmî kriter PDF'sinin yüklenmesi, dinamik kriter inceleme/düzeltme, profil onayı. İkinci modül (Değerlendirme Atölyesi, `/degerlendirme`) onaylı profili katılımcı raporlarına uygular: rapor havuzu ve kesin ön kontroller (dosya kapısı, dil, şablon/başlık, benzerlik), hakem inceleme ekranı ve hakem onaylı yarışmacı geri bildirimi. Anlamsal kriter analizi motoru ayrı geliştirilir; sözleşmesi `docs/RAPOR_DEGERLENDIRME_SOZLESMESI.md` dosyasındadır ve motor bağlanana kadar yalnızca kesin kontroller çalışır.
+İlk modül üç adımdan oluşur: resmî kriter PDF'sinin yüklenmesi, belgeden çıkarılan profil ve kriterlerin dinamik inceleme/düzeltmesi, profil onayı. İkinci modül (Değerlendirme Atölyesi, `/degerlendirme`) onaylı profili katılımcı raporlarına uygular: rapor havuzu ve kesin ön kontroller (dosya kapısı, dil, şablon/başlık, benzerlik), AI bulguları, hakem inceleme ekranı ve hakem onaylı yarışmacı geri bildirimi.
 
 ## Capabilities and Constraints
 
 - Resmî kriter belgesi PDF olarak alınır.
-- Organizatör, katılımcı teslim dosyasının format, boyut ve dosya sayısı gibi belgeden bağımsız teknik kurallarını önceden tanımlar.
+- Yarışma, kategori, aşama, rapor türü, katılımcı teslim formatı, boyutu, adedi ve ihlal sonucu yalnızca PDF'de açıkça bulunuyorsa profile eklenir.
+- Kaynak PDF için uygulanan 18 MB ve katılımcı raporu için uygulanan 50 MB sistem kapasite sınırları yarışma kuralı gibi gösterilmez.
 - Belgede açıkça bulunmayan sayfa, yazı tipi veya düzen kontrolleri etkinleştirilmez.
 - Yapay zekâ çıkarımları yönetici onayı olmadan yürürlüğe girmez.
 - API bilgisi henüz verilmemiştir. İlk sürüm, değiştirilebilir bir analiz sağlayıcısı ve yerel demo motoruyla çalışır.
