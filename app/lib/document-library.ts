@@ -39,7 +39,9 @@ export async function listLibraryDocuments(): Promise<LibraryDocument[]> {
     return (items ?? [])
       .filter((item) => item.file instanceof File)
       .sort((a, b) => b.addedAt.localeCompare(a.addedAt));
-  } catch {
+  } catch (error) {
+    // Depo açılamadıysa liste boş görünür; sebebi konsolda kalsın.
+    console.error("[belge havuzu] liste okunamadı", error);
     return [];
   }
 }
@@ -50,7 +52,9 @@ export async function addLibraryDocument(input: {
   file: File;
 }): Promise<LibraryDocument> {
   const entry: LibraryDocument = {
-    id: `doc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    // Toplu eklemede aynı milisaniyede birden fazla kayıt oluşabilir; çakışma
+    // olmaması için mümkünse UUID kullanılır.
+    id: `doc-${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`}`,
     title: input.title.trim() || input.file.name,
     docType: input.docType,
     fileName: input.file.name,

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import CompetitionSelect from "./competition-select";
 import SearchSelect from "./search-select";
@@ -245,6 +246,7 @@ function Topbar({ step }: { step: Step }) {
       </div>
       <div className="topbar-status">
         <span className="status-chip neutral">Yerel prototip</span>
+        <Link className="text-button" href="/moderator">Moderatör paneli</Link>
         <span className="operator-avatar" aria-label="Proje yöneticisi">PY</span>
       </div>
     </header>
@@ -453,6 +455,7 @@ function UploadStep({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
+  const [selectionNote, setSelectionNote] = useState("");
 
   async function loadSample(sample: SampleDocument) {
     const response = await fetch(sample.path);
@@ -460,8 +463,20 @@ function UploadStep({
     onSample(new File([blob], sample.name, { type: "application/pdf" }), sample.setup);
   }
 
-  function accept(selected?: File) {
-    if (selected) onFile(selected);
+  /**
+   * Bu adım profilin kaynağı olan TEK belgeyi alır (analiz hattı tek PDF
+   * üzerinden çalışır). Birden fazla dosya seçilirse fazlası sessizce
+   * atılmaz; hangisinin kullanıldığı açıkça söylenir.
+   */
+  function acceptSelection(list: FileList | null) {
+    const files = Array.from(list ?? []);
+    if (files.length === 0) return;
+    setSelectionNote(
+      files.length > 1
+        ? `${files.length} dosya seçildi. Bu adım tek kaynak belge alır; "${files[0].name}" kullanıldı. Diğer belgeleri aşağıdaki "Görevli belge havuzu" bölümünden toplu olarak ekleyebilirsiniz.`
+        : "",
+    );
+    onFile(files[0]);
   }
 
   return (
@@ -493,14 +508,15 @@ function UploadStep({
           onDrop={(event) => {
             event.preventDefault();
             setDragging(false);
-            accept(event.dataTransfer.files[0]);
+            // Bu adım tek kaynak belge alır; fazlası sessizce atılmaz, söylenir.
+            acceptSelection(event.dataTransfer.files);
           }}
         >
           <input
             ref={inputRef}
             type="file"
             accept="application/pdf,.pdf"
-            onChange={(event) => accept(event.target.files?.[0])}
+            onChange={(event) => acceptSelection(event.target.files)}
           />
           {file ? (
             <div className="selected-file">
@@ -521,6 +537,8 @@ function UploadStep({
             </div>
           )}
         </div>
+
+        {selectionNote ? <p className="library-notice upload-note">{selectionNote}</p> : null}
 
         <aside className="setup-preview upload-preview" aria-label="Değerlendirme şablonu canlı önizlemesi">
           <TemplatePreview setup={setup} file={file} result={result} criteria={criteria} />

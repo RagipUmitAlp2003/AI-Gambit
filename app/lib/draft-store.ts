@@ -2,10 +2,15 @@ import type { AnalysisResult, Criterion, ProfileExport, SetupData, Step } from "
 
 const SNAPSHOT_KEY = "kriter-atolyesi:draft-v1";
 const DB_NAME = "kriter-atolyesi";
-const DB_VERSION = 2;
 const STORE_NAME = "draft-files";
 export const LIBRARY_STORE_NAME = "library-documents";
 const FILE_KEY = "source-document";
+
+/** Bu uygulamanın ihtiyaç duyduğu depolar ve anahtar biçimleri. */
+const REQUIRED_STORES: Array<{ name: string; options?: IDBObjectStoreParameters }> = [
+  { name: STORE_NAME },
+  { name: LIBRARY_STORE_NAME, options: { keyPath: "id" } },
+];
 
 export type DraftSnapshot = {
   step: Step;
@@ -32,20 +37,39 @@ export function clearDraftSnapshot() {
   localStorage.removeItem(SNAPSHOT_KEY);
 }
 
-export function openDraftDatabase(): Promise<IDBDatabase> {
+function rawOpen(version?: number): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = version === undefined ? indexedDB.open(DB_NAME) : indexedDB.open(DB_NAME, version);
     request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(STORE_NAME)) {
-        request.result.createObjectStore(STORE_NAME);
-      }
-      if (!request.result.objectStoreNames.contains(LIBRARY_STORE_NAME)) {
-        request.result.createObjectStore(LIBRARY_STORE_NAME, { keyPath: "id" });
+      for (const store of REQUIRED_STORES) {
+        if (!request.result.objectStoreNames.contains(store.name)) {
+          request.result.createObjectStore(store.name, store.options);
+        }
       }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error("Veri tabanı başka bir sekme tarafından kilitli."));
   });
+}
+
+/**
+ * Veri tabanını sabit bir sürüm numarası istemeden açar.
+ *
+ * Sabit sürümle açmak, tarayıcıdaki kayıt daha yeni bir sürümdeyse
+ * (ör. başka bir dal ya da sürüm ek depo oluşturmuşsa) `VersionError`
+ * verir ve belge havuzu sessizce çalışmaz hâle gelir. Bunun yerine mevcut
+ * sürüm okunur; eksik depo varsa sürüm bir artırılarak yalnızca eksikler
+ * oluşturulur. Böylece hem eski hem yeni kayıtlarla uyum korunur.
+ */
+export async function openDraftDatabase(): Promise<IDBDatabase> {
+  const database = await rawOpen();
+  const missing = REQUIRED_STORES.filter((store) => !database.objectStoreNames.contains(store.name));
+  if (missing.length === 0) return database;
+
+  const nextVersion = database.version + 1;
+  database.close();
+  return rawOpen(nextVersion);
 }
 
 export async function loadDraftFile(): Promise<File | null> {
