@@ -20,7 +20,7 @@ Sabit bir puanlama şablonu sunmaz. Belgedeki biçim kurallarını, zorunlu içe
 
 ## Operating Context
 
-İlk modül dört adımdan oluşur: temel yarışma ve dosya ayarları, resmî kriter PDF'sinin yüklenmesi, dinamik kriter inceleme/düzeltme, profil onayı. Katılımcı raporunun puanlanması sonraki modüldür ve bu sürümün kapsamı dışındadır.
+İlk modül dört adımdan oluşur: temel yarışma ve dosya ayarları, resmî kriter PDF'sinin yüklenmesi, dinamik kriter inceleme/düzeltme, profil onayı. İkinci modül (Değerlendirme Atölyesi, `/degerlendirme`) onaylı profili katılımcı raporlarına uygular: rapor havuzu ve kesin ön kontroller (dosya kapısı, dil, şablon/başlık, benzerlik), hakem inceleme ekranı ve hakem onaylı yarışmacı geri bildirimi. Anlamsal kriter analizi motoru ayrı geliştirilir; sözleşmesi `docs/RAPOR_DEGERLENDIRME_SOZLESMESI.md` dosyasındadır ve motor bağlanana kadar yalnızca kesin kontroller çalışır.
 
 ## Capabilities and Constraints
 
@@ -35,7 +35,7 @@ Sabit bir puanlama şablonu sunmaz. Belgedeki biçim kurallarını, zorunlu içe
 
 - Önceki TEKNOFEST şartname ve kriter araştırmalarından elde edilen kriter türleri.
 - Proje içinde oluşturulan, resmî olmayan ve yalnızca test amaçlı örnek değerlendirme kılavuzu.
-- Gerçek katılımcı raporu henüz bulunmamaktadır; bu sürümde böyle bir içerik uydurulmaz.
+- Gerçek katılımcı raporu henüz bulunmamaktadır; böyle bir içerik uydurulmaz. Değerlendirme Atölyesi testleri açıkça sentetik etiketli raporlarla yapılır.
 
 ## Product Principles
 

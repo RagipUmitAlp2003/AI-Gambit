@@ -31,7 +31,21 @@ export type DecisionRules = {
   eliminations: DecisionRuleItem[];
 };
 
-const ELIMINATION_PATTERN = /diskalifiye|elenir|eleme|yarışma dışı|değerlendirmeye alınmaz|0 puan|geçersiz sayılır/i;
+/**
+ * Eleme ifadeleri kelime başında aranır: aksi hâlde "inceleme"/"denemeye" içindeki
+ * "eleme" ve "100 puan" içindeki "0 puan" yanlışlıkla eleme sayılır. Türkçe ekleri
+ * tolere etmek için kökten sonrası serbest bırakılır.
+ */
+const ELIMINATION_PATTERN = /(?:^|[^a-zçğıöşüâîû0-9])(?:diskalifiye|elen[a-zçğıöşü]*|eleme[a-zçğıöşü]*|yarışma dışı|değerlendirmeye alınma[a-zçğıöşü]*|geçersiz sayıl[a-zçğıöşü]*|sıfır puan|0 puan)/;
+
+/**
+ * Kriterin eleme/diskalifiye sonucu doğurup doğurmadığı. Bu maddelerde nihai
+ * karar her zaman görevlidedir; rapor değerlendirmesi de aynı testi kullanır.
+ */
+export function criterionEliminates(item: Criterion): boolean {
+  if (item.type === "elimination_review") return true;
+  return ELIMINATION_PATTERN.test(` ${item.name} ${item.violationOutcome}`.toLocaleLowerCase("tr-TR"));
+}
 
 export function deriveDecisionRules(criteria: Criterion[], scorePlan?: ScorePlan): DecisionRules {
   const active = criteria.filter((item) => item.active);
@@ -44,8 +58,8 @@ export function deriveDecisionRules(criteria: Criterion[], scorePlan?: ScorePlan
       detail: item.violationOutcome,
       sourcePage: item.sourcePage,
     };
-    const eliminates = item.type === "elimination_review" || ELIMINATION_PATTERN.test(`${item.name} ${item.violationOutcome}`);
-    if (eliminates) {
+    if (criterionEliminates(item)) {
+      // Eleme maddeleri toplam puandan bağımsız olarak ayrıca denetlenir.
       rules.eliminations.push(record);
       continue;
     }

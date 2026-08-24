@@ -19,6 +19,16 @@ const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash";
 const PROMPT_VERSION = "v2";
 const CACHE_LIMIT = 12;
 
+/**
+ * İkinci "eksik kural denetimi" turu, uzun belgelerde kapsamı artırır ancak
+ * token maliyetini ve süreyi yaklaşık iki katına çıkarır. Maliyet kontrolü için
+ * kapatılabilir (COVERAGE_AUDIT=off) veya eşiği yükseltilebilir.
+ */
+const COVERAGE_AUDIT_ENABLED = (process.env.COVERAGE_AUDIT || "on").toLowerCase() !== "off";
+const COVERAGE_AUDIT_MIN_PAGES = Number(process.env.COVERAGE_AUDIT_MIN_PAGES) > 0
+  ? Number(process.env.COVERAGE_AUDIT_MIN_PAGES)
+  : 12;
+
 const CRITERION_TYPES: CriterionType[] = [
   "technical_upload",
   "format_rule",
@@ -499,7 +509,8 @@ export async function POST(request: Request) {
     const pdfBytes = await file.arrayBuffer();
 
     // Aynı belge + aynı bağlam daha önce analiz edildiyse modeli hiç çağırma.
-    const cacheKey = `${PROMPT_VERSION}:${await documentHash(pdfBytes)}:${PRIMARY_MODEL}:${setup.stage}:${setup.reportType}`;
+    const auditMode = COVERAGE_AUDIT_ENABLED ? `audit${COVERAGE_AUDIT_MIN_PAGES}` : "noaudit";
+    const cacheKey = `${PROMPT_VERSION}:${await documentHash(pdfBytes)}:${PRIMARY_MODEL}:${setup.stage}:${setup.reportType}:${auditMode}`;
     const cachedExtraction = analysisCache().get(cacheKey);
     if (cachedExtraction) {
       const totalMs = Date.now() - startedAt;
@@ -616,7 +627,7 @@ Yanıtı oluşturmadan önce sessizce şu kapsam denetimini yap:
     let auditMs = 0;
     let auditUsage = { prompt: 0, output: 0, total: 0 };
 
-    if (pageCount >= 12) {
+    if (COVERAGE_AUDIT_ENABLED && pageCount >= COVERAGE_AUDIT_MIN_PAGES) {
       const firstPassNames = rawCriteria.map((item) => text(item.name, "")).filter(Boolean);
       const auditPrompt = `
 Bu PDF için ilk çıkarım aşağıdaki kriterleri buldu:

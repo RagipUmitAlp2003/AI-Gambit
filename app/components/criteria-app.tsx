@@ -590,6 +590,8 @@ function CriteriaReview({
   result,
   criteria,
   setCriteria,
+  includedGroups,
+  setIncludedGroups,
   onBack,
   onApprove,
 }: {
@@ -600,6 +602,8 @@ function CriteriaReview({
   result: AnalysisResult;
   criteria: Criterion[];
   setCriteria: (criteria: Criterion[]) => void;
+  includedGroups: string[];
+  setIncludedGroups: (groups: string[]) => void;
   onBack: () => void;
   onApprove: () => void;
 }) {
@@ -622,8 +626,19 @@ function CriteriaReview({
   const humanReviewCount = active.filter((item) => ["human", "hybrid"].includes(item.evaluationMethod)).length;
   const deterministicCount = active.filter((item) => item.evaluationMethod === "deterministic").length;
   const conflicts = active.filter((item) => item.issue).length;
-  const canApprove = reviewConfirmed && conflicts === 0 && active.length > 0;
   const decisionRules = deriveDecisionRules(criteria, scorePlan);
+  const groups = scorePlan?.groups ?? [];
+  const included = groups.filter((group) => includedGroups.includes(group.name));
+  const evaluationTotal = included.reduce((sum, group) => sum + group.maxScore, 0);
+  // Şartname birden çok aşamayı topluyorsa yalnızca kapsama alınan gruplar puanlanır.
+  const scopeNarrowed = groups.length > 1 && included.length > 0 && included.length < groups.length;
+  const canApprove = reviewConfirmed && conflicts === 0 && active.length > 0
+    && (groups.length === 0 || included.length > 0);
+
+  function toggleGroup(name: string, on: boolean) {
+    setIncludedGroups(on ? [...includedGroups, name] : includedGroups.filter((item) => item !== name));
+    setReviewConfirmed(false);
+  }
 
   function update(patch: Partial<Criterion>) {
     setCriteria(criteria.map((item) => item.id === selected.id ? { ...item, ...patch } : item));
@@ -715,15 +730,29 @@ function CriteriaReview({
         {scorePlan?.groups.length ? (
           <div className="score-group-list">
             {scorePlan.groups.map((group) => (
-              <details key={`${group.name}-${group.sourcePage}`} className="score-group-row">
+              <details key={`${group.name}-${group.sourcePage}`} className={`score-group-row ${includedGroups.includes(group.name) ? "" : "excluded"}`}>
                 <summary>
                   <span><strong>{group.name}</strong><small>{group.scope} · Sayfa {group.sourcePage}</small></span>
                   <span className="score-group-value">
                     {group.maxScore} puan
-                    {displayTotal ? <small>≈ {normalizeScore(group.maxScore, displayTotal)}/100</small> : null}
+                    {/* Normalize karşılık yalnızca kapsama alınan gruplar için anlamlıdır. */}
+                    {evaluationTotal && includedGroups.includes(group.name)
+                      ? <small>≈ {normalizeScore(group.maxScore, evaluationTotal)}/100</small>
+                      : <small>kapsam dışı</small>}
                   </span>
                 </summary>
                 <div>
+                  <label className="group-include">
+                    <input
+                      type="checkbox"
+                      checked={includedGroups.includes(group.name)}
+                      onChange={(event) => toggleGroup(group.name, event.target.checked)}
+                    />
+                    <span>
+                      Bu grup değerlendirmeye dahil
+                      <small>Kapsam dışı bırakılan gruplar profile girmez ve 100&apos;e normalizasyonda paydaya eklenmez.</small>
+                    </span>
+                  </label>
                   {group.minimumScore !== null ? <p><strong>Baraj:</strong> En az {group.minimumScore} puan</p> : null}
                   {group.breakdown.length ? <ul>{group.breakdown.map((item) => <li key={item}>{item}</li>)}</ul> : null}
                   <blockquote>{group.sourceText}</blockquote>
@@ -734,10 +763,25 @@ function CriteriaReview({
         ) : (
           <p className="score-plan-empty">PDF’de sayısal puan tablosu bulunmadı. Sistem bu belge için puan üretmedi.</p>
         )}
-        {displayTotal ? (
+        {evaluationTotal ? (
           <p className="normalization-note">
-            Yarışmanın orijinal puan sistemi korunur: değerlendirme {displayTotal} puan üzerinden yapılır,
-            sonuç (alınan puan ÷ {displayTotal}) × 100 formülüyle 100 üzerinden gösterilir.
+            {scopeNarrowed ? (
+              <>
+                Belgede ilan edilen genel toplam {displayTotal} puandır; bu profil yalnızca kapsama alınan
+                {" "}{included.length} grubu değerlendirir. Değerlendirme {evaluationTotal} puan üzerinden yapılır,
+                sonuç (alınan puan ÷ {evaluationTotal}) × 100 formülüyle 100 üzerinden gösterilir.
+              </>
+            ) : (
+              <>
+                Yarışmanın orijinal puan sistemi korunur: değerlendirme {evaluationTotal} puan üzerinden yapılır,
+                sonuç (alınan puan ÷ {evaluationTotal}) × 100 formülüyle 100 üzerinden gösterilir.
+              </>
+            )}
+          </p>
+        ) : null}
+        {groups.length > 1 && !included.length ? (
+          <p className="score-audit-note warning">
+            Hiçbir puan grubu kapsama alınmadı. Bu profille puan hesaplanamaz; en az bir grup seçin.
           </p>
         ) : null}
         <p className={`score-audit-note ${scorePlan?.auditStatus === "mismatch" ? "warning" : ""}`}>
@@ -1007,8 +1051,12 @@ function ProfileReady({
 }) {
   const active = profile.criteria.filter((item) => item.active);
   const scoreCriteria = active.filter((item) => criterionEffect(item) === "score");
-  const scoreTotal = profile.scorePlan?.declaredTotalScore
+  // Kapsam daraltıldıysa değerlendirme toplamı belgedeki genel toplamdan farklıdır.
+  const scoreTotal = profile.normalization?.evaluationTotal
+    ?? profile.scorePlan?.declaredTotalScore
     ?? scoreCriteria.reduce((sum, item) => sum + (item.maxScore ?? 0), 0);
+  const declaredTotal = profile.scorePlan?.declaredTotalScore ?? null;
+  const scopeNarrowed = declaredTotal !== null && scoreTotal !== declaredTotal;
   const decisionRules = profile.decisionRules ?? deriveDecisionRules(profile.criteria, profile.scorePlan);
 
   function downloadProfile() {
@@ -1050,16 +1098,18 @@ function ProfileReady({
         </dl>
         <div className="profile-metrics">
           <div><strong>{active.length}</strong><span>aktif kural</span></div>
-          <div><strong>{profile.scorePlan?.groups.length ?? scoreCriteria.length}</strong><span>puan grubu</span></div>
-          <div><strong>{scoreTotal || "—"}</strong><span>PDF toplam puanı</span></div>
+          <div><strong>{profile.normalization?.includedGroups?.length ?? profile.scorePlan?.groups.length ?? scoreCriteria.length}</strong><span>puan grubu</span></div>
+          <div><strong>{scoreTotal || "—"}</strong><span>değerlendirme puanı</span></div>
           <div><strong>{profile.sourceDocument.pages}</strong><span>kaynak sayfa</span></div>
         </div>
         {scoreTotal ? (
           <div className="profile-footer-note">
             <span>Puan gösterimi</span>
             <p>
-              Değerlendirme orijinal sistemle, {scoreTotal} puan üzerinden yapılır; sonuç
-              (alınan puan ÷ {scoreTotal}) × 100 formülüyle 100 üzerinden raporlanır.
+              {scopeNarrowed
+                ? `Belgede ilan edilen genel toplam ${declaredTotal} puandır; bu profil kapsama alınan gruplarla ${scoreTotal} puan üzerinden değerlendirir. `
+                : `Değerlendirme orijinal sistemle, ${scoreTotal} puan üzerinden yapılır. `}
+              Sonuç (alınan puan ÷ {scoreTotal}) × 100 formülüyle 100 üzerinden raporlanır.
             </p>
           </div>
         ) : null}
@@ -1073,7 +1123,10 @@ function ProfileReady({
         </div>
         <div className="profile-footer-note">
           <span>Sonraki modül</span>
-          <p>Katılımcı raporundaki kanıtları bu onaylı kriterlerle eşleştirme ve gerekçeli puan önerisi.</p>
+          <p>
+            Katılımcı raporundaki kanıtları bu onaylı kriterlerle eşleştirme ve gerekçeli puan önerisi.{" "}
+            <a className="next-module-link" href="/degerlendirme">Değerlendirme Atölyesi’ni aç →</a>
+          </p>
         </div>
       </div>
 
@@ -1090,6 +1143,7 @@ export default function CriteriaApp() {
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [criteria, setCriteria] = useState<Criterion[]>([]);
   const [profile, setProfile] = useState<ProfileExport | null>(null);
+  const [includedGroups, setIncludedGroups] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("");
   const [error, setError] = useState("");
@@ -1108,6 +1162,8 @@ export default function CriteriaApp() {
         setSetup(snapshot.setup);
         setResult(snapshot.result);
         setCriteria(restoredCriteria);
+        // Eski taslaklarda kapsam bilgisi yok; tüm gruplar dahil sayılır.
+        setIncludedGroups(snapshot.includedGroups ?? (snapshot.result?.scorePlan?.groups ?? []).map((group) => group.name));
         setProfile(snapshot.profile ? { ...snapshot.profile, criteria: snapshot.profile.criteria.map(applyDecisionSafetyPolicy) } : null);
       }
       if (storedFile) {
@@ -1130,8 +1186,8 @@ export default function CriteriaApp() {
 
   useEffect(() => {
     if (!draftReady) return;
-    saveDraftSnapshot({ step, setup, result, criteria, profile });
-  }, [criteria, draftReady, profile, result, setup, step]);
+    saveDraftSnapshot({ step, setup, result, criteria, profile, includedGroups });
+  }, [criteria, draftReady, includedGroups, profile, result, setup, step]);
 
   useEffect(() => {
     if (!draftReady) return;
@@ -1154,6 +1210,7 @@ export default function CriteriaApp() {
     setResult(null);
     setCriteria([]);
     setProfile(null);
+    setIncludedGroups([]);
   }
 
   async function analyze() {
@@ -1171,6 +1228,8 @@ export default function CriteriaApp() {
       }
       setResult(analysis);
       setCriteria(analysis.criteria.map(applyDecisionSafetyPolicy));
+      // Varsayılan: belgedeki tüm puan grupları kapsamda; yönetici daraltabilir.
+      setIncludedGroups((analysis.scorePlan?.groups ?? []).map((group) => group.name));
       setStep(3);
     } catch (analysisError) {
       const message = analysisError instanceof Error ? analysisError.message : "Bilinmeyen bir hata oluştu.";
@@ -1183,9 +1242,16 @@ export default function CriteriaApp() {
   function approve() {
     if (!file || !result) return;
     const declaredTotal = result.scorePlan?.declaredTotalScore ?? null;
+    const groups = result.scorePlan?.groups ?? [];
+    const included = groups.filter((group) => includedGroups.includes(group.name));
+    // Kapsam daraltılmadıysa belgedeki genel toplam geçerlidir.
+    const evaluationTotal = groups.length
+      ? included.reduce((sum, group) => sum + group.maxScore, 0)
+      : declaredTotal;
     const nextProfile: ProfileExport = {
       version: "1.0",
       status: "approved",
+      profileId: `profil-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       setup,
       sourceDocument: {
         name: file.name,
@@ -1197,9 +1263,11 @@ export default function CriteriaApp() {
       scorePlan: result.scorePlan,
       normalization: {
         declaredTotal,
+        evaluationTotal,
+        includedGroups: included.map((group) => group.name),
         normalizedTo: 100,
-        formula: declaredTotal
-          ? `(alınan puan / ${declaredTotal}) × 100`
+        formula: evaluationTotal
+          ? `(alınan puan / ${evaluationTotal}) × 100`
           : "Belgede genel toplam ilan edilmediği için normalizasyon uygulanmaz.",
       },
       decisionRules: deriveDecisionRules(criteria, result.scorePlan),
@@ -1218,6 +1286,7 @@ export default function CriteriaApp() {
     setResult(null);
     setCriteria([]);
     setProfile(null);
+    setIncludedGroups([]);
     setError("");
     clearDraftSnapshot();
     saveDraftFile(null).catch(() => undefined);
@@ -1290,6 +1359,8 @@ export default function CriteriaApp() {
             result={result}
             criteria={criteria}
             setCriteria={setCriteria}
+            includedGroups={includedGroups}
+            setIncludedGroups={setIncludedGroups}
             onBack={() => setStep(2)}
             onApprove={approve}
           />

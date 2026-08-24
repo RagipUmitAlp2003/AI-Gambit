@@ -2,9 +2,10 @@ import type { AnalysisResult, Criterion, ProfileExport, SetupData, Step } from "
 
 const SNAPSHOT_KEY = "kriter-atolyesi:draft-v1";
 const DB_NAME = "kriter-atolyesi";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_NAME = "draft-files";
 export const LIBRARY_STORE_NAME = "library-documents";
+export const REPORT_POOL_STORE_NAME = "report-pool";
 const FILE_KEY = "source-document";
 
 export type DraftSnapshot = {
@@ -13,6 +14,8 @@ export type DraftSnapshot = {
   result: AnalysisResult | null;
   criteria: Criterion[];
   profile: ProfileExport | null;
+  /** Değerlendirmeye dahil edilen puan grupları; eski taslaklarda bulunmaz (tümü dahil sayılır). */
+  includedGroups?: string[];
 };
 
 export function loadDraftSnapshot(): DraftSnapshot | null {
@@ -42,7 +45,14 @@ export function openDraftDatabase(): Promise<IDBDatabase> {
       if (!request.result.objectStoreNames.contains(LIBRARY_STORE_NAME)) {
         request.result.createObjectStore(LIBRARY_STORE_NAME, { keyPath: "id" });
       }
+      if (!request.result.objectStoreNames.contains(REPORT_POOL_STORE_NAME)) {
+        request.result.createObjectStore(REPORT_POOL_STORE_NAME, { keyPath: "id" });
+      }
     };
+    // Başka bir sekme eski sürümü açık tutuyorsa yükseltme bloke olur; sessizce beklemek yerine bildirilir.
+    request.onblocked = () => reject(new Error(
+      "Tarayıcı deposu güncellenemedi. Uygulamanın açık olduğu diğer sekmeleri kapatıp sayfayı yenileyin.",
+    ));
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });

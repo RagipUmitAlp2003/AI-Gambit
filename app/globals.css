@@ -346,6 +346,8 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 .profile-footer-note { display: grid; grid-template-columns: 90px minmax(0,1fr); gap: 14px; padding: 16px 22px; }
 .profile-footer-note span { color: var(--teal); font-size: 9px; font-weight: 800; }
 .profile-footer-note p { margin: 0; color: var(--muted); font-size: 10px; }
+.next-module-link { color: var(--teal-deep); font-weight: 800; text-decoration: none; }
+.next-module-link:hover { text-decoration: underline; }
 .restart-link { display: block; margin: 22px auto 0; }
 
 @media (prefers-reduced-motion: reduce) {
@@ -423,6 +425,17 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 .decision-column li.more { color: var(--muted); font-size: 9px; }
 .decision-column > p { margin: 10px 0 0; color: var(--muted); font-size: 9.5px; }
 .normalization-note { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--teal-soft); color: var(--teal-deep); font-size: 10.5px; line-height: 1.5; }
+
+/* Değerlendirme kapsamı: hangi puan grupları profile girecek */
+.group-include { display: grid; grid-template-columns: 16px minmax(0,1fr); gap: 10px; align-items: start; margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #f6fafa; cursor: pointer; }
+.group-include input { width: 16px; min-height: 16px; margin-top: 1px; accent-color: var(--teal); }
+.group-include > span { display: grid; gap: 4px; color: var(--ink); font-size: 11px; font-weight: 700; }
+.group-include small { color: var(--muted); font-size: 9.5px; font-weight: 400; line-height: 1.45; }
+.score-group-row.excluded > summary { opacity: .5; }
+.score-group-row.excluded .score-group-value { text-decoration: line-through; }
+
+/* Karar kuralları denetimi: her maddenin rapordaki durumu */
+.decision-column li .eval-check-chip { justify-self: start; margin-top: 4px; }
 .score-group-value small { display: block; color: var(--muted); font-size: 9px; font-weight: 600; }
 
 /* Görevli belge havuzu */
@@ -443,6 +456,70 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 .delete-section .delete-confirm-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border: 1px solid #e5c7c3; border-radius: var(--radius-md); background: var(--danger-soft); }
 .delete-section .delete-confirm-row p { margin: 0; color: var(--danger); font-size: 10.5px; line-height: 1.45; }
 .delete-section .delete-confirm-row > div { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; }
+
+/* Değerlendirme Atölyesi (rapor havuzu, hakem incelemesi, yarışmacı görünümü) */
+.visually-hidden-input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.eval-rail-link { display: block; margin-top: 14px; color: #9fb4bf; font-size: 10.5px; font-weight: 700; text-decoration: none; }
+.eval-rail-link:hover { color: #fff; }
+.eval-panel-margin { margin: 24px 38px 0; }
+.eval-profile-panel { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 16px; align-items: center; padding: 16px 18px; border: 1px solid #b7d9d5; border-radius: var(--radius-md); background: #eef9f7; }
+.eval-profile-panel.empty { border-color: #d7ad66; background: var(--amber-soft); }
+.eval-profile-panel strong { display: block; margin-top: 4px; font-size: 13px; }
+.eval-profile-panel p { margin: 5px 0 0; color: var(--ink-soft); font-size: 10.5px; line-height: 1.5; }
+.eval-profile-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; }
+.eval-inline-error { grid-column: 1/-1; margin: 0; }
+.eval-upload-row { margin: 20px 38px 0; }
+.eval-drop-zone { min-height: 300px; }
+.eval-participant-field { max-width: 320px; margin: 0 auto 16px; text-align: left; }
+.eval-pool-list { margin-bottom: 28px; padding-top: 26px; border-top: 1px solid var(--line); }
+.eval-pool-actions { flex-wrap: wrap; justify-content: flex-end; }
+.eval-analyzing-note { color: var(--teal-deep); font-size: 10px; font-weight: 700; }
+.eval-gate-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.eval-check-chip { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; background: #e8eef0; color: var(--ink-soft); font-size: 9px; font-weight: 800; white-space: nowrap; }
+.eval-check-chip.passed { color: var(--success); background: var(--success-soft); }
+.eval-check-chip.warning { color: var(--amber); background: var(--amber-soft); }
+.eval-check-chip.flagged { color: #7a4900; background: var(--amber-soft); }
+.eval-check-chip.failed { color: var(--danger); background: var(--danger-soft); }
+.eval-check-chip.skipped { color: var(--muted); background: #e8eef0; }
+.eval-check-list ul { display: grid; gap: 2px; margin: 10px 0 0; padding: 0; border-top: 1px solid var(--line); list-style: none; }
+.eval-check-list li { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 14px; align-items: center; padding: 12px 4px; border-bottom: 1px solid var(--line); }
+.eval-check-list li strong { font-size: 11.5px; }
+.eval-check-list li p { margin: 4px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+.eval-record-picker { max-width: 420px; }
+.eval-warning-strip { padding: 14px 16px; border-left: 3px solid var(--amber); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: var(--amber-soft); }
+.eval-warning-strip .inspector-label { color: #7a4900; }
+.eval-warning-strip ul { margin: 8px 0 0; padding-left: 18px; }
+.eval-warning-strip li { color: #6f4300; font-size: 10.5px; line-height: 1.55; }
+.eval-persist-error { margin: 18px 38px 0; }
+.eval-rationale { margin: 0; color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
+.eval-evidence { margin: 12px 0 0; padding: 14px 16px; border: 0; border-radius: var(--radius-sm); background: #f0f5f6; color: var(--ink-soft); font-size: 11.5px; line-height: 1.6; }
+.eval-evidence small { display: block; margin-top: 6px; color: var(--muted); font-size: 9px; }
+.eval-source-rule { margin-top: 12px; padding: 12px 14px; border-left: 3px solid var(--teal); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: var(--teal-soft); }
+.eval-source-rule > span { color: var(--teal-deep); font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
+.eval-source-rule p { margin: 6px 0 0; color: var(--ink-soft); font-size: 10.5px; line-height: 1.55; }
+.eval-pending-note { margin: 10px 0 0; color: var(--amber); font-size: 10px; }
+.eval-feedback-editor { padding: 26px 0 28px; border-top: 1px solid var(--line); }
+.eval-feedback-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 16px; }
+.eval-feedback-approve { display: flex; align-items: center; gap: 9px; margin: 16px 0 18px; color: var(--ink-soft); font-size: 11px; font-weight: 700; cursor: pointer; }
+.eval-feedback-approve input { width: 16px; min-height: 16px; accent-color: var(--teal); }
+.eval-participant-feedback { display: grid; gap: 4px; padding: 8px 22px 14px; }
+.eval-participant-feedback section { padding: 13px 0; border-bottom: 1px solid var(--line); }
+.eval-participant-feedback section:last-child { border-bottom: 0; }
+.eval-participant-feedback ul { margin: 8px 0 0; padding-left: 18px; }
+.eval-participant-feedback li { color: var(--ink-soft); font-size: 11px; line-height: 1.6; }
+.eval-participant-feedback p { margin: 8px 0 0; color: var(--muted); font-size: 10.5px; }
+.eval-empty-workspace { padding-bottom: 34px; }
+
+@media (max-width: 1120px) {
+  .eval-feedback-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 620px) {
+  .eval-panel-margin, .eval-upload-row, .eval-persist-error { margin-left: 18px; margin-right: 18px; }
+  .eval-profile-panel { grid-template-columns: 1fr; }
+  .eval-check-list li { grid-template-columns: 1fr; gap: 8px; }
+  .eval-pool-actions { justify-content: flex-start; }
+}
 
 @media (max-width: 1120px) {
   .app-shell { grid-template-columns: 210px minmax(0,1fr); }
