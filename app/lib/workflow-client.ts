@@ -1,12 +1,15 @@
 "use client";
 
 import type { AdminAccount } from "./admin-types";
-import type { JudgeReview, ProfileExport, ReportEvaluation } from "./types";
+import type { JudgeReview, PreCheck, ProfileExport, ReportEvaluation } from "./types";
 import type {
   CompetitionApplication,
+  CompetitionStatus,
+  CompetitionWorkflow,
   CompetitionProfile,
   CriteriaExtractionRun,
   OperationsSummary,
+  JudgeWorkload,
   ProfileReviewDecision,
   TimelineEntry,
 } from "./workflow-types";
@@ -57,15 +60,26 @@ export const workflowApi = {
     if (!response.ok) await responseJson(response);
     return new File([await response.blob()], fileName, { type: "application/pdf" });
   },
-  updateApplication: (id: string, action: string, value: { evaluation?: ReportEvaluation; review?: JudgeReview } = {}) =>
+  updateApplication: (id: string, action: string, value: { evaluation?: ReportEvaluation; review?: JudgeReview; judgeId?: string; note?: string } = {}) =>
     jsonRequest<{ application: CompetitionApplication }>(`/api/applications/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify({ action, ...value }),
     }),
+  submitRevision: async (id: string, file: File) => {
+    const form = new FormData();
+    form.set("file", file);
+    return responseJson<{ application: CompetitionApplication }>(await fetch(`/api/applications/${encodeURIComponent(id)}/versions`, {
+      method: "POST", credentials: "same-origin", body: form,
+    }));
+  },
+  similarityCheck: (id: string, text: string) => jsonRequest<{ check: PreCheck }>(
+    `/api/applications/${encodeURIComponent(id)}/similarity`,
+    { method: "POST", body: JSON.stringify({ text }) },
+  ),
   profiles: () => jsonRequest<{ profiles: CompetitionProfile[] }>("/api/profiles"),
   extractions: () => jsonRequest<{ extractions: CriteriaExtractionRun[] }>("/api/extractions"),
   profile: (id: string) => jsonRequest<{ profile: CompetitionProfile }>(`/api/profiles?id=${encodeURIComponent(id)}`),
-  /** Yarışma yöneticisi profili hakem incelemesine gönderir; profil bu adımda yürürlüğe girmez. */
+  /** Yarışma yöneticisi doğruladığı kriter profilini yayımlar. */
   submitProfileForReview: (profile: ProfileExport) => jsonRequest<{ profile: CompetitionProfile }>("/api/profiles", {
     method: "POST",
     body: JSON.stringify({ profile }),
@@ -78,7 +92,16 @@ export const workflowApi = {
     }),
   timeline: (subject: "application" | "profile", id: string) =>
     jsonRequest<{ timeline: TimelineEntry[] }>(`/api/timeline?subject=${subject}&id=${encodeURIComponent(id)}`),
-  operations: () => jsonRequest<{ summary: OperationsSummary; recent: TimelineEntry[] }>("/api/operations"),
+  operations: () => jsonRequest<{
+    summary: OperationsSummary;
+    recent: TimelineEntry[];
+    judges: JudgeWorkload[];
+    competitions: CompetitionWorkflow[];
+  }>("/api/operations"),
+  changeCompetitionStage: (competitionId: string, nextStatus: CompetitionStatus, reason = "", force = false) =>
+    jsonRequest<{ competition: CompetitionWorkflow }>("/api/operations", {
+      method: "PATCH", body: JSON.stringify({ competitionId, nextStatus, reason, force }),
+    }),
   registerParticipant: (fullName: string, email: string, password: string) =>
     jsonRequest<{ account: AdminAccount; expiresAt: string }>("/api/participant/register", {
       method: "POST",

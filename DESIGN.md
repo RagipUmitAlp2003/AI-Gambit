@@ -67,7 +67,7 @@ Arayüz, Türkçe karakterleri güçlü ve küçük boyutta okunaklı gösteren 
 
 Masaüstünde sabit bir üst şerit, solda üç adımlı süreç izi ve ortada tek ana görev yüzeyi bulunur. İlk ekranda tek ana eylem resmî PDF yüklemektir. İnceleme aşamasında önce belgenin puan yapısı ve puan dışı sonuç kuralları açıklanır; ardından kriter listesi ile ayrıntı/kanıt paneli çalışır. Küçük ekranlarda süreç izi yatay özet hâline gelir ve paneller tek sütuna iner.
 
-Giriş yüzeyi iki parçalıdır: koyu lacivert ürün anlatısı ve açık renkli, rol odaklı giriş alanı. Yönetim panelinde aynı görsel dil korunur; soldaki dar gezinme alanı yalnızca kullanıcının yetkili olduğu bölümleri, ana yüzey ise rolün karar sınırını ve erişebildiği çalışma alanlarını gösterir. Yarışmacı portalı aynı tipografi ve renklerle daha kısa, iki sekmeli bir akış kullanır: yarışma seçip PDF gönderme ve başvuru/sonuç takibi. Süreç izleme yüzeyi tablo yoğunluğunu korur ancak tüm kontroller salt okunurdur.
+Giriş yüzeyi iki parçalıdır: koyu lacivert ürün anlatısı ve açık renkli, rol odaklı giriş alanı. Yönetim panelinde aynı görsel dil korunur; soldaki dar gezinme alanı yalnızca kullanıcının yetkili olduğu bölümleri, ana yüzey ise rolün karar sınırını ve erişebildiği çalışma alanlarını gösterir. Yarışmacı portalı aynı tipografi ve renklerle daha kısa, iki sekmeli bir akış kullanır: yarışma seçip PDF gönderme ve başvuru/sonuç takibi. Süreç izleme yüzeyi tablo yoğunluğunu korur; yalnızca hakem ataması, hata kurtarma ve yarışma aşaması gibi operasyonel eylemler düzenlenebilir, teknik değerlendirme alanları salt okunurdur.
 
 ## Elevation & Depth
 

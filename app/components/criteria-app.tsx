@@ -14,14 +14,17 @@ import { SAMPLE_DOCUMENTS } from "../lib/sample-documents";
 import {
   clearDraftSnapshot,
   loadDraftFile,
+  loadDraftTemplateFile,
   loadDraftSnapshot,
   saveDraftFile,
+  saveDraftTemplateFile,
   saveDraftSnapshot,
 } from "../lib/draft-store";
 import type {
   AnalysisResult,
   Confidence,
   Criterion,
+  CriterionApplicability,
   CriterionEffect,
   CriterionType,
   ProfileExport,
@@ -45,7 +48,7 @@ const DEFAULT_SETUP: SetupData = {
 const STEPS = [
   { id: 1, title: "Kaynak belge", short: "Resmî kriter PDF'si" },
   { id: 2, title: "Kriter inceleme", short: "Belgeden çıkan kuralları doğrula" },
-  { id: 3, title: "Hakem onayına gönder", short: "İkinci doğrulama" },
+  { id: 3, title: "Kriter profilini yayımla", short: "Yarışmayı başvuruya hazırla" },
 ] as const;
 
 const TYPE_LABELS: Record<CriterionType, string> = {
@@ -70,6 +73,14 @@ const CONFIDENCE_LABELS: Record<Confidence, string> = {
   high: "Yüksek güven",
   medium: "Orta güven",
   low: "Düşük güven",
+};
+
+const APPLICABILITY_LABELS: Record<CriterionApplicability, string> = {
+  report: "Katılımcı PDF içeriğinde aranır",
+  upload: "Yüklenen dosyanın özelliğinden kontrol edilir",
+  physical: "Saha / fiziksel aşamada kontrol edilir",
+  external: "Haricî onay veya insan kararı gerekir",
+  informational: "Yalnızca bilgi ve kaynak notudur",
 };
 
 const EVIDENCE_LABELS = {
@@ -176,7 +187,9 @@ function Topbar({ step, onBack }: { step: Step; onBack: () => void }) {
 
 function UploadStep({
   file,
+  templateFile,
   onFile,
+  onTemplateFile,
   onSample,
   onAnalyze,
   analysisReady,
@@ -185,7 +198,9 @@ function UploadStep({
   error,
 }: {
   file: File | null;
+  templateFile: File | null;
   onFile: (file: File) => void;
+  onTemplateFile: (file: File | null) => void;
   onSample: (file: File) => void;
   onAnalyze: () => void;
   analysisReady: boolean;
@@ -194,6 +209,7 @@ function UploadStep({
   error: string;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const templateInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
 
@@ -258,7 +274,29 @@ function UploadStep({
             </div>
           )}
         </div>
-
+        <div className="template-upload-card">
+          <div>
+            <span className="section-kicker">İsteğe bağlı ikinci kaynak</span>
+            <h2>Resmî rapor şablonu</h2>
+            <p>Yarışmacı raporunda aranacak zorunlu ana başlıkları daha doğru belirlemek için ekleyebilirsiniz. Şablon, puan veya yeni yarışma kuralı üretmek için kullanılmaz.</p>
+          </div>
+          <input
+            ref={templateInputRef}
+            type="file"
+            accept="application/pdf,.pdf"
+            hidden
+            onChange={(event) => onTemplateFile(event.target.files?.[0] ?? null)}
+          />
+          {templateFile ? (
+            <div className="template-file-row">
+              <FileBadge fileName={templateFile.name} mimeType={templateFile.type} />
+              <div><strong>{templateFile.name}</strong><small>{formatBytes(templateFile.size)} · Rapor şablonu</small></div>
+              <button type="button" className="text-button" onClick={() => onTemplateFile(null)}>Kaldır</button>
+            </div>
+          ) : (
+            <button type="button" className="secondary-button" onClick={() => templateInputRef.current?.click()}>Rapor şablonu ekle</button>
+          )}
+        </div>
       </div>
 
       <section className="library-shortcut" aria-labelledby="library-shortcut-title">
@@ -312,6 +350,8 @@ function CriteriaReview({
   setCriteria,
   includedGroupIds,
   setIncludedGroupIds,
+  scoringEnabled,
+  setScoringEnabled,
   onScorePlanChange,
   onBack,
   onApprove,
@@ -325,6 +365,8 @@ function CriteriaReview({
   setCriteria: (criteria: Criterion[]) => void;
   includedGroupIds: string[];
   setIncludedGroupIds: (groupIds: string[]) => void;
+  scoringEnabled: boolean;
+  setScoringEnabled: (enabled: boolean) => void;
   onScorePlanChange: (scorePlan: ScorePlan) => void;
   onBack: () => void;
   onApprove: () => void;
@@ -345,6 +387,11 @@ function CriteriaReview({
     const scopeMatch = scopeFilter === "all" || (item.scope || "Genel") === scopeFilter;
     const reviewMatch = reviewFilter === "all" || item.reviewStatus === "needs_review";
     return queryMatch && scopeMatch && reviewMatch;
+  }).sort((left, right) => {
+    const rank = (item: Criterion) => item.reviewStatus === "needs_review" ? 3
+      : ["physical", "external", "informational"].includes(item.applicability || "report") ? 2
+        : item.active ? 0 : 1;
+    return rank(left) - rank(right);
   });
   const active = criteria.filter((item) => item.active);
   const scorePlan = result.scorePlan;
@@ -369,7 +416,7 @@ function CriteriaReview({
   const scopedCriteria = scopeCriteriaToGroups(criteria, groups, includedIds);
   const criterionTotal = maxRawScoreOf(scopedCriteria);
   const groupTotal = included.reduce((sum, group) => sum + group.maxScore, 0);
-  const officialTotal = groups.length ? groupTotal : (displayTotal ?? criterionTotal);
+  const officialTotal = scoringEnabled ? (groups.length ? groupTotal : (displayTotal ?? criterionTotal)) : 0;
   // Eski kayıtlarda veya görevli düzenlemesinden sonra toplam farklılaşırsa
   // bilgi verilir; yeni analizlerde puan kapsamı motor tarafından dengelenir.
   const scoreDifferenceNote = officialTotal > 0 && criterionTotal !== officialTotal
@@ -378,7 +425,7 @@ function CriteriaReview({
   // Şartname birden çok aşamayı topluyorsa yalnızca kapsama alınan gruplar puanlanır.
   const scopeNarrowed = groups.length > 1 && included.length > 0 && included.length < groups.length;
   const canApprove = reviewConfirmed && pendingReview.length === 0 && active.length > 0
-    && (groups.length === 0 || included.length > 0);
+    && (!scoringEnabled || groups.length === 0 || included.length > 0);
 
   function toggleGroup(groupId: string, on: boolean) {
     setIncludedGroupIds(on ? [...includedGroupIds, groupId] : includedGroupIds.filter((item) => item !== groupId));
@@ -444,6 +491,7 @@ function CriteriaReview({
       reviewStatus: "confirmed",
       effect: "advisory",
       scope: setup.stage || "Genel",
+      applicability: "report",
     };
     setCriteria([...criteria, added]);
     setSelectedId(added.id);
@@ -484,6 +532,28 @@ function CriteriaReview({
         <div><strong>{displayTotal ?? "—"}</strong><span>PDF toplam puanı</span></div>
       </div>
 
+      <section className="fixed-prechecks" aria-labelledby="fixed-prechecks-title">
+        <div className="criteria-section-heading">
+          <div>
+            <span className="section-kicker">Her raporda önce çalışır</span>
+            <h2 id="fixed-prechecks-title">Sabit ön kontroller</h2>
+            <p>Bunlar şartnameden puan kriteri olarak çıkarılmaz; Hakem AI analizini başlattığında raporun temel uygunluğunu ayrı bir bölümde gösterir.</p>
+          </div>
+        </div>
+        <div className="fixed-precheck-grid">
+          {[
+            ["PDF ve dosya kapısı", setup.allowedFormats.length || setup.maxFileSizeMb ? "Şartnamedeki tür ve boyut sınırlarıyla kontrol edilir." : "Belgede sınır yoksa yalnızca güvenli ve okunabilir PDF kontrol edilir."],
+            ["Rapor dili", "Raporun dili tespit edilir; şartnamede açık bir dil kuralı varsa onunla karşılaştırılır."],
+            ["Resmî şablon", result.templateProfile?.provided ? `${result.templateProfile.name} şablonu ve ${result.templateProfile.requiredHeadings.length} ana başlıkla karşılaştırılır.` : "Ayrı şablon yüklenmedi; yalnızca onaylı kriterlerdeki açık biçim kuralları uygulanır."],
+            ["Başlık ve içerik", "Zorunlu bölümlerin varlığı ve boş bırakılıp bırakılmadığı kanıtlarıyla gösterilir."],
+            ["Kategori uygunluğu", "Rapor içeriğinin seçilen yarışma, kategori, yıl ve aşamayla ilişkisi incelenir."],
+            ["Benzerlik işareti", "Yalnızca aynı yarışma, yıl ve aşamadaki raporlarla karşılaştırılır; sistem otomatik ihlal veya diskalifiye kararı vermez."],
+          ].map(([name, detail], index) => (
+            <article key={name}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{name}</strong><p>{detail}</p></div></article>
+          ))}
+        </div>
+      </section>
+
       <details className="template-peek">
         <summary>Şablon önizlemesi — yaptığınız değişiklikler anında yansır</summary>
         <TemplatePreview setup={setup} file={file} result={result} criteria={criteria} />
@@ -499,7 +569,15 @@ function CriteriaReview({
             {scorePlan?.auditStatus === "matched" ? "Toplam doğrulandı" : scorePlan?.auditStatus === "mismatch" ? "Toplam yeniden kontrol edilmeli" : "Genel toplam belirtilmemiş"}
           </span>
         </div>
-        {scorePlan ? (
+        <label className="score-mode-toggle">
+          <input
+            type="checkbox"
+            checked={scoringEnabled}
+            onChange={(event) => { setScoringEnabled(event.target.checked); setReviewConfirmed(false); }}
+          />
+          <span><strong>PDF aşamasında puanlamayı kullan</strong><small>Kapalı olduğunda saha ve puan maddeleri kaynak referansı olarak korunur, sonuç toplamına girmez.</small></span>
+        </label>
+        {scorePlan && scoringEnabled ? (
           <div className="score-total-review">
             <div>
               <strong>PDF’de yazan resmî toplam puan</strong>
@@ -523,7 +601,7 @@ function CriteriaReview({
             grup toplamını <strong>{result.scoreAudit.groupTotal}</strong> olarak okudu. İki tarama aynı sonuca ulaşmadığı için kaynak tabloyu görevlinin doğrulaması gerekir.
           </p>
         ) : null}
-        {scorePlan?.groups.length ? (
+        {scorePlan?.groups.length && scoringEnabled ? (
           <div className="score-group-list">
             {scorePlan.groups.map((group) => (
               <details key={group.id ?? `${group.name}-${group.sourcePage}`} className={`score-group-row ${isIncluded(group) ? "" : "excluded"}`}>
@@ -559,7 +637,7 @@ function CriteriaReview({
         ) : (
           <p className="score-plan-empty">PDF’de sayısal puan tablosu bulunmadı. Sistem bu belge için puan üretmedi.</p>
         )}
-        {officialTotal ? (
+        {scoringEnabled && officialTotal ? (
           <p className="normalization-note">
             {scopeNarrowed ? (
               <>
@@ -574,12 +652,12 @@ function CriteriaReview({
             )}
           </p>
         ) : null}
-        {groups.length > 1 && !included.length ? (
+        {scoringEnabled && groups.length > 1 && !included.length ? (
           <p className="score-audit-note warning">
             Hiçbir puan grubu kapsama alınmadı. Bu profille puan hesaplanamaz; en az bir grup seçin.
           </p>
         ) : null}
-        {groups.length && !groupsHaveIds ? (
+        {scoringEnabled && groups.length && !groupsHaveIds ? (
           <p className="score-audit-note">
             Bu analiz kapsam daraltmasını desteklemeyen eski veri modeliyle üretildi; tüm puan grupları
             dahil edilir. Grup bazlı kapsam seçimi için belgeyi yeniden analiz edin.
@@ -615,7 +693,7 @@ function CriteriaReview({
             <div className="review-queue" role="status">
               <div>
                 <strong>{pendingReview.length} bulgu görevli kararı bekliyor</strong>
-                <p>Bu maddelerde eksik kanıt, anlam farkı, çelişki veya tamamlanmamış doğrulama var. Hakem incelemesine göndermeden önce kaynak sayfayı kontrol edin.</p>
+                <p>Bu maddelerde eksik kanıt, anlam farkı veya tamamlanmamış doğrulama var. Profili yayımlamadan önce kaynak sayfayı kontrol edin.</p>
               </div>
               <button
                 type="button"
@@ -751,6 +829,16 @@ function CriteriaReview({
                 <Field label="Kapsam / aşama">
                   <input value={selected.scope || "Genel"} onChange={(event) => { update({ scope: event.target.value }); setReviewConfirmed(false); }} />
                 </Field>
+                <Field label="Kanıtın inceleneceği yer">
+                  <select
+                    value={selected.applicability || "report"}
+                    onChange={(event) => { update({ applicability: event.target.value as CriterionApplicability }); setReviewConfirmed(false); }}
+                  >
+                    {(Object.keys(APPLICABILITY_LABELS) as CriterionApplicability[]).map((key) => (
+                      <option key={key} value={key}>{APPLICABILITY_LABELS[key]}</option>
+                    ))}
+                  </select>
+                </Field>
                 {criterionEffect(selected) === "score" ? (
                   <Field label="Azami puan">
                     <input
@@ -861,14 +949,14 @@ function CriteriaReview({
           </label>
           {!canApprove ? (
             <small>
-              {groups.length > 0 && included.length === 0 && "En az bir puan grubunu değerlendirmeye dahil edin. "}
+              {scoringEnabled && groups.length > 0 && included.length === 0 && "En az bir puan grubunu değerlendirmeye dahil edin. "}
               {pendingReview.length > 0 && `${pendingReview.length} kanıt bulgusunu onaylayın veya dışarıda bırakın. `}
               {!reviewConfirmed && "Görevli kontrolünü onaylayın."}
             </small>
           ) : <small className="ready-note">Profil onaya hazır.</small>}
           {approvalError ? <small className="approval-error" role="alert">{approvalError}</small> : null}
         </div>
-        <button type="button" className="primary-button" disabled={!canApprove} onClick={onApprove}>Hakem incelemesine gönder <span>→</span></button>
+        <button type="button" className="primary-button" disabled={!canApprove} onClick={onApprove}>Kriter profilini yayımla <span>→</span></button>
       </div>
     </section>
   );
@@ -909,13 +997,12 @@ function ProfileReady({
   return (
     <section className="workspace ready-workspace" aria-labelledby="ready-title">
       <div className="ready-hero">
-        <span className="approval-seal" aria-hidden="true">⏳</span>
-        <span className="section-kicker">Hakem onayı bekleniyor</span>
-        <h1 id="ready-title">Profil ikinci doğrulamaya gönderildi</h1>
+        <span className="approval-seal" aria-hidden="true">✓</span>
+        <span className="section-kicker">Profil yayımlandı</span>
+        <h1 id="ready-title">Kriter seti değerlendirmeye hazır</h1>
         <p>
-          {profile.setup.competition} · {profile.setup.reportType} için hazırladığınız kriter ve puan yapısı hakeme iletildi.
-          Hakem şartname uyumunu kontrol edip onayladığında profil değerlendirmede kullanılabilir hâle gelir;
-          düzeltme isterse notu &quot;Profillerim&quot; bölümünde görürsünüz.
+          {profile.setup.competition} · {profile.setup.reportType} için doğruladığınız kriter ve puan kapsamı yayımlandı.
+          Hakemler katılımcı raporlarını yalnızca bu sürümlü profile göre değerlendirebilir.
         </p>
         <div className="ready-actions">
           <button type="button" className="primary-button" onClick={downloadProfile}>Profil JSON’unu indir</button>
@@ -926,7 +1013,7 @@ function ProfileReady({
       <div className="profile-sheet">
         <div className="profile-sheet-header">
           <div><span>Profil kimliği</span><strong>{profile.setup.year} / {profile.setup.stage} / v1.0</strong></div>
-          <span className="status-chip warning">Hakem onayı bekliyor</span>
+          <span className="status-chip success">Yayında</span>
         </div>
         <dl className="profile-facts">
           <div><dt>Yarışma</dt><dd>{profile.setup.competition}</dd></div>
@@ -962,9 +1049,9 @@ function ProfileReady({
         <div className="profile-footer-note">
           <span>Sonraki adım</span>
           <p>
-            Hakem bu profili ikinci aşamada doğrular: eksik kriteri ekleyebilir, yanlışı düzeltebilir,
-            puanlama hatasını giderebilir. Onaydan sonra yarışmacı raporları bu profile göre değerlendirilir.{" "}
-            <Link className="next-module-link" href="/">Onay durumunu izle →</Link>
+            Katılımcı raporları bu profile göre analiz edilir. Kriter değişikliği gerekiyorsa Yarışma Yöneticisi
+            profili yeniden düzenleyip yeni sürüm olarak yayımlar.{" "}
+            <Link className="next-module-link" href="/">Yönetim paneline dön →</Link>
           </p>
         </div>
       </div>
@@ -978,11 +1065,13 @@ export default function CriteriaApp() {
   const [step, setStep] = useState<Step>(1);
   const [setup, setSetup] = useState<SetupData>(DEFAULT_SETUP);
   const [file, setFile] = useState<File | null>(null);
+  const [templateFile, setTemplateFile] = useState<File | null>(null);
   const [documentUrl, setDocumentUrl] = useState("");
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [criteria, setCriteria] = useState<Criterion[]>([]);
   const [profile, setProfile] = useState<ProfileExport | null>(null);
   const [includedGroupIds, setIncludedGroupIds] = useState<string[]>([]);
+  const [scoringEnabled, setScoringEnabled] = useState(true);
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("");
   const [error, setError] = useState("");
@@ -998,7 +1087,7 @@ export default function CriteriaApp() {
     let active = true;
     async function restoreDraft() {
       const snapshot = loadDraftSnapshot();
-      const storedFile = await loadDraftFile();
+      const [storedFile, storedTemplateFile] = await Promise.all([loadDraftFile(), loadDraftTemplateFile()]);
       if (!active) return;
       const legacyManagerDraft = Boolean(snapshot && (
         !snapshot.result?.setup
@@ -1022,6 +1111,7 @@ export default function CriteriaApp() {
             ? restoredGroups.filter((group) => legacyNames.includes(group.name)).flatMap((group) => (group.id ? [group.id] : []))
             : restoredGroups.flatMap((group) => (group.id ? [group.id] : []))),
         );
+        setScoringEnabled(snapshot.scoringEnabled ?? snapshot.profile?.normalization?.scoringEnabled ?? true);
         setProfile(snapshot.profile ? { ...snapshot.profile, criteria: snapshot.profile.criteria.map(applyDecisionSafetyPolicy) } : null);
       } else if (legacyManagerDraft) {
         // Önceki dört adımlı sürümün yönetici ayarları artık geçerli değildir.
@@ -1031,11 +1121,13 @@ export default function CriteriaApp() {
         setCriteria([]);
         setProfile(null);
         setIncludedGroupIds([]);
+        setScoringEnabled(true);
       }
       if (storedFile) {
         setFile(storedFile);
         setDocumentUrl(URL.createObjectURL(storedFile));
       }
+      if (storedTemplateFile) setTemplateFile(storedTemplateFile);
       if (snapshot && !legacyManagerDraft) setStep(snapshot.profile ? 3 : snapshot.result && storedFile ? 2 : 1);
       else setStep(1);
       setDraftReady(true);
@@ -1046,13 +1138,18 @@ export default function CriteriaApp() {
 
   useEffect(() => {
     if (!draftReady) return;
-    saveDraftSnapshot({ step, setup, result, criteria, profile, includedGroupIds });
-  }, [criteria, draftReady, includedGroupIds, profile, result, setup, step]);
+    saveDraftSnapshot({ step, setup, result, criteria, profile, includedGroupIds, scoringEnabled });
+  }, [criteria, draftReady, includedGroupIds, profile, result, scoringEnabled, setup, step]);
 
   useEffect(() => {
     if (!draftReady) return;
     saveDraftFile(file).catch(() => undefined);
   }, [draftReady, file]);
+
+  useEffect(() => {
+    if (!draftReady) return;
+    saveDraftTemplateFile(templateFile).catch(() => undefined);
+  }, [draftReady, templateFile]);
 
   function chooseFile(nextFile: File) {
     setError("");
@@ -1071,6 +1168,30 @@ export default function CriteriaApp() {
     setCriteria([]);
     setProfile(null);
     setIncludedGroupIds([]);
+    setScoringEnabled(true);
+  }
+
+  function chooseTemplateFile(nextFile: File | null) {
+    setError("");
+    if (!nextFile) {
+      setTemplateFile(null);
+      setResult(null);
+      setCriteria([]);
+      setProfile(null);
+      return;
+    }
+    if (nextFile.type !== "application/pdf" && !nextFile.name.toLocaleLowerCase("tr-TR").endsWith(".pdf")) {
+      setError("Rapor şablonu PDF olmalıdır.");
+      return;
+    }
+    if (nextFile.size > 10 * 1024 * 1024) {
+      setError("Rapor şablonu 10 MB'den büyük olamaz.");
+      return;
+    }
+    setTemplateFile(nextFile);
+    setResult(null);
+    setCriteria([]);
+    setProfile(null);
   }
 
   async function analyze() {
@@ -1084,8 +1205,9 @@ export default function CriteriaApp() {
     try {
       setLoadingMessage("PDF sayfa yapısı doğrulanıyor…");
       const pageCount = await getPdfPageCount(file);
+      const templatePageCount = templateFile ? await getPdfPageCount(templateFile) : undefined;
       setLoadingMessage("PDF, yapısı korunarak AI modele aktarılıyor…");
-      const analysis = await analyzeWithGemini(file, pageCount);
+      const analysis = await analyzeWithGemini(file, pageCount, templateFile, templatePageCount);
       setLoadingMessage("Kaynak sayfaları ve güven açıklamaları eşleştiriliyor…");
       if (!analysis.criteria.length) {
         throw new Error("Belgede güvenilir bir değerlendirme kriteri bulunamadı.");
@@ -1117,10 +1239,15 @@ export default function CriteriaApp() {
 
     // Kapsam dışı gruba bağlı kriterler profile pasif girer. Puan ölçeği PDF'deki
     // kapsanmış grup toplamıdır; otomatik 100'lük dönüşüm yapılmaz.
-    const scopedCriteria = scopeCriteriaToGroups(criteria, groups, includedIds);
+    const groupScopedCriteria = scopeCriteriaToGroups(criteria, groups, includedIds);
+    const scopedCriteria = scoringEnabled ? groupScopedCriteria : groupScopedCriteria.map((criterion) => (
+      ["score", "penalty", "threshold"].includes(criterionEffect(criterion))
+        ? { ...criterion, active: false }
+        : criterion
+    ));
     const criterionTotal = maxRawScoreOf(scopedCriteria);
     const groupTotal = included.reduce((sum, group) => sum + group.maxScore, 0);
-    const evaluationTotal = groups.length ? groupTotal : (declaredTotal ?? criterionTotal);
+    const evaluationTotal = scoringEnabled ? (groups.length ? groupTotal : (declaredTotal ?? criterionTotal)) : 0;
     const scopeAnomaly = evaluationTotal > 0 && criterionTotal !== evaluationTotal
       ? `Puanlanabilir aktif kriterlerin azami toplamı ${criterionTotal}, PDF'nin bu kapsam için ilan ettiği resmî toplam ${evaluationTotal}.`
       : null;
@@ -1135,10 +1262,12 @@ export default function CriteriaApp() {
         pages: result.pageCount,
         analyzedAt: result.analyzedAt,
       },
+      templateProfile: result.templateProfile,
       criteria: scopedCriteria,
       skippedChecks: result.skippedChecks,
       scorePlan: result.scorePlan,
       normalization: {
+        scoringEnabled,
         declaredTotal,
         evaluationTotal,
         includedGroupIds: included.flatMap((group) => (group.id ? [group.id] : [])),
@@ -1152,7 +1281,7 @@ export default function CriteriaApp() {
       setProfile(published.profile.profile);
       setStep(3);
     } catch (caught) {
-      setApprovalError(caught instanceof Error ? caught.message : "Profil hakem incelemesine gönderilemedi. Bağlantıyı kontrol edip yeniden deneyin.");
+      setApprovalError(caught instanceof Error ? caught.message : "Profil yayımlanamadı. Bağlantıyı kontrol edip yeniden deneyin.");
     }
   }
 
@@ -1161,15 +1290,18 @@ export default function CriteriaApp() {
     setStep(1);
     setSetup(DEFAULT_SETUP);
     setFile(null);
+    setTemplateFile(null);
     setDocumentUrl("");
     setResult(null);
     setCriteria([]);
     setProfile(null);
     setIncludedGroupIds([]);
+    setScoringEnabled(true);
     setError("");
     setApprovalError("");
     clearDraftSnapshot();
     saveDraftFile(null).catch(() => undefined);
+    saveDraftTemplateFile(null).catch(() => undefined);
   }
 
   const completedSteps = useMemo(() => {
@@ -1204,7 +1336,9 @@ export default function CriteriaApp() {
         {step === 1 ? (
           <UploadStep
             file={file}
+            templateFile={templateFile}
             onFile={chooseFile}
+            onTemplateFile={chooseTemplateFile}
             onSample={(sampleFile) => chooseFile(sampleFile)}
             onAnalyze={analyze}
             analysisReady={Boolean(result && criteria.length)}
@@ -1223,6 +1357,8 @@ export default function CriteriaApp() {
             setCriteria={setCriteria}
             includedGroupIds={includedGroupIds}
             setIncludedGroupIds={setIncludedGroupIds}
+            scoringEnabled={scoringEnabled}
+            setScoringEnabled={setScoringEnabled}
             onScorePlanChange={(scorePlan) => setResult((current) => current ? { ...current, scorePlan } : current)}
             onBack={() => setStep(1)}
             onApprove={approve}

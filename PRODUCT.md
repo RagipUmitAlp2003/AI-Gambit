@@ -20,7 +20,7 @@ Sabit bir puanlama şablonu sunmaz. Belgedeki biçim kurallarını, zorunlu içe
 
 ## Operating Context
 
-İlk modül üç adımdan oluşur: resmî kriter PDF'sinin yüklenmesi, belgeden çıkarılan profil ve kriterlerin dinamik inceleme/düzeltmesi, profil onayı. Yarışmacı portalı yarışma seçimi, PDF başvurusu ve sonuç takibini yürütür. PDF yüklenince analiz başlamaz; kayıt hakem havuzuna düşer. Değerlendirme Atölyesi onaylı profili katılımcı raporuna yalnızca hakem “AI ile değerlendir” dediğinde uygular: kesin ön kontroller, AI bulguları, hakem incelemesi ve hakem onaylı yarışmacı geri bildirimi aynı kalıcı başvuru kaydına yazılır. Değerlendirme Yöneticisi bu akışı salt okunur olarak izler.
+İlk modül üç adımdan oluşur: resmî kriter PDF'si ile isteğe bağlı rapor şablonunun yüklenmesi, kriterlerin dinamik inceleme/düzeltmesi ve profilin Yarışma Yöneticisi tarafından yayımlanması. Yarışmacı portalı yarışma seçimi, PDF başvurusu, revizyon sürümü ve sonuç takibini yürütür. PDF yüklenince analiz başlamaz; Admin ilk Hakemi atar. Değerlendirme Atölyesi yayımlanmış profili katılımcı raporuna yalnızca Hakem “AI ile değerlendir” dediğinde uygular. Değerlendirme Yöneticisi iş yükü, yeniden atama, hata kuyruğu, süreç kilitleme ve sonuç yayın akışını yönetir; proje içeriğini ve nihai kararı değiştiremez.
 
 ## Capabilities and Constraints
 
@@ -29,7 +29,7 @@ Sabit bir puanlama şablonu sunmaz. Belgedeki biçim kurallarını, zorunlu içe
 - Kaynak PDF için uygulanan 18 MB ve katılımcı raporu için uygulanan 50 MB sistem kapasite sınırları yarışma kuralı gibi gösterilmez.
 - Belgede açıkça bulunmayan sayfa, yazı tipi veya düzen kontrolleri etkinleştirilmez.
 - Yapay zekâ çıkarımları yönetici onayı olmadan yürürlüğe girmez.
-- API bilgisi henüz verilmemiştir. İlk sürüm, değiştirilebilir bir analiz sağlayıcısı ve yerel demo motoruyla çalışır.
+- AI anahtarı yalnızca sunucu ortam değişkeninde tutulur; tarayıcıya ve Git deposuna gönderilmez. Kesin kontroller AI servisinden bağımsız çalışır.
 - Bu ürün bir jüri karar destek aracıdır; nihai eleme veya jüri kararı vermez.
 
 ## Evidence on Hand

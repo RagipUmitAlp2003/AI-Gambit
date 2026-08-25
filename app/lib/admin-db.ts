@@ -114,17 +114,19 @@ const SCHEMA = [
 ];
 
 /**
- * Rol numaralandırması v2 (nihai rol modeli).
+ * Rol numaralandırması göçleri.
  *
- * Eski dizilim 03 = Yarışmacı, 04 = Değerlendirme Yöneticisi idi. Nihai modelde
- * 03 = Değerlendirme Yöneticisi, 04 = Yarışmacı. Kodlar takas edilir; hesaplar,
+ * Ara sürümde 03 = Değerlendirme Yöneticisi, 04 = Yarışmacı kullanılmıştı.
+ * Nihai model 03 = Yarışmacı, 04 = Değerlendirme Yöneticisidir. Kodlar güvenli
+ * ve bir kez çalışan iki aşamalı göçle düzeltilir; hesaplar,
  * yarışmalar, kriterler ve değerlendirme kayıtları silinmez.
  *
  * Denetim izindeki `actor_role` da aynı takasla düzeltilir: kişi değişmedi,
  * yalnızca rolün kodu değişti; düzeltilmezse geçmiş kayıtlar yanlış rolü
  * gösterirdi. Referans SQL: migrations/0004_roles_v2.sql
  */
-const ROLE_SWAP_MIGRATION = "0004_roles_v2_swap_03_04";
+const LEGACY_ROLE_SWAP_MIGRATION = "0004_roles_v2_swap_03_04";
+const FINAL_ROLE_RESTORE_MIGRATION = "0005_roles_v3_restore_03_participant_04_operations";
 
 function roleSwapStatements(database: D1Database, table: string, column: string) {
   return [
@@ -134,20 +136,34 @@ function roleSwapStatements(database: D1Database, table: string, column: string)
   ];
 }
 
-async function applyRoleMigration(database: D1Database): Promise<void> {
+async function migrationApplied(database: D1Database, name: string): Promise<boolean> {
   const applied = await database
     .prepare(`SELECT name FROM schema_migrations WHERE name = ?`)
-    .bind(ROLE_SWAP_MIGRATION)
+    .bind(name)
     .first<{ name: string }>();
-  if (applied) return;
+  return Boolean(applied);
+}
+
+async function applyRoleMigrations(database: D1Database): Promise<void> {
+  // Önce önceki sürümün izi tamamlanır; daha sonra nihai rol dizilimi tek kez
+  // geri yüklenir. Böylece hem eski hem de yeni kurulmuş veritabanlarında aynı
+  // sonuç elde edilir ve hiçbir hesap silinmez.
+  if (!await migrationApplied(database, LEGACY_ROLE_SWAP_MIGRATION)) {
+    await database.batch([
+      ...roleSwapStatements(database, "admin_accounts", "role_code"),
+      ...roleSwapStatements(database, "admin_audit_log", "actor_role"),
+      database.prepare(`INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, ?)`)
+        .bind(LEGACY_ROLE_SWAP_MIGRATION, new Date().toISOString()),
+    ]);
+  }
+  if (await migrationApplied(database, FINAL_ROLE_RESTORE_MIGRATION)) return;
   await database.batch([
     ...roleSwapStatements(database, "admin_accounts", "role_code"),
     ...roleSwapStatements(database, "admin_audit_log", "actor_role"),
-    database
-      .prepare(`INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, ?)`)
-      .bind(ROLE_SWAP_MIGRATION, new Date().toISOString()),
+    database.prepare(`INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, ?)`)
+      .bind(FINAL_ROLE_RESTORE_MIGRATION, new Date().toISOString()),
   ]);
-  console.info(`[migration] ${ROLE_SWAP_MIGRATION} uygulandı: rol 03 ve 04 kodları takas edildi.`);
+  console.info(`[migration] ${FINAL_ROLE_RESTORE_MIGRATION} uygulandı: 03 Yarışmacı, 04 Değerlendirme Yöneticisi.`);
 }
 
 let schemaPromise: Promise<void> | null = null;
@@ -163,7 +179,7 @@ export async function getDatabase(): Promise<D1Database> {
   if (!schemaPromise) {
     schemaPromise = database
       .batch(SCHEMA.map((statement) => database.prepare(statement)))
-      .then(() => applyRoleMigration(database))
+      .then(() => applyRoleMigrations(database))
       .catch((error: unknown) => {
         // Sonraki istek yeniden denesin; kalıcı hata bırakma.
         schemaPromise = null;

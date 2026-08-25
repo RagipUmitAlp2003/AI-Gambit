@@ -10,13 +10,13 @@ Uygulama `http://localhost:3000` adresinde yönetici giriş ekranıyla açılır
 - **01 · Yarışma Yöneticisi:** `/kriter-atolyesi` üzerinden resmî PDF'yi analiz eder ve değerlendirme profilini kesinleştirir.
 - **02 · Hakem / Değerlendirici:** `/degerlendirme` üzerinden AI bulgularını inceler ve nihai uzman kararını verir.
 - **03 · Yarışmacı:** hesap oluşturur, yarışmayı seçer, PDF raporunu gönderir ve yalnızca hakem onaylı sonucunu görür.
-- **04 · Değerlendirme Yöneticisi:** başvuruları, yayınlı profilleri ve değerlendirme durumlarını salt okunur izler; hakem kararını değiştiremez.
+- **04 · Değerlendirme Yöneticisi:** hakem yüklerini ve hata kuyruğunu izler; yeniden atama, hatırlatma, analizi yeniden sıraya alma, süreç kilitleme ve sonuç yayınını yönetir. Rapor puanlayamaz veya nihai karar veremez.
 
 Problem 4'teki **03 · Yarışmacı** yönetici rolü değildir ve yönetici hesap ekranından atanmaz. Yarışmacı giriş ekranından kendi hesabını oluşturur. Hem sayfalar hem de ücretli analiz uçları sunucu oturumuna ve role göre korunur.
 
 ## Bu sürümde çalışan akış
 
-1. Görevli organizatörün kriter/şartname PDF'sini yükler; ayrı bir temel ayar formu doldurmaz.
+1. Görevli organizatörün kriter/şartname PDF'sini yükler; isterse ayrı resmî rapor şablonu ekler. Ayrı bir temel ayar formu doldurmaz.
 2. PDF, tablo ve sayfa yapısı korunarak sunucu üzerinden Gemini'ye gönderilir. Yarışma, kategori, aşama, rapor türü ve katılımcı teslim sınırları da yalnızca bu belgeden çıkarılır. Uzun şartnamelerde ilk çıkarımdan sonra bağımsız bir eksik-kural denetimi daha çalışır.
 3. PDF'de bulunmayan format, boyut, dosya adedi veya ihlal sonucu için sistem varsayım üretmez.
 4. İlan edilen puan toplamı ve birbirini örtmeyen puan grupları ayrıca çıkarılır; grup toplamı ile PDF toplamı otomatik karşılaştırılır.
@@ -24,7 +24,7 @@ Problem 4'teki **03 · Yarışmacı** yönetici rolü değildir ve yönetici hes
 6. Fiziksel güvenlik ve hakem uygunluğu maddelerinde sistem nihai karar vermez; bulgu üretir ve insan onayı ister.
 7. Yönetici kriterleri düzenleyebilir, pasifleştirebilir, yenisini ekleyebilir veya manuel eklediği kriteri onaylı bir silme akışıyla kaldırabilir. Ayrı karar kuralı özeti kaldırılmıştır; bütün kurallar tek kriter listesinde kaynaklarıyla incelenir. Sonuçlar, PDF'de ilan edilen resmî puan ölçeğiyle gösterilir; sistem kendiliğinden 100'lük ölçeğe dönüştürmez.
 8. Çok aşamalı şartnamelerde (rapor + saha görevleri aynı belgede) yönetici, hangi puan gruplarının bu profilde değerlendirileceğini seçer. Örneğin İnsansız Deniz Aracı şartnamesi 315 puan ilan eder, ancak yalnızca "Rapor Puanlaması" kapsama alınırsa değerlendirme resmî 15 puanlık grup üzerinden yapılır. Belgede ilan edilen genel toplam profilde ayrıca korunur.
-9. Yönetici kaynakları ve AI yorumlarını doğruladıktan sonra profil onaylanır, D1'de yayınlanır ve JSON olarak indirilebilir. Eksik veya tekrar sayılan puan satırları, PDF'deki resmî grup azamisi korunacak biçimde güvenli bir hakem kriteriyle dengelenir. Ayrı aşamalara ait puanlar bulunan şartnamelerde toplamın 100 olması zorunlu tutulmaz.
+9. Yarışma Yöneticisi kaynakları ve AI yorumlarını doğruladıktan sonra profili doğrudan yayımlar. Hakem kriter oluşturma veya profil yayımlama aşamasına katılmaz. Ayrı aşamalara ait puanlar bulunan şartnamelerde toplamın 100 olması zorunlu tutulmaz.
 
 Seçilen kaynak PDF, analiz taslağı ve henüz onaylanmamış kriter düzenlemeleri görevlinin tarayıcısında saklanır. Yönetici önceki adımlara dönebilir veya sayfayı yenileyebilir; yalnızca yeni bir belge seçmesi ya da “Taslağı sıfırla” işlemi taslağı temizler. Onaylanan profil D1'e yayınlanır. Yarışmacı başvuruları D1'de, PDF dosyaları özel R2 deposunda saklanır ve roller arasında aynı kayıt üzerinden taşınır.
 
@@ -40,7 +40,7 @@ Anlamsal kriter analizi (AI puan önerisi, kategori uygunluğu) `app/api/evaluat
 
 ## Gemini yapılandırması
 
-Gerçek sağlayıcı sunucu tarafındaki `app/api/analyze/route.ts` uç noktasıdır. API anahtarı yalnızca `.env.local` içinde tutulur; tarayıcı koduna ve Git'e dahil edilmez. Birincil model `gemini-3.7-flash`, geçici yoğunluk halinde yedek model `gemini-3.5-flash` olarak ayarlanmıştır.
+Gerçek sağlayıcı sunucu tarafındaki `app/api/analyze/route.ts` uç noktasıdır. API anahtarı yalnızca `.env.local` içinde tutulur; tarayıcı koduna ve Git'e dahil edilmez. PDF işlemede daha güçlü `gemini-3-flash-preview` birincil, yoğunluk veya zaman aşımında `gemini-3.1-flash-lite` yedek modeldir. Normal şartnameler Files API'ye bir kez yüklenir ve paralel analiz çağrıları aynı güvenli dosya URI'sini kullanır.
 
 Yerel ortam değişkenleri `.env.example` örneğine göre tanımlanır. Organizatör kaynak PDF'si için teknik analiz sınırı 18 MB, katılımcı raporu için 50 MB'dir. Bu değerler yarışma kuralı değildir; katılımcı teslim sınırı yalnızca organizatör PDF'sinden gelir. `app/lib/demo-analyzer.ts` çevrimdışı geliştirme ve karşılaştırma için korunmuştur; normal arayüz akışında kullanılmaz.
 
@@ -78,7 +78,7 @@ Belgelerin tümü uygulamadaki “Hazır test belgeleri” bölümünden seçile
 - `app/components/evaluation-app.tsx`: Değerlendirme Atölyesi (rapor havuzu, hakem incelemesi, yarışmacı görünümü)
 - `app/components/participant-portal.tsx`: yarışma arama, PDF başvurusu ve yarışmacı sonuç takibi
 - `app/components/manager-profile-history.tsx`: geçmiş kriter ayıklamaları ve onaylanan projeler
-- `app/components/operations-panel.tsx`: 00/04 için salt okunur süreç izleme
+- `app/components/operations-panel.tsx`: 00/04 için hakem yükü, yeniden atama, hata kuyruğu ve yarışma aşaması yönetimi
 - `app/lib/workflow-db.ts`: yayınlı profiller ve başvurular için D1/R2 veri katmanı
 - `app/api/applications/*`: başvuru, dosya erişimi ve hakem durum güncellemeleri
 - `app/api/profiles/route.ts`: onaylı kriter profillerini yayınlama ve okuma

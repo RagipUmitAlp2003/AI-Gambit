@@ -3,6 +3,7 @@ import { requirePermission } from "../../lib/admin-guard";
 import { criterionEffectOf, criterionEliminates, maxRawScoreOf } from "../../lib/evaluation-summary";
 import { validateProfileExport } from "../../lib/profile-loader";
 import { acquireAnalysisPermit, requestBodyTooLarge } from "../../lib/request-guard";
+import { pdfIntegrityError } from "../../lib/pdf-integrity";
 import type {
   AnalysisDiagnostics,
   CheckStatus,
@@ -18,8 +19,8 @@ import type {
 } from "../../lib/types";
 import { recordUsage } from "../../lib/usage-metrics";
 
-const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
-const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash";
+const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
+const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite";
 const PROMPT_VERSION = "report-v2";
 const MAX_REPORT_BYTES = 50 * 1024 * 1024;
 const MAX_INLINE_REPORT_BYTES = 18 * 1024 * 1024;
@@ -46,8 +47,8 @@ const RESPONSE_SCHEMA = {
             type: "array",
             items: {
               type: "object",
-              properties: { page: { type: ["integer", "null"] }, text: { type: "string" } },
-              required: ["page", "text"],
+              properties: { page: { type: ["integer", "null"] }, section: { type: "string" }, text: { type: "string" } },
+              required: ["page", "section", "text"],
             },
           },
         },
@@ -67,8 +68,8 @@ const RESPONSE_SCHEMA = {
             type: "array",
             items: {
               type: "object",
-              properties: { page: { type: ["integer", "null"] }, text: { type: "string" } },
-              required: ["page", "text"],
+              properties: { page: { type: ["integer", "null"] }, section: { type: "string" }, text: { type: "string" } },
+              required: ["page", "section", "text"],
             },
           },
           confidence: { type: "string", enum: CONFIDENCES },
@@ -99,7 +100,7 @@ DEĞİŞMEZ KURALLAR:
 1. Yalnızca verilen aktif kriter kimliklerini kullan; yeni kriter üretme ve kriteri yeniden adlandırma.
 2. Her aktif kriter için tam olarak bir bulgu döndür.
 3. Raporda bulamadığın içeriği not_found; bulup yetersiz gördüğün içeriği not_met veya partially_met yap.
-4. met, partially_met ve not_met gibi anlamsal sonuçlarda rapordan 1 tabanlı sayfa ve kısa doğrudan alıntı göster. Kanıt veremiyorsan needs_human, null puan ve low güven kullan.
+4. met, partially_met ve not_met gibi anlamsal sonuçlarda rapordan 1 tabanlı sayfa, bölüm başlığı ve kısa doğrudan alıntı göster. Kanıt veremiyorsan needs_human, null puan ve low güven kullan.
 5. Puan yalnızca effect=score ve azami puanı tanımlı kriterlerde önerilebilir. 0 ile kriter azamisi arasında kal; kanıtsız puan uydurma.
 6. human/hybrid, human_only, eleme, geçiş, baraj ve ceza kriterlerinde son kararın insanda olduğunu gözet. Bulguyu ve kanıtı sun ama nihai eleme/uygunluk kararı verme.
 7. Ceza kriterindeki sayı pozitif puan değildir; proposedScore alanını null bırak.
@@ -108,7 +109,7 @@ DEĞİŞMEZ KURALLAR:
 10. Benzerlik/intihal kontrolü yapma; karşılaştırma havuzu istemcide ayrıca uygulanır.
 `;
 
-type RawEvidence = { page?: unknown; text?: unknown };
+type RawEvidence = { page?: unknown; section?: unknown; text?: unknown };
 type RawFinding = {
   criterionId?: unknown;
   status?: unknown;
@@ -156,6 +157,7 @@ function normalizeEvidence(value: unknown, pageCount: number): EvidenceRef[] {
     const page = numberOrNull(raw?.page);
     return {
       page: page === null ? null : Math.min(pageCount, Math.max(1, Math.round(page))),
+      section: cleanText(raw?.section, "Belirtilmemiş", 140),
       text: cleanText(raw?.text, "", 360),
     };
   }).filter((item) => item.text.length > 0);
@@ -265,10 +267,6 @@ function extractUsage(payload: unknown) {
 async function hash(value: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", value);
   return Buffer.from(digest).toString("hex");
-}
-
-function looksLikePdf(bytes: ArrayBuffer): boolean {
-  return Buffer.from(bytes.slice(0, 5)).toString("ascii") === "%PDF-";
 }
 
 function countPdfPages(bytes: ArrayBuffer, fallback: number): { pages: number; trusted: boolean } {
@@ -448,7 +446,8 @@ export async function POST(request: Request) {
     }
 
     const bytes = await file.arrayBuffer();
-    if (!looksLikePdf(bytes)) return Response.json({ error: "Dosyanın içeriği geçerli bir PDF imzası taşımıyor." }, { status: 415 });
+    const integrityError = pdfIntegrityError(bytes);
+    if (integrityError) return Response.json({ error: integrityError }, { status: 422 });
     const rawClientPages = Number(formData.get("pageCount"));
     const clientPageCount = Number.isInteger(rawClientPages) && rawClientPages > 0 ? Math.min(1000, rawClientPages) : 1;
     const counted = countPdfPages(bytes, clientPageCount);
@@ -504,6 +503,9 @@ AKTİF KRİTERLER (bunların her biri için tam bir bulgu döndür):
 ${JSON.stringify(compactCriteria)}
 
 Ön kontrollerde dil, beklenen başlık/şablon izleri ve kategori uyumunu da kanıtla. Dosya biçimi/boyutu ve benzerlik istemcide ayrıca denetlenir.
+${profile.templateProfile?.provided
+  ? `RESMÎ RAPOR ŞABLONU: ${JSON.stringify(profile.templateProfile)}\nŞablon ve zorunlu başlık kontrollerini bu yapıdan yap; şartname kriteri gibi puanlama.`
+  : "Ayrı bir rapor şablonu sağlanmadı. Şablon kontrolünde yalnızca onaylı kriterlerin açık dayanaklarını kullan; uygunluk uydurma."}
 `;
     const body = JSON.stringify({
       systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },

@@ -106,7 +106,7 @@ export default function ManagerProfileHistory({ mode, compact = false }: {
               </div>
             </details>
           ))}
-          {!filteredProfiles.length ? <div className="participant-empty"><strong>Profil bulunamadı</strong><p>Kriter Atölyesi&apos;nde bir profil hazırlayıp hakem incelemesine gönderdiğinizde burada görünecek.</p></div> : null}
+          {!filteredProfiles.length ? <div className="participant-empty"><strong>Profil bulunamadı</strong><p>Kriter Atölyesi&apos;nde doğruladığınız bir profili yayımladığınızda burada görünecek.</p></div> : null}
         </div>
       ) : (
         <div className="history-list extraction-history-list">

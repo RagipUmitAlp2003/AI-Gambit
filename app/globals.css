@@ -210,7 +210,7 @@
 .audit-list strong { font-size: 12px; }
 .audit-list p { margin: 4px 0 0; color: var(--ink-soft); font-size: 11px; }
 
-/* Yarışmacı başvurusu ve salt okunur süreç görünümü */
+/* Yarışmacı başvurusu ve operasyonel süreç görünümü */
 .participant-shell { min-height: 100vh; background: var(--canvas); }
 .participant-topbar { min-height: 78px; display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 15px clamp(20px,4vw,54px); background: var(--ink); color: #f3fbfb; }
 .participant-topbar .management-brand { padding: 0; border: 0; }
@@ -1175,14 +1175,14 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 
 .operations-timeline { margin-top: 32px; padding-top: 28px; border-top: 1px solid var(--line); }
 .operations-timeline h2 { margin: 0 0 4px; font-size: 18px; }
-.operations-timeline > div p { margin: 0 0 14px; color: var(--muted); font-size: 10.5px; }
+.operations-timeline > div p { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
 .timeline-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .timeline-list li { display: grid; grid-template-columns: 150px minmax(0,1fr); gap: 16px; padding: 11px 2px; border-bottom: 1px solid var(--line); }
-.timeline-time { color: var(--muted); font-size: 9.5px; font-variant-numeric: tabular-nums; }
+.timeline-time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .timeline-list li > div { display: grid; gap: 3px; min-width: 0; }
-.timeline-list strong { font-size: 11.5px; }
-.timeline-list small { color: var(--muted); font-size: 9.5px; }
-.timeline-list p { margin: 0; color: var(--ink-soft); font-size: 10.5px; line-height: 1.5; }
+.timeline-list strong { font-size: 13px; }
+.timeline-list small { color: var(--muted); font-size: 12px; }
+.timeline-list p { margin: 0; color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
 
 @media (max-width: 860px) {
   .profile-review-head { display: none; }
@@ -1194,3 +1194,50 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 
 /* Bos zaman cizelgesi placeholder'i tek sutuna yayilir. */
 .timeline-list li.page-note { display: block; grid-column: 1 / -1; margin: 0; padding: 14px 2px; }
+
+/* Nihai P4 akışı: isteğe bağlı şablon, sabit ön kontroller ve operasyon araçları. */
+.template-upload-card { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 20px 22px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--canvas); }
+.template-upload-card > div:first-child { max-width: 650px; }
+.template-upload-card h2 { margin: 5px 0 6px; font-size: 15px; }
+.template-upload-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.template-file-row { display: grid; grid-template-columns: auto minmax(150px,1fr) auto; align-items: center; gap: 10px; min-width: min(420px,100%); }
+.template-file-row > div { display: grid; gap: 3px; min-width: 0; }
+.template-file-row strong, .template-file-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.template-file-row strong { font-size: 13px; }
+.template-file-row small { color: var(--muted); font-size: 12px; }
+
+.fixed-prechecks { margin: 24px 0; padding: 22px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--canvas); }
+.fixed-precheck-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; margin-top: 16px; }
+.fixed-precheck-grid article { display: grid; grid-template-columns: auto 1fr; gap: 10px; padding: 13px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); }
+.fixed-precheck-grid article > span { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--teal-soft); color: var(--teal-deep); font-size: 12px; font-weight: 900; }
+.fixed-precheck-grid strong { font-size: 13px; }
+.fixed-precheck-grid p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+.operations-control-grid { display: grid; grid-template-columns: 1.25fr .75fr; gap: 18px; margin-top: 22px; }
+.operations-stage-list, .judge-workloads { padding: 18px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); }
+.operations-stage-list h2, .judge-workloads h2 { margin: 0 0 4px; font-size: 15px; }
+.operations-stage-list > div > p, .judge-workloads > div > p { margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.operations-stage-list article, .judge-workloads article { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+.operations-stage-list article > div, .judge-workloads article > div { display: grid; gap: 3px; }
+.operations-stage-list article strong, .judge-workloads article strong { font-size: 13px; }
+.operations-stage-list article small, .judge-workloads article small { color: var(--muted); font-size: 12px; }
+.judge-workloads article > span { color: var(--success); font-size: 12px; font-weight: 800; }
+.judge-workloads article > span.has-error { color: var(--danger); }
+.operations-table-head-actions, .operations-table-row-actions { grid-template-columns: 1.2fr .85fr 1fr 1fr; }
+.operations-table-row-actions select { width: 100%; min-width: 0; padding: 7px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); font: inherit; font-size: 12px; }
+.operation-actions { display: flex !important; flex-wrap: wrap; align-items: center; gap: 5px; }
+.operation-actions .text-button { padding: 4px 0; font-size: 12px; }
+
+@media (max-width: 900px) {
+  .fixed-precheck-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .operations-control-grid { grid-template-columns: 1fr; }
+  .operations-table-head-actions { display: none; }
+  .operations-table-row-actions { grid-template-columns: 1fr; gap: 10px; }
+  .operations-table-row-actions > span:last-child { display: flex; }
+}
+
+@media (max-width: 640px) {
+  .template-upload-card { align-items: stretch; flex-direction: column; }
+  .template-file-row { min-width: 0; }
+  .fixed-precheck-grid { grid-template-columns: 1fr; }
+}

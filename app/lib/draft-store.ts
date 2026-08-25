@@ -7,6 +7,7 @@ const STORE_NAME = "draft-files";
 export const LIBRARY_STORE_NAME = "library-documents";
 export const REPORT_POOL_STORE_NAME = "report-pool";
 const FILE_KEY = "source-document";
+const TEMPLATE_FILE_KEY = "report-template";
 
 export type DraftSnapshot = {
   step: Step;
@@ -16,6 +17,7 @@ export type DraftSnapshot = {
   profile: ProfileExport | null;
   /** Değerlendirmeye dahil edilen puan gruplarının kimlikleri; eski taslaklarda bulunmaz. */
   includedGroupIds?: string[];
+  scoringEnabled?: boolean;
   /** @deprecated İsim tabanlı kapsam; eski taslakları okuyup kimliğe göç ettirmek için. */
   includedGroups?: string[];
 };
@@ -68,11 +70,19 @@ export function openDraftDatabase(): Promise<IDBDatabase> {
 }
 
 export async function loadDraftFile(): Promise<File | null> {
+  return loadStoredDraftFile(FILE_KEY);
+}
+
+export async function loadDraftTemplateFile(): Promise<File | null> {
+  return loadStoredDraftFile(TEMPLATE_FILE_KEY);
+}
+
+async function loadStoredDraftFile(key: string): Promise<File | null> {
   try {
     const database = await openDraftDatabase();
     return await new Promise((resolve, reject) => {
       const transaction = database.transaction(STORE_NAME, "readonly");
-      const request = transaction.objectStore(STORE_NAME).get(FILE_KEY);
+      const request = transaction.objectStore(STORE_NAME).get(key);
       request.onsuccess = () => resolve(request.result instanceof File ? request.result : null);
       request.onerror = () => reject(request.error);
       transaction.oncomplete = () => database.close();
@@ -83,12 +93,20 @@ export async function loadDraftFile(): Promise<File | null> {
 }
 
 export async function saveDraftFile(file: File | null) {
+  return saveStoredDraftFile(FILE_KEY, file);
+}
+
+export async function saveDraftTemplateFile(file: File | null) {
+  return saveStoredDraftFile(TEMPLATE_FILE_KEY, file);
+}
+
+async function saveStoredDraftFile(key: string, file: File | null) {
   const database = await openDraftDatabase();
   await new Promise<void>((resolve, reject) => {
     const transaction = database.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
-    if (file) store.put(file, FILE_KEY);
-    else store.delete(FILE_KEY);
+    if (file) store.put(file, key);
+    else store.delete(key);
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
   }).finally(() => database.close());

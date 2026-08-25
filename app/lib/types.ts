@@ -29,6 +29,7 @@ export type CriterionOrigin = "document" | "manager";
 export type CriterionEffect = "gate" | "score" | "penalty" | "threshold" | "advisory";
 export type CriterionReviewStatus = "ready" | "needs_review" | "confirmed" | "excluded";
 export type EvidenceStatus = "verified" | "partial" | "not_found" | "contradicted" | "not_run";
+export type CriterionApplicability = "report" | "upload" | "physical" | "external" | "informational";
 
 export type DocumentSection = {
   title: string;
@@ -80,6 +81,8 @@ export type Criterion = {
   effect?: CriterionEffect;
   /** Kuralın ait olduğu rapor, video, teknik kontrol veya görev aşaması. */
   scope?: string;
+  /** Kuralın PDF değerlendirmesinde uygulanıp uygulanamayacağını belirleyen kapsam sınıfı. */
+  applicability?: CriterionApplicability;
   /**
    * Kriterin bağlı olduğu puan grubunun kimliği (ScoreGroup.id).
    * Hiçbir puan grubuna bağlı değilse null. Kapsam daraltma bu alanı kullanır.
@@ -141,6 +144,16 @@ export type AnalysisResult = {
   };
   analysisWarnings?: string[];
   diagnostics?: AnalysisDiagnostics;
+  /** Organizatör ayrıca resmî rapor şablonu yüklediyse ondan çıkarılan yapı. */
+  templateProfile?: TemplateProfile;
+};
+
+export type TemplateProfile = {
+  provided: boolean;
+  name: string;
+  pages: number;
+  requiredHeadings: string[];
+  notes: string[];
 };
 
 export type ProfileExport = {
@@ -160,11 +173,15 @@ export type ProfileExport = {
     pages: number;
     analyzedAt: string;
   };
+  /** İkinci AI aşamasındaki şablon ve zorunlu başlık kontrolünün kaynağı. */
+  templateProfile?: TemplateProfile;
   criteria: Criterion[];
   skippedChecks: string[];
   scorePlan?: ScorePlan;
   /** Puan kapsamı bilgisi. Alan adı eski profil dosyalarıyla uyumluluk için korunur. */
   normalization?: {
+    /** Yarışma Yöneticisi bu PDF aşamasında sayısal puanlamayı kullanacak mı? */
+    scoringEnabled?: boolean;
     /** Belgede ilan edilen genel toplam (ör. saha görevleri dahil 315). */
     declaredTotal: number | null;
     /**
@@ -209,6 +226,8 @@ export type CheckStatus = "passed" | "warning" | "flagged" | "failed" | "skipped
 /** Katılımcı raporu içindeki kanıt referansı. */
 export type EvidenceRef = {
   page: number | null;
+  /** Kanıtın bulunduğu bölüm/başlık; paragraf numarası güvenilir değilse bu alan kullanılır. */
+  section?: string;
   text: string;
 };
 

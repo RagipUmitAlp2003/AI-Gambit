@@ -12,7 +12,7 @@ import { APPLICATION_STATUS_LABELS, type CompetitionApplication } from "../lib/w
 type ParticipantView = "competitions" | "applications";
 
 /**
- * Yarışmacı (Rol 04) portalı.
+ * Yarışmacı (Rol 03) portalı.
  *
  * Yapabileceği tek işlem: yarışmayı seçmek, raporunu yüklemek, başvurmak ve
  * kendi başvurusunun durumunu izlemek. Kriter, şartname, AI ön değerlendirmesi
@@ -36,6 +36,8 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
   const [file, setFile] = useState<File | null>(null);
   const [applications, setApplications] = useState<CompetitionApplication[]>([]);
   const [busy, setBusy] = useState(false);
+  const [revisionFiles, setRevisionFiles] = useState<Record<string, File | null>>({});
+  const [uploadingRevisionId, setUploadingRevisionId] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -75,6 +77,22 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Başvuru gönderilemedi.");
     } finally { setBusy(false); }
+  }
+
+  async function submitRevision(application: CompetitionApplication) {
+    const revisionFile = revisionFiles[application.id];
+    if (!revisionFile || uploadingRevisionId) return;
+    setUploadingRevisionId(application.id);
+    setError("");
+    setNotice("");
+    try {
+      const result = await workflowApi.submitRevision(application.id, revisionFile);
+      setApplications((current) => current.map((item) => item.id === application.id ? result.application : item));
+      setRevisionFiles((current) => ({ ...current, [application.id]: null }));
+      setNotice(`Yeni rapor sürümü alındı. Sürüm ${result.application.currentVersionNumber} değerlendirme akışına gönderildi.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Yeni rapor sürümü gönderilemedi.");
+    } finally { setUploadingRevisionId(""); }
   }
 
   return (
@@ -136,6 +154,18 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
                     <section><strong>Öneriler</strong><ul>{application.review.finalFeedback.suggestions.map((item) => <li key={item}>{item}</li>)}</ul></section>
                   </div>
                 ) : <p className="application-wait-note">Sonuç, hakem nihai değerlendirmeyi tamamlayıp geri bildirimi onayladığında burada açılır. AI ön değerlendirmesi tek başına sonuç değildir.</p>}
+                {(application.status === "document_reupload_requested" || (application.status === "completed" && application.outcome === "revision_required")) ? (
+                  <div className="participant-revision-box">
+                    <div><strong>Yeni rapor sürümü gerekli</strong><p>Eski dosyanız korunur. Düzeltilmiş PDF yeni sürüm olarak aynı başvuruya eklenir.</p></div>
+                    <label className="secondary-button">
+                      <input type="file" accept="application/pdf,.pdf" onChange={(event) => setRevisionFiles((current) => ({ ...current, [application.id]: event.target.files?.[0] ?? null }))} />
+                      {revisionFiles[application.id]?.name ?? "Yeni PDF seç"}
+                    </label>
+                    <button type="button" className="primary-button" disabled={!revisionFiles[application.id] || uploadingRevisionId === application.id} onClick={() => submitRevision(application)}>
+                      {uploadingRevisionId === application.id ? "Yükleniyor…" : "Yeni sürümü gönder"}
+                    </button>
+                  </div>
+                ) : null}
               </article>
             ))}
             {!applications.length ? <div className="participant-empty"><strong>Henüz başvurunuz yok</strong><p>Yarışmalar sekmesinden ilk başvurunuzu oluşturabilirsiniz.</p></div> : null}

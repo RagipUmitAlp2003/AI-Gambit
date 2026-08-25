@@ -59,7 +59,7 @@ export type CreateAccountResult = {
  * Zaman çizelgesi sıralı belge devri değil, olay listesidir: her rol
  * kendi görevini yaptığında bir olay düşer.
  */
-export type WorkflowSubject = "profile" | "application";
+export type WorkflowSubject = "profile" | "application" | "competition";
 
 /**
  * Değerlendirme sürecinin olay adları. Yeni bir adım eklendiğinde bu birlik
@@ -72,12 +72,19 @@ export type WorkflowEventName =
   | "profile_criteria_edited"
   | "profile_approved"
   | "application_submitted"
+  | "application_assigned"
+  | "application_reassigned"
+  | "judge_reminder_sent"
+  | "analysis_requeued"
+  | "document_reupload_requested"
+  | "submission_version_added"
   | "ai_analysis_started"
   | "ai_prescreen_completed"
   | "ai_analysis_failed"
   | "judge_review_started"
   | "judge_score_adjusted"
-  | "judge_decision_completed";
+  | "judge_decision_completed"
+  | "competition_stage_changed";
 
 export type WorkflowEvent = {
   id: string;

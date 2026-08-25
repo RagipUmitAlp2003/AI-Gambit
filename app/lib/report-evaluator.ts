@@ -22,6 +22,46 @@ import type { PreCheck, ProfileExport, ReportEvaluation } from "./types";
 /** Sunucunun bildirdiği hata; çevrimdışı yedeğe düşülmez, kullanıcıya gösterilir. */
 class ReportEngineError extends Error {}
 
+function evidenceNeedle(value: string) {
+  return value.toLocaleLowerCase("tr-TR").normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/ı/g, "i").replace(/\s+/g, " ").replace(/[^a-z0-9çğıöşü ]+/gi, "").trim();
+}
+
+/** AI alıntısı gerçekten gösterdiği PDF sayfasında yoksa sonuç sessizce kullanılmaz. */
+function verifyEvidenceQuotes(evaluation: ReportEvaluation, pages: string[]): ReportEvaluation {
+  let removed = 0;
+  const validEvidence = (evidence: ReportEvaluation["findings"][number]["evidence"]) => evidence.filter((item) => {
+    if (!item.page || !pages[item.page - 1]) { removed += 1; return false; }
+    const needle = evidenceNeedle(item.text);
+    const page = evidenceNeedle(pages[item.page - 1]);
+    const valid = needle.length >= 12 && page.includes(needle);
+    if (!valid) removed += 1;
+    return valid;
+  });
+  const findings = evaluation.findings.map((finding) => {
+    const evidence = validEvidence(finding.evidence);
+    if (evidence.length || !["met", "partially_met", "not_met"].includes(finding.status)) return { ...finding, evidence };
+    return {
+      ...finding,
+      status: "needs_human" as const,
+      proposedScore: null,
+      confidence: "low" as const,
+      requiresHuman: true,
+      evidence,
+      rationale: `${finding.rationale} AI alıntısı kaynak sayfada birebir doğrulanamadığı için nihai kontrol Hakeme bırakıldı.`,
+    };
+  });
+  const preChecks = evaluation.preChecks.map((check) => ({ ...check, evidence: validEvidence(check.evidence) }));
+  return {
+    ...evaluation,
+    findings,
+    preChecks,
+    analysisWarnings: removed
+      ? [...evaluation.analysisWarnings, `${removed} AI alıntısı belirtilen PDF sayfasında birebir doğrulanamadı ve kanıt listesinden çıkarıldı.`]
+      : evaluation.analysisWarnings,
+  };
+}
+
 export async function evaluateReport(input: {
   profile: ProfileExport;
   file: File;
@@ -47,7 +87,7 @@ export async function evaluateReport(input: {
       : null;
 
     if (response.ok && payload && !payload.error && Array.isArray(payload.findings)) {
-      const evaluation = payload as ReportEvaluation;
+      const evaluation = verifyEvidenceQuotes(payload as ReportEvaluation, pages);
       // Dosya biçimi/boyutu/adedi istemcide gerçek dosya üzerinden ölçülür;
       // model bu kesin kontrollerin yerine geçmez. Aynı kimlikli sunucu satırı
       // varsa yerel ölçüm önceliklidir.

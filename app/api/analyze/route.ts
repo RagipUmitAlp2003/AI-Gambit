@@ -5,30 +5,36 @@ import { sameCriterionCandidate } from "../../lib/criterion-dedupe";
 import { makePageWindows } from "../../lib/document-analysis-strategy";
 import { ensureScoreGroupCoverage, quarantineUnlinkedScoreRows } from "../../lib/score-coverage";
 import { recordUsage } from "../../lib/usage-metrics";
+import { pdfIntegrityError } from "../../lib/pdf-integrity";
 import { saveCriteriaExtractionRun } from "../../lib/workflow-db";
 import type {
   AnalysisDiagnostics,
   AnalysisResult,
   Confidence,
   Criterion,
+  CriterionApplicability,
   CriterionEffect,
   CriterionType,
   DocumentSection,
   EvaluationMethod,
   ScorePlan,
   SetupData,
+  TemplateProfile,
 } from "../../lib/types";
 
-const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3.7-flash";
-const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.5-flash";
+const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
+const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite";
 
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
-const PROMPT_VERSION = "v15-generic-adaptive-map-extract-verify";
+const PROMPT_VERSION = "v18-pdf-integrity-file-uri-map-reduce-verify";
 const CACHE_LIMIT = 12;
 const MAX_PDF_BYTES = 18 * 1024 * 1024;
-const INLINE_PDF_FAST_PATH_BYTES = 3 * 1024 * 1024;
+const MAX_TEMPLATE_BYTES = 10 * 1024 * 1024;
+// PDF'yi her paralel çağrıda yeniden taşımak ve yeniden işlettirmek yerine,
+// normal şartnameleri bir kez Files API'ye yükleyip aynı URI'yi paylaş.
+const INLINE_PDF_FAST_PATH_BYTES = 512 * 1024;
 // Multipart sınırına dosya dışında profil JSON'u ve başlıklar için küçük pay eklenir.
-const MAX_MULTIPART_BYTES = MAX_PDF_BYTES + 512 * 1024;
+const MAX_MULTIPART_BYTES = MAX_PDF_BYTES + MAX_TEMPLATE_BYTES + 768 * 1024;
 
 const EVIDENCE_VERIFICATION_ENABLED = (process.env.EVIDENCE_VERIFICATION || "on").toLowerCase() !== "off";
 
@@ -45,6 +51,7 @@ const CRITERION_TYPES: CriterionType[] = [
 const METHODS: EvaluationMethod[] = ["deterministic", "ai", "human", "hybrid"];
 const CONFIDENCES: Confidence[] = ["high", "medium", "low"];
 const EFFECTS: CriterionEffect[] = ["gate", "score", "penalty", "threshold", "advisory"];
+const APPLICABILITIES: CriterionApplicability[] = ["report", "upload", "physical", "external", "informational"];
 
 const DOCUMENT_PROFILE_SCHEMA = {
   type: "object",
@@ -86,12 +93,17 @@ const CRITERION_SCHEMA = {
     confidence: { type: "string", enum: CONFIDENCES },
     effect: { type: "string", enum: EFFECTS },
     scope: { type: "string", description: "Kuralın ait olduğu belge, aşama, kategori, teslim veya bölüm." },
+    applicability: {
+      type: "string",
+      enum: APPLICABILITIES,
+      description: "report: PDF içeriğinden; upload: dosya özelliğinden; physical: saha/canlı performanstan; external: haricî insan/onaydan; informational: sonuç doğurmayan bilgiden kontrol edilir.",
+    },
     scoreGroupName: { type: ["string", "null"], description: "Belgede yazan üst puan grubu adı; puan grubuna ait değilse null." },
   },
   required: [
     "name", "type", "maxScore", "weight", "required", "violationOutcome",
     "evaluationMethod", "sourcePage", "sourceText", "aiInterpretation", "confidence",
-    "effect", "scope", "scoreGroupName",
+    "effect", "scope", "applicability", "scoreGroupName",
   ],
 } as const;
 
@@ -125,6 +137,18 @@ const OVERVIEW_SCHEMA = {
   type: "object",
   properties: {
     documentProfile: DOCUMENT_PROFILE_SCHEMA,
+    templateProfile: {
+      type: "object",
+      description: "Ayrı rapor şablonu verildiyse yalnızca o dosyanın yapısı; verilmediyse boş profil.",
+      properties: {
+        provided: { type: "boolean" },
+        name: { type: "string" },
+        pages: { type: "integer" },
+        requiredHeadings: { type: "array", items: { type: "string" } },
+        notes: { type: "array", items: { type: "string" } },
+      },
+      required: ["provided", "name", "pages", "requiredHeadings", "notes"],
+    },
     documentMap: {
       type: "array",
       description: "Belgenin anlamlı bölüm haritası. Ardışık sayfalar aynı başlıkta birleştirilir.",
@@ -152,7 +176,7 @@ const OVERVIEW_SCHEMA = {
       description: "Kriter sanılabilecek ancak yalnızca amaç, beklenti veya bilgi olduğu için kriter yapılmayan önemli cümleler.",
     },
   },
-  required: ["documentProfile", "documentMap", "scorePlan", "skippedChecks", "informationalNotes"],
+  required: ["documentProfile", "templateProfile", "documentMap", "scorePlan", "skippedChecks", "informationalNotes"],
 } as const;
 
 const SHORT_DOCUMENT_SCHEMA = {
@@ -234,10 +258,13 @@ EVRENSEL İLKELER:
 15. Belge puan ilan etmiyorsa puan uydurma. İlan edilen toplam ile birbirini örtmeyen üst grupların toplamını ayrı ayrı koru.
 16. Katılımcı teslim kuralını yüklenen kaynak PDF'nin dosya özelliğiyle karıştırma.
 17. aiInterpretation Türkçe ve tek anlamlı olsun: koşul, neyin ölçüleceği ve sonucu açıkça ayırsın.
+18. applicability alanını kanıtın nerede aranacağına göre seç. Canlı araç performansı, saha görevi veya fiziksel ölçüm physical; rapor başlığı/açıklaması report; dosya tipi/boyutu upload; kurul onayı external; sonuç doğurmayan bilgi informational olur.
+19. Aynı maddede fiziksel başarı ve raporda açıklama şartı birlikteyse iki ayrı kriter çıkar. Fizsel puanı rapor puanı gibi etkinleştirme.
 `;
 
 const OVERVIEW_SYSTEM_INSTRUCTION = `${SHARED_SYSTEM_INSTRUCTION}
 Görevin belgenin bütünsel haritasını, profilini ve resmî puan planını çıkarmaktır. Tek tek kriterleri bu turda çıkarma.
+İkinci PDF "RAPOR ŞABLONU" olarak verilirse onu şartnameyle karıştırma; yalnızca zorunlu ana bölüm başlıklarını ve kısa biçim notlarını templateProfile alanına çıkar. Şablon yoksa provided=false ve listeler boş olsun.
 İçindekiler, bölüm başlıkları, tablolar, dipnotlar ve ekleri tarayarak ruleDensity alanıyla kural yoğunluğunu göster.
 documentMap sayfa aralıkları boşluk bırakmadan tüm belgeyi temsil etsin; aynı işlevli ardışık sayfaları birleştir.
 scorePlan yalnızca birbirini örtmeyen üst düzey puan gruplarını içersin. Alt kalemleri breakdown içine yaz.
@@ -246,6 +273,7 @@ informationalNotes ve skippedChecks alanlarını kısa tut ve yalnızca karar ka
 
 const SHORT_DOCUMENT_SYSTEM_INSTRUCTION = `${SHARED_SYSTEM_INSTRUCTION}
 Bu kısa belgede önce bölüm haritasını kur, ardından bütün sayfalardaki uygulanabilir kuralları çıkar ve resmî puan planını hiyerarşik olarak çöz.
+İkinci PDF "RAPOR ŞABLONU" olarak verilirse yalnızca şablon yapısını templateProfile alanına çıkar; ondan yeni yarışma kuralı veya puan üretme. Şablon yoksa provided=false döndür.
 documentMap sayfa aralıkları boşluk bırakmadan tüm belgeyi temsil etsin.
 Her kriter sourcePage ve sourceText ile kanıtlansın; kanıt yoksa kriter döndürme. scoreGroupName belgedeki üst puan grubu adıdır, bağlantı yoksa null olur.
 İçindekiler, tablo başlıkları, birleşik hücreler, dipnotlar, istisnalar, ekler ve çapraz referansları yanıt öncesi sessizce kontrol et.
@@ -285,6 +313,7 @@ type RawCriterion = {
   confidence?: unknown;
   effect?: unknown;
   scope?: unknown;
+  applicability?: unknown;
   scoreGroupIndex?: unknown;
   scoreGroupName?: unknown;
   verificationStatus?: "verified" | "partial" | "not_found" | "contradicted" | "not_run";
@@ -318,6 +347,14 @@ type RawDocumentProfile = {
   defaultViolationAction?: unknown;
 };
 
+type RawTemplateProfile = {
+  provided?: unknown;
+  name?: unknown;
+  pages?: unknown;
+  requiredHeadings?: unknown;
+  notes?: unknown;
+};
+
 type RawDocumentSection = {
   title?: unknown;
   startPage?: unknown;
@@ -328,6 +365,7 @@ type RawDocumentSection = {
 
 type RawOverview = {
   documentProfile?: RawDocumentProfile;
+  templateProfile?: RawTemplateProfile;
   documentMap?: RawDocumentSection[];
   criteria?: RawCriterion[];
   skippedChecks?: unknown[];
@@ -392,9 +430,18 @@ function normalizeDocumentSetup(item: RawDocumentProfile | undefined): SetupData
   };
 }
 
-function looksLikePdf(bytes: ArrayBuffer) {
-  if (bytes.byteLength < 5) return false;
-  return Buffer.from(bytes, 0, Math.min(bytes.byteLength, 1024)).includes(Buffer.from("%PDF-"));
+function normalizeTemplateProfile(item: RawTemplateProfile | undefined): TemplateProfile {
+  const stringList = (value: unknown, limit: number) => Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.trim()).filter(Boolean).slice(0, limit)
+    : [];
+  return {
+    provided: item?.provided === true,
+    name: text(item?.name, "").slice(0, 240),
+    pages: Math.max(0, Math.min(500, Math.round(Number(item?.pages) || 0))),
+    requiredHeadings: stringList(item?.requiredHeadings, 80),
+    notes: stringList(item?.notes, 20),
+  };
 }
 
 function normalizedLabel(value: unknown) {
@@ -446,6 +493,8 @@ function normalizeCriterion(raw: RawCriterion, index: number, pageCount: number,
   const proposedMethod = safeEnum(raw.evaluationMethod, METHODS, "hybrid");
   const criterionType = safeEnum(raw.type, CRITERION_TYPES, "qualitative_score");
   const effect = safeEnum(raw.effect, EFFECTS, maxScore === null ? "advisory" : "score");
+  const applicability = safeEnum(raw.applicability, APPLICABILITIES,
+    criterionType === "technical_upload" || criterionType === "format_rule" ? "upload" : "report");
   const reportedEvidenceStatus = raw.verificationStatus ?? "not_run";
   const evidenceStatus = validPage || reportedEvidenceStatus !== "verified" ? reportedEvidenceStatus : "partial";
   const evidenceReason = !validPage
@@ -469,8 +518,10 @@ function normalizeCriterion(raw: RawCriterion, index: number, pageCount: number,
     confidence: evidenceStatus === "verified" ? safeEnum(raw.confidence, CONFIDENCES, "medium") : "low",
     effect,
     scope: text(raw.scope, "Genel"),
+    applicability,
     groupId,
-    active: !["partial", "not_found", "contradicted"].includes(evidenceStatus),
+    active: ["report", "upload"].includes(applicability)
+      && !["partial", "not_found", "contradicted", "not_run"].includes(evidenceStatus),
     origin: "document",
     reviewStatus: needsReview ? "needs_review" : "ready",
     evidence: { status: evidenceStatus, reason: evidenceReason },
@@ -673,6 +724,7 @@ async function uploadPdfOnce(
  */
 type CachedExtraction = {
   rawDocumentProfile?: RawDocumentProfile;
+  rawTemplateProfile?: RawTemplateProfile;
   rawDocumentMap?: RawDocumentSection[];
   rawCriteria: RawCriterion[];
   rawScorePlan?: RawScorePlan;
@@ -793,6 +845,7 @@ function buildResult(extraction: CachedExtraction, diagnostics: AnalysisDiagnost
   ];
   return {
     setup: normalizeDocumentSetup(extraction.rawDocumentProfile),
+    templateProfile: normalizeTemplateProfile(extraction.rawTemplateProfile),
     criteria,
     scorePlan,
     scoreAudit,
@@ -846,21 +899,36 @@ export async function POST(request: Request) {
     if (file.size > MAX_PDF_BYTES) {
       return Response.json({ error: "Bu sürümde doğrudan analiz sınırı 18 MB. Daha büyük kaynak belgeler için dosya akışı desteği etkinleştirilmelidir." }, { status: 413 });
     }
+    const templateEntry = formData.get("templateFile");
+    const templateFile = templateEntry instanceof File && templateEntry.size > 0 ? templateEntry : null;
+    if (templateFile && templateFile.type !== "application/pdf" && !templateFile.name.toLocaleLowerCase("tr-TR").endsWith(".pdf")) {
+      return Response.json({ error: "Rapor şablonu yalnızca PDF olabilir." }, { status: 415 });
+    }
+    if (templateFile && templateFile.size > MAX_TEMPLATE_BYTES) {
+      return Response.json({ error: "Rapor şablonu en fazla 10 MB olabilir." }, { status: 413 });
+    }
 
     const rawPageCount = Number(formData.get("pageCount"));
     const pageCount = Number.isFinite(rawPageCount)
       ? Math.min(1_000, Math.max(1, Math.round(rawPageCount)))
       : 1;
     const pdfBytes = await file.arrayBuffer();
-    if (!looksLikePdf(pdfBytes)) {
-      return Response.json({ error: "Dosyanın içeriği geçerli bir PDF imzası taşımıyor." }, { status: 415 });
-    }
+    const sourceIntegrityError = pdfIntegrityError(pdfBytes);
+    if (sourceIntegrityError) return Response.json({ error: sourceIntegrityError }, { status: 422 });
+    const templateBytes = templateFile ? await templateFile.arrayBuffer() : null;
+    const templateIntegrityError = templateBytes ? pdfIntegrityError(templateBytes) : null;
+    if (templateIntegrityError) return Response.json({ error: `Rapor şablonu okunamıyor: ${templateIntegrityError}` }, { status: 422 });
+    const rawTemplatePageCount = Number(formData.get("templatePageCount"));
+    const templatePageCount = templateFile && Number.isFinite(rawTemplatePageCount)
+      ? Math.min(500, Math.max(1, Math.round(rawTemplatePageCount)))
+      : templateFile ? 1 : 0;
 
     const pageWindows = makePageWindows(pageCount);
     // Aynı belge ve aynı analiz stratejisi daha önce işlendiğinde modeli çağırma.
     const cacheContext = JSON.stringify({
       promptVersion: PROMPT_VERSION,
       document: await documentHash(pdfBytes),
+      template: templateBytes ? await documentHash(templateBytes) : null,
       models: [PRIMARY_MODEL, FALLBACK_MODEL],
       pageWindows,
       evidenceVerification: EVIDENCE_VERIFICATION_ENABLED,
@@ -892,12 +960,16 @@ export async function POST(request: Request) {
     uploadedGeminiFileName = uploadedFile?.name ?? "";
     const uploadMs = Date.now() - uploadStartedAt;
     const pdfData = fileUri ? "" : Buffer.from(pdfBytes).toString("base64");
+    const templateData = templateBytes ? Buffer.from(templateBytes).toString("base64") : "";
     /** Bütün geçişler aynı belge referansını kullanır. */
     const documentPart = (level: "MEDIA_RESOLUTION_MEDIUM" | "MEDIA_RESOLUTION_LOW") => (
       fileUri
         ? { fileData: { mimeType: "application/pdf", fileUri }, mediaResolution: { level } }
         : { inlineData: { mimeType: "application/pdf", data: pdfData }, mediaResolution: { level } }
     );
+    const templatePart = templateData
+      ? { inlineData: { mimeType: "application/pdf", data: templateData }, mediaResolution: { level: "MEDIA_RESOLUTION_MEDIUM" } }
+      : null;
     const shortDocument = pageWindows.length === 1;
     const overviewBody = JSON.stringify({
       systemInstruction: { parts: [{ text: shortDocument ? SHORT_DOCUMENT_SYSTEM_INSTRUCTION : OVERVIEW_SYSTEM_INSTRUCTION }] },
@@ -905,6 +977,10 @@ export async function POST(request: Request) {
         role: "user",
         parts: [
           documentPart(shortDocument ? "MEDIA_RESOLUTION_MEDIUM" : "MEDIA_RESOLUTION_LOW"),
+          ...(templatePart ? [
+            { text: `Aşağıdaki ikinci PDF ayrı RAPOR ŞABLONUDUR: ${templateFile?.name || "rapor-sablonu.pdf"} (${templatePageCount} sayfa). Bu dosyadan yarışma kriteri veya puan üretme.` },
+            templatePart,
+          ] : [{ text: "Ayrı rapor şablonu verilmedi. templateProfile.provided=false döndür." }]),
           { text: shortDocument
             ? `Bu ${pageCount} sayfalık PDF'nin bölüm haritasını, profilini, bütün uygulanabilir kurallarını ve resmî puan planını çıkar. Basılı sayfa etiketleri yerine PDF sayfa sırasını kullan; belge sessizse değer uydurma.`
             : `Bu ${pageCount} sayfalık PDF'nin bütünsel bölüm haritasını, belge profilini ve resmî puan planını çıkar. Basılı sayfa etiketleri yerine PDF sayfa sırasını kullan. Belge sessizse değer uydurma.` },
@@ -990,7 +1066,19 @@ export async function POST(request: Request) {
             markModelHealthy(model);
             return { ok: true, payload, model };
           }
-          const errorPayload = await response.json().catch(() => ({})) as { error?: { message?: string } };
+          const errorPayload = await response.json().catch(() => ({})) as {
+            error?: { message?: string; status?: string; details?: unknown[] };
+          };
+          // Google ayrıntılı alan/şema hatasını `details` içinde gönderir. API
+          // anahtarı ve PDF içeriği bu kayda dahil edilmez; yalnızca servis hata
+          // tanısı geliştirme günlüğüne yazılır.
+          console.error("[gemini] generateContent reddedildi", {
+            model,
+            httpStatus: response.status,
+            status: errorPayload.error?.status,
+            message: errorPayload.error?.message,
+            details: errorPayload.error?.details,
+          });
           lastDetail = errorPayload.error?.message || `AI analiz isteği ${response.status} koduyla başarısız oldu.`;
           lastStatus = response.status === 429 ? 429 : 502;
           const retryable = [429, 500, 502, 503, 504].includes(response.status);
@@ -1081,6 +1169,7 @@ export async function POST(request: Request) {
               required: criterion.required,
               violationOutcome: criterion.violationOutcome,
               scope: criterion.scope,
+              applicability: criterion.applicability,
               sourcePage: criterion.sourcePage,
               sourceText: criterion.sourceText,
             })))}` },
@@ -1160,6 +1249,7 @@ export async function POST(request: Request) {
 
     const extraction: CachedExtraction = {
       rawDocumentProfile: overview.documentProfile,
+      rawTemplateProfile: overview.templateProfile,
       rawDocumentMap: overview.documentMap,
       rawCriteria,
       rawScorePlan: overview.scorePlan,

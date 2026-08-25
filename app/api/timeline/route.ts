@@ -11,8 +11,8 @@ import type { TimelineEntry } from "../../lib/workflow-types";
  * görevini yaptığında bir olay düşer ve sıra dayatılmaz.
  *
  * Yarışmacı bu uca erişemez; kendi başvurusunun durumunu portalda görür.
- * Erişebilen roller için de kayıt düzeyi görünürlük yeniden doğrulanır:
- * 01 yalnızca kendi yarışmasının, 03 yalnızca yürürlükteki profilin olaylarını görür.
+ * Yarışma Yöneticisi de katılımcı başvurularının iç zaman çizelgesine erişemez.
+ * Erişebilen roller için kayıt düzeyi görünürlük yeniden doğrulanır.
  */
 export async function GET(request: Request): Promise<Response> {
   const auth = await requirePermission(request, "read_timeline");
@@ -26,6 +26,9 @@ export async function GET(request: Request): Promise<Response> {
     }
 
     if (subject === "application") {
+      if (auth.account.roleCode === "01") {
+        return jsonError(403, "Yarışma Yöneticisi katılımcı başvuru zaman çizelgesini göremez.");
+      }
       // findApplication rol bazlı görünürlüğü zaten uygular.
       if (!await findApplication(id, auth.account)) return jsonError(404, "Başvuru bulunamadı.");
     } else {
@@ -46,7 +49,7 @@ export async function GET(request: Request): Promise<Response> {
       label: WORKFLOW_EVENT_LABELS[event.event] ?? event.event,
       actorName: event.actorName,
       actorRole: event.actorRole,
-      detail: event.detail,
+      detail: auth.account.roleCode === "04" ? "" : event.detail,
       createdAt: event.createdAt,
     }));
     return json({ timeline });

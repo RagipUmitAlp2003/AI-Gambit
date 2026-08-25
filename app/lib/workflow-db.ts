@@ -3,12 +3,15 @@ import { getDatabase, recordWorkflowEvent, recordWorkflowEvents } from "./admin-
 import { fold } from "./competitions";
 import type { AdminAccount, WorkflowEventInput } from "./admin-types";
 import type { AnalysisResult, JudgeReview, ProfileExport, ReportEvaluation } from "./types";
+import type { SimilarityFingerprint } from "./similarity-engine";
 import {
   APPLICATION_STATUSES,
   type ApplicationOutcome,
   type ApplicationStatus,
   type CompetitionApplication,
   type CompetitionProfile,
+  type CompetitionStatus,
+  type CompetitionWorkflow,
   type CriteriaExtractionRun,
   type OperationsSummary,
   type ProfileReviewDecision,
@@ -94,6 +97,81 @@ const WORKFLOW_SCHEMA = [
    ON criteria_extraction_runs (created_by, analyzed_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_extraction_runs_status
    ON criteria_extraction_runs (status, updated_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS competitions (
+    id TEXT PRIMARY KEY,
+    competition_key TEXT NOT NULL UNIQUE,
+    competition_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft_criteria',
+    current_profile_id TEXT,
+    decisions_locked INTEGER NOT NULL DEFAULT 0,
+    results_published_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_competitions_status ON competitions (status, updated_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS criteria (
+    id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    applicability TEXT NOT NULL,
+    effect TEXT NOT NULL,
+    max_score REAL,
+    active INTEGER NOT NULL DEFAULT 0,
+    source_page INTEGER,
+    source_text TEXT NOT NULL,
+    criterion_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(profile_id, position)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_criteria_profile ON criteria (profile_id, active, position)`,
+  `CREATE TABLE IF NOT EXISTS submission_versions (
+    id TEXT PRIMARY KEY,
+    application_id TEXT NOT NULL,
+    version_number INTEGER NOT NULL,
+    file_key TEXT NOT NULL UNIQUE,
+    file_name TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    submitted_by TEXT NOT NULL,
+    submitted_at TEXT NOT NULL,
+    UNIQUE(application_id, version_number)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_submission_versions_application ON submission_versions (application_id, version_number DESC)`,
+  `CREATE TABLE IF NOT EXISTS evaluation_results (
+    id TEXT PRIMARY KEY,
+    application_id TEXT NOT NULL,
+    submission_version_id TEXT,
+    profile_id TEXT,
+    status TEXT NOT NULL,
+    ai_raw_analysis TEXT,
+    model TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_evaluation_results_application ON evaluation_results (application_id, created_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS submission_fingerprints (
+    application_id TEXT PRIMARY KEY,
+    submission_version_id TEXT,
+    competition_key TEXT NOT NULL,
+    participant_label TEXT NOT NULL,
+    fingerprint_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_submission_fingerprints_scope ON submission_fingerprints (competition_key, updated_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS application_assignments (
+    id TEXT PRIMARY KEY,
+    application_id TEXT NOT NULL,
+    judge_id TEXT NOT NULL,
+    judge_name TEXT NOT NULL,
+    assigned_by TEXT NOT NULL,
+    assigned_by_name TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1,
+    assigned_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_assignments_application ON application_assignments (application_id, active, assigned_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_assignments_judge ON application_assignments (judge_id, active, assigned_at DESC)`,
 ];
 
 /**
@@ -110,6 +188,12 @@ const PROFILE_REVIEW_COLUMNS: Array<{ name: string; definition: string }> = [
   { name: "submitted_at", definition: "TEXT" },
 ];
 
+const APPLICATION_WORKFLOW_COLUMNS: Array<{ name: string; definition: string }> = [
+  { name: "assigned_judge_id", definition: "TEXT" },
+  { name: "assigned_judge_name", definition: "TEXT" },
+  { name: "current_version_id", definition: "TEXT" },
+];
+
 async function upgradeProfileTable(database: D1Database): Promise<void> {
   const columns = await database.prepare(`PRAGMA table_info(competition_profiles)`).all<{ name: string }>();
   const present = new Set((columns.results ?? []).map((row) => row.name));
@@ -122,13 +206,21 @@ async function upgradeProfileTable(database: D1Database): Promise<void> {
   await database.prepare(`UPDATE competition_profiles SET status = 'approved' WHERE status = 'published'`).run();
 }
 
+async function upgradeApplicationTable(database: D1Database): Promise<void> {
+  const columns = await database.prepare(`PRAGMA table_info(competition_applications)`).all<{ name: string }>();
+  const present = new Set((columns.results ?? []).map((row) => row.name));
+  for (const column of APPLICATION_WORKFLOW_COLUMNS.filter((item) => !present.has(item.name))) {
+    await database.prepare(`ALTER TABLE competition_applications ADD COLUMN ${column.name} ${column.definition}`).run();
+  }
+}
+
 let workflowSchemaPromise: Promise<void> | null = null;
 
 async function workflowDatabase(): Promise<D1Database> {
   const database = await getDatabase();
   if (!workflowSchemaPromise) {
     workflowSchemaPromise = database.batch(WORKFLOW_SCHEMA.map((sql) => database.prepare(sql)))
-      .then(() => upgradeProfileTable(database))
+      .then(async () => { await upgradeProfileTable(database); await upgradeApplicationTable(database); })
       .catch((error: unknown) => {
         workflowSchemaPromise = null;
         throw error;
@@ -150,8 +242,10 @@ export function reportBucket(): R2Bucket {
   return env.REPORTS;
 }
 
-export function competitionKey(name: string): string {
-  return fold(name).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 160);
+export function competitionKey(name: string, year = "", stage = ""): string {
+  return [name, year, stage]
+    .map((value) => fold(value).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""))
+    .filter(Boolean).join("--").slice(0, 220);
 }
 
 type ProfileRow = {
@@ -191,6 +285,10 @@ type ApplicationRow = {
   review_json: string | null;
   judge_id: string | null;
   judge_name: string | null;
+  assigned_judge_id: string | null;
+  assigned_judge_name: string | null;
+  current_version_id: string | null;
+  current_version_number: number | null;
   submitted_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -199,6 +297,7 @@ type ApplicationRow = {
   outcome: string | null;
   outcome_note: string | null;
   decided_at: string | null;
+  competition_status: string | null;
 };
 
 type TeamMemberRow = {
@@ -219,6 +318,37 @@ type ExtractionRow = {
   analyzed_at: string;
   updated_at: string;
 };
+
+type CompetitionRow = {
+  id: string;
+  competition_key: string;
+  competition_name: string;
+  status: string;
+  current_profile_id: string | null;
+  decisions_locked: number;
+  results_published_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+const COMPETITION_STATUSES: CompetitionStatus[] = [
+  "draft_criteria", "criteria_processing", "criteria_review", "open",
+  "applications_closed", "evaluating", "decisions_frozen", "results_published", "archived",
+];
+
+function toCompetition(row: CompetitionRow): CompetitionWorkflow {
+  return {
+    id: row.id,
+    competitionKey: row.competition_key,
+    competitionName: row.competition_name,
+    status: COMPETITION_STATUSES.includes(row.status as CompetitionStatus) ? row.status as CompetitionStatus : "draft_criteria",
+    currentProfileId: row.current_profile_id,
+    decisionsLocked: row.decisions_locked === 1,
+    resultsPublishedAt: row.results_published_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 
 function parseJson<T>(value: string | null): T | null {
   if (!value) return null;
@@ -268,6 +398,9 @@ function toApplication(
   view: "full" | "participant" | "operations",
 ): CompetitionApplication {
   const operations = view === "operations";
+  const participantResultHidden = view === "participant"
+    && row.outcome !== "revision_required"
+    && !["results_published", "archived"].includes(row.competition_status ?? "");
   const evaluation = parseJson<ReportEvaluation>(row.evaluation_json);
   return {
     id: row.id,
@@ -287,12 +420,16 @@ function toApplication(
       ? row.status as ApplicationStatus
       : "submitted",
     evaluation: view === "full" ? evaluation : operations ? redactEvaluation(evaluation) : null,
-    review: operations ? null : parseJson<JudgeReview>(row.review_json),
+    review: operations || participantResultHidden ? null : parseJson<JudgeReview>(row.review_json),
     judgeId: row.judge_id,
     judgeName: row.judge_name,
-    outcome: normalizeOutcome(row.outcome),
-    outcomeNote: row.outcome_note ?? "",
-    decidedAt: row.decided_at,
+    assignedJudgeId: row.assigned_judge_id,
+    assignedJudgeName: row.assigned_judge_name,
+    currentVersionId: row.current_version_id,
+    currentVersionNumber: Number(row.current_version_number) || 1,
+    outcome: participantResultHidden ? "pending" : normalizeOutcome(row.outcome),
+    outcomeNote: participantResultHidden ? "" : (row.outcome_note ?? ""),
+    decidedAt: participantResultHidden ? null : row.decided_at,
     submittedAt: row.submitted_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
@@ -315,22 +452,21 @@ function toExtractionRun(row: ExtractionRow): CriteriaExtractionRun {
 }
 
 /**
- * Yarışma yöneticisinin (Rol 01) hazırladığı profili hakem incelemesine gönderir.
- *
- * Profil bu adımda YÜRÜRLÜĞE GİRMEZ. `judge_review_pending` durumunda bekler;
- * yalnızca hakem onayından sonra başvuru değerlendirmesinde kullanılabilir.
- * Aynı profil düzeltilip yeniden gönderilirse hakem notu temizlenir.
+ * Yarışma yöneticisinin hazırladığı kriter profilini doğrudan yayımlar.
+ * Hakem kriter oluşturma ya da profil onaylama akışına katılmaz; yayımlanmış
+ * profil katılımcı raporunda kullanılabilecek tek kaynaktır.
  */
 export async function submitProfileForReview(profile: ProfileExport, actor: AdminAccount): Promise<CompetitionProfile> {
   const database = await workflowDatabase();
   const id = profile.profileId ?? crypto.randomUUID();
   const timestamp = new Date().toISOString();
-  const key = competitionKey(profile.setup.competition);
+  // Aynı yarışmanın farklı yıl ve aşamalarındaki raporlar birbirine karışmaz.
+  const key = competitionKey(profile.setup.competition, profile.setup.year, profile.setup.stage);
   await database.prepare(
     `INSERT INTO competition_profiles
       (id, competition_key, competition_name, category, stage, report_type, source_document_name,
        profile_json, status, created_by, created_by_name, review_note, submitted_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'judge_review_pending', ?, ?, '', ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, '', ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        competition_key = excluded.competition_key,
        competition_name = excluded.competition_name,
@@ -339,7 +475,7 @@ export async function submitProfileForReview(profile: ProfileExport, actor: Admi
        report_type = excluded.report_type,
        source_document_name = excluded.source_document_name,
        profile_json = excluded.profile_json,
-       status = 'judge_review_pending',
+       status = 'approved',
        review_note = '',
        reviewed_by = NULL,
        reviewed_by_name = NULL,
@@ -362,6 +498,42 @@ export async function submitProfileForReview(profile: ProfileExport, actor: Admi
     timestamp,
   ).run();
   await database.prepare(
+    `INSERT INTO competitions
+      (id, competition_key, competition_name, status, current_profile_id, decisions_locked,
+       results_published_at, created_at, updated_at)
+     VALUES (?, ?, ?, 'open', ?, 0, NULL, ?, ?)
+     ON CONFLICT(competition_key) DO UPDATE SET
+       competition_name = excluded.competition_name,
+       status = CASE
+         WHEN competitions.status IN ('draft_criteria', 'criteria_processing', 'criteria_review') THEN 'open'
+         ELSE competitions.status
+       END,
+       current_profile_id = excluded.current_profile_id,
+       updated_at = excluded.updated_at`,
+  ).bind(crypto.randomUUID(), key, profile.setup.competition, id, timestamp, timestamp).run();
+  await database.prepare(`DELETE FROM criteria WHERE profile_id = ?`).bind(id).run();
+  if (profile.criteria.length) {
+    await database.batch(profile.criteria.map((criterion, position) => database.prepare(
+      `INSERT INTO criteria
+        (id, profile_id, position, name, applicability, effect, max_score, active,
+         source_page, source_text, criterion_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      criterion.id || crypto.randomUUID(),
+      id,
+      position,
+      criterion.name,
+      criterion.applicability ?? "report",
+      criterion.effect ?? (criterion.maxScore === null ? "advisory" : "score"),
+      criterion.maxScore,
+      criterion.active ? 1 : 0,
+      criterion.sourcePage,
+      criterion.sourceText,
+      JSON.stringify(criterion),
+      timestamp,
+    )));
+  }
+  await database.prepare(
     `UPDATE criteria_extraction_runs
      SET profile_id = ?, updated_at = ?
      WHERE id = (
@@ -370,12 +542,15 @@ export async function submitProfileForReview(profile: ProfileExport, actor: Admi
        ORDER BY analyzed_at DESC LIMIT 1
      )`,
   ).bind(id, timestamp, actor.id, profile.sourceDocument.name).run();
+  await database.prepare(
+    `UPDATE criteria_extraction_runs SET status = 'approved', updated_at = ? WHERE profile_id = ?`,
+  ).bind(timestamp, id).run();
   const saved = await findProfile(id);
   if (!saved) throw new Error("Profil kaydedildi ancak geri okunamadı.");
   await recordWorkflowEvent({
     subjectType: "profile",
     subjectId: id,
-    event: "profile_submitted_for_review",
+    event: "profile_approved",
     actor,
     detail: `${saved.competitionName} · ${profile.criteria.length} kriter · kaynak: ${profile.sourceDocument.name}`,
   });
@@ -383,7 +558,7 @@ export async function submitProfileForReview(profile: ProfileExport, actor: Admi
 }
 
 /**
- * Hakemin (Rol 02) ikinci aşama doğrulaması.
+ * Eski kayıtlarla geriye uyumluluk için bırakılan profil inceleme yordamı.
  * `approve` profili yürürlüğe alır; `request_changes` yarışma yöneticisine geri gönderir.
  * Hakem kriterleri düzenlemişse düzeltilmiş profil `criteria` ile birlikte gelir.
  */
@@ -453,7 +628,7 @@ export async function reviewProfile(
   return saved ?? "not_found";
 }
 
-/** Herhangi bir durumdaki profili okur (hakem inceleme ekranı bunu kullanır). */
+/** Herhangi bir durumdaki profili okur. */
 export async function findProfile(id: string): Promise<CompetitionProfile | null> {
   const database = await workflowDatabase();
   const row = await database.prepare(
@@ -462,7 +637,7 @@ export async function findProfile(id: string): Promise<CompetitionProfile | null
   return row ? toProfile(row) : null;
 }
 
-/** Yalnızca hakem onaylı profil. Değerlendirme akışı yalnız bunu kullanır. */
+/** Yalnızca Yarışma Yöneticisi tarafından yayımlanmış profil. */
 export async function findApprovedProfile(id: string): Promise<CompetitionProfile | null> {
   const profile = await findProfile(id);
   return profile?.status === "approved" ? profile : null;
@@ -472,17 +647,90 @@ export async function findLatestProfileForCompetition(name: string): Promise<Com
   const database = await workflowDatabase();
   const row = await database.prepare(
     `SELECT * FROM competition_profiles
-     WHERE competition_key = ? AND status = 'approved'
+     WHERE competition_name = ? AND status = 'approved'
      ORDER BY updated_at DESC LIMIT 1`,
-  ).bind(competitionKey(name)).first<ProfileRow>();
+  ).bind(name).first<ProfileRow>();
   return row ? toProfile(row) : null;
+}
+
+export async function findCompetitionWorkflow(name: string): Promise<CompetitionWorkflow | null> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(`SELECT * FROM competitions WHERE competition_name = ? ORDER BY updated_at DESC LIMIT 1`)
+    .bind(name).first<CompetitionRow>();
+  return row ? toCompetition(row) : null;
+}
+
+export async function listCompetitionWorkflows(): Promise<CompetitionWorkflow[]> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(`SELECT * FROM competitions ORDER BY updated_at DESC`).all<CompetitionRow>();
+  return (result.results ?? []).map(toCompetition);
+}
+
+export async function competitionAcceptsApplications(name: string): Promise<boolean> {
+  const competition = await findCompetitionWorkflow(name);
+  return competition?.status === "open" && Boolean(competition.currentProfileId);
+}
+
+export type CompetitionStageResult = CompetitionWorkflow | "not_found" | "invalid_transition" | "unresolved";
+
+const COMPETITION_TRANSITIONS: Record<CompetitionStatus, CompetitionStatus[]> = {
+  draft_criteria: ["criteria_processing"],
+  criteria_processing: ["criteria_review"],
+  criteria_review: ["open"],
+  open: ["applications_closed"],
+  applications_closed: ["evaluating"],
+  evaluating: ["decisions_frozen"],
+  decisions_frozen: ["results_published", "evaluating"],
+  results_published: ["archived"],
+  archived: [],
+};
+
+export async function changeCompetitionStage(
+  competitionId: string,
+  nextStatus: CompetitionStatus,
+  actor: AdminAccount,
+  reason: string,
+  force = false,
+): Promise<CompetitionStageResult> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(`SELECT * FROM competitions WHERE id = ?`).bind(competitionId).first<CompetitionRow>();
+  if (!row) return "not_found";
+  const current = toCompetition(row);
+  // `force` istemciden gelen bir bayraktır; yalnızca Admin için yetkiye dönüşür.
+  // Böylece Rol 04 geçerli bir aşama geçişinde dahi çözülmemiş dosya barajını
+  // request gövdesine `force: true` yazarak atlayamaz.
+  const adminForce = force && actor.roleCode === "00";
+  if (!COMPETITION_TRANSITIONS[current.status].includes(nextStatus) && !adminForce) return "invalid_transition";
+  if (nextStatus === "decisions_frozen" && !adminForce) {
+    const unresolved = await database.prepare(
+      `SELECT COUNT(*) AS total FROM competition_applications
+       WHERE competition_key = ? AND status <> 'completed'`,
+    ).bind(current.competitionKey).first<{ total: number }>();
+    if ((unresolved?.total ?? 0) > 0) return "unresolved";
+  }
+  const timestamp = new Date().toISOString();
+  await database.prepare(
+    `UPDATE competitions SET status = ?, decisions_locked = ?, results_published_at = ?, updated_at = ? WHERE id = ?`,
+  ).bind(
+    nextStatus,
+    nextStatus === "decisions_frozen" || nextStatus === "results_published" || nextStatus === "archived" ? 1 : 0,
+    nextStatus === "results_published" ? timestamp : current.resultsPublishedAt,
+    timestamp,
+    competitionId,
+  ).run();
+  await recordWorkflowEvent({
+    subjectType: "competition", subjectId: competitionId, event: "competition_stage_changed", actor,
+    detail: `${current.status} → ${nextStatus}${reason.trim() ? ` · ${reason.trim().slice(0, 400)}` : ""}`,
+  });
+  const saved = await database.prepare(`SELECT * FROM competitions WHERE id = ?`).bind(competitionId).first<CompetitionRow>();
+  return saved ? toCompetition(saved) : "not_found";
 }
 
 /**
  * Rol bazlı profil listesi.
  *   01 yalnızca kendi hazırladığı profilleri görür (kendi yarışması).
- *   02 hakem onayı bekleyen ve onayladığı profillerin tamamını görür.
- *   03 yalnızca yürürlükteki profilleri salt okunur görür.
+ *   02 yayımlanmış profilleri değerlendirme amacıyla görür.
+ *   04 yürürlükteki profilleri operasyon amacıyla salt okunur görür.
  *   00 tümünü görür.
  */
 export async function listProfiles(account?: AdminAccount): Promise<CompetitionProfile[]> {
@@ -490,7 +738,7 @@ export async function listProfiles(account?: AdminAccount): Promise<CompetitionP
   const predicates: string[] = [];
   const binds: unknown[] = [];
   if (account?.roleCode === "01") { predicates.push("created_by = ?"); binds.push(account.id); }
-  if (account?.roleCode === "03") predicates.push("status = 'approved'");
+  if (account?.roleCode === "04" || account?.roleCode === "02") predicates.push("status = 'approved'");
   const where = predicates.length ? `WHERE ${predicates.join(" AND ")}` : "";
   const result = await database.prepare(
     `SELECT * FROM competition_profiles ${where} ORDER BY updated_at DESC`,
@@ -509,6 +757,7 @@ export async function createApplication(input: {
   teamName: string;
   teamMembers: string[];
   competitionName: string;
+  competitionKey: string;
   profileId: string | null;
   fileKey: string;
   fileName: string;
@@ -517,31 +766,38 @@ export async function createApplication(input: {
 }): Promise<CompetitionApplication> {
   const database = await workflowDatabase();
   const id = crypto.randomUUID();
+  const versionId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
   const statements = [database.prepare(
     `INSERT INTO competition_applications
       (id, participant_id, participant_name, participant_email, competition_key, competition_name,
-       profile_id, file_key, file_name, mime_type, size_bytes, status, submitted_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)`,
+       profile_id, file_key, file_name, mime_type, size_bytes, status, current_version_id,
+       submitted_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?)`,
   ).bind(
     id,
     input.participant.id,
     input.participant.fullName,
     input.participant.email,
-    competitionKey(input.competitionName),
+    input.competitionKey,
     input.competitionName,
     input.profileId,
     input.fileKey,
     input.fileName,
     input.mimeType,
     input.sizeBytes,
+    versionId,
     timestamp,
     timestamp,
   ), database.prepare(
     `INSERT INTO application_submission_details
       (application_id, applicant_full_name, team_name, outcome, outcome_note)
      VALUES (?, ?, ?, 'pending', '')`,
-  ).bind(id, input.applicantFullName, input.teamName),
+  ).bind(id, input.applicantFullName, input.teamName), database.prepare(
+    `INSERT INTO submission_versions
+      (id, application_id, version_number, file_key, file_name, mime_type, size_bytes, submitted_by, submitted_at)
+     VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)`,
+  ).bind(versionId, id, input.fileKey, input.fileName, input.mimeType, input.sizeBytes, input.participant.id, timestamp),
   ...input.teamMembers.map((fullName, index) => database.prepare(
     `INSERT INTO application_team_members (id, application_id, member_order, full_name)
      VALUES (?, ?, ?, ?)`,
@@ -561,12 +817,13 @@ export async function createApplication(input: {
 
 /**
  * Satır düzeyinde görünürlük.
- *   04 yalnızca kendi başvurusunu görür (backend'de zorunlu, buton gizlemek yetmez).
+ *   03 yalnızca kendi başvurusunu görür (backend'de zorunlu, buton gizlemek yetmez).
  *   01 yalnızca kendi hazırladığı profillerin yarışmalarını görür.
- *   00, 02 ve 03 tüm başvuruları görür; alan daraltması `applicationView` ile yapılır.
+ *   00 ve 02 yetkileri kapsamındaki başvuruları tam görür; 04 yalnızca operasyon görünümünü alır.
  */
 function applicationVisibility(account: AdminAccount, alias = "a"): { sql: string; binds: unknown[] } {
-  if (account.roleCode === "04") return { sql: `WHERE ${alias}.participant_id = ?`, binds: [account.id] };
+  if (account.roleCode === "03") return { sql: `WHERE ${alias}.participant_id = ?`, binds: [account.id] };
+  if (account.roleCode === "02") return { sql: `WHERE ${alias}.assigned_judge_id = ?`, binds: [account.id] };
   if (account.roleCode === "01") {
     return {
       sql: `WHERE ${alias}.competition_key IN (SELECT competition_key FROM competition_profiles WHERE created_by = ?)`,
@@ -579,14 +836,14 @@ function applicationVisibility(account: AdminAccount, alias = "a"): { sql: strin
 /**
  * Alan düzeyinde görünürlük.
  *   full        00 ve 02: kanıt metinleri dahil her şey.
- *   participant 04: kendi başvurusu; hakem onaylı geri bildirim.
- *   operations  01 ve 03: sayaç ve durum takibi. Yarışmacı PDF'i, ekip üyeleri ve
+ *   participant 03: kendi başvurusu; hakem onaylı geri bildirim.
+ *   operations  01 ve 04: sayaç ve durum takibi. Yarışmacı PDF'i, ekip üyeleri ve
  *               kanıt metinleri kapalıdır; AI ön değerlendirmesi yalnızca özet
  *               (puan ve kriter durumu) olarak görünür.
  */
 function applicationView(account: AdminAccount): "full" | "participant" | "operations" {
-  if (account.roleCode === "04") return "participant";
-  if (account.roleCode === "01" || account.roleCode === "03") return "operations";
+  if (account.roleCode === "03") return "participant";
+  if (account.roleCode === "01" || account.roleCode === "04") return "operations";
   return "full";
 }
 
@@ -607,9 +864,12 @@ function redactEvaluation(evaluation: ReportEvaluation | null): ReportEvaluation
 }
 
 const APPLICATION_SELECT = `SELECT a.*, d.applicant_full_name, d.team_name,
-  d.outcome, d.outcome_note, d.decided_at
+  d.outcome, d.outcome_note, d.decided_at,
+  c.status AS competition_status,
+  (SELECT MAX(v.version_number) FROM submission_versions v WHERE v.application_id = a.id) AS current_version_number
   FROM competition_applications a
-  LEFT JOIN application_submission_details d ON d.application_id = a.id`;
+  LEFT JOIN application_submission_details d ON d.application_id = a.id
+  LEFT JOIN competitions c ON c.competition_key = a.competition_key`;
 
 async function listTeamMembers(database: D1Database, account: AdminAccount, applicationId = ""): Promise<TeamMemberRow[]> {
   const visibility = applicationVisibility(account, "a");
@@ -659,9 +919,197 @@ export async function applicationFileKey(id: string, account: AdminAccount): Pro
   const visibility = applicationVisibility(account);
   const conjunction = visibility.sql ? `${visibility.sql} AND a.id = ?` : "WHERE a.id = ?";
   const binds = visibility.sql ? [...visibility.binds, id] : [id];
-  const row = await database.prepare(`SELECT a.file_key FROM competition_applications a ${conjunction}`)
-    .bind(...binds).first<{ file_key: string }>();
+  const row = await database.prepare(
+    `SELECT COALESCE(v.file_key, a.file_key) AS file_key
+     FROM competition_applications a
+     LEFT JOIN submission_versions v ON v.id = a.current_version_id
+     ${conjunction}`,
+  ).bind(...binds).first<{ file_key: string }>();
   return row?.file_key ?? null;
+}
+
+export type AssignmentResult = CompetitionApplication | "not_found" | "already_assigned" | "initial_requires_admin" | "completed";
+
+export async function assignApplication(
+  id: string,
+  judge: AdminAccount,
+  actor: AdminAccount,
+  reason: string,
+): Promise<AssignmentResult> {
+  const database = await workflowDatabase();
+  const current = await database.prepare(
+    `SELECT assigned_judge_id, status FROM competition_applications WHERE id = ?`,
+  ).bind(id).first<{ assigned_judge_id: string | null; status: string }>();
+  if (!current) return "not_found";
+  if (current.status === "completed") return "completed";
+  const reassigning = Boolean(current.assigned_judge_id);
+  if (!reassigning && actor.roleCode !== "00") return "initial_requires_admin";
+  if (current.assigned_judge_id === judge.id) return "already_assigned";
+  const timestamp = new Date().toISOString();
+  const nextStatus = ["submitted", "resubmitted", "analysis_failed", "document_reupload_requested"].includes(current.status)
+    ? "assigned"
+    : current.status;
+  await database.batch([
+    database.prepare(`UPDATE application_assignments SET active = 0 WHERE application_id = ? AND active = 1`).bind(id),
+    database.prepare(
+      `INSERT INTO application_assignments
+        (id, application_id, judge_id, judge_name, assigned_by, assigned_by_name, reason, active, assigned_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+    ).bind(crypto.randomUUID(), id, judge.id, judge.fullName, actor.id, actor.fullName, reason.trim().slice(0, 500), timestamp),
+    database.prepare(
+      `UPDATE competition_applications
+       SET assigned_judge_id = ?, assigned_judge_name = ?, status = ?, updated_at = ? WHERE id = ?`,
+    ).bind(judge.id, judge.fullName, nextStatus, timestamp, id),
+  ]);
+  await recordWorkflowEvent({
+    subjectType: "application", subjectId: id,
+    event: reassigning ? "application_reassigned" : "application_assigned", actor,
+    detail: `${judge.fullName}${reason.trim() ? ` · ${reason.trim().slice(0, 400)}` : ""}`,
+  });
+  return await findApplication(id, actor) ?? "not_found";
+}
+
+export type CoordinationAction = "remind_judge" | "requeue_analysis" | "request_document";
+
+export async function coordinateApplication(
+  id: string,
+  action: CoordinationAction,
+  actor: AdminAccount,
+  note: string,
+): Promise<CompetitionApplication | "not_found" | "invalid_state"> {
+  const database = await workflowDatabase();
+  const current = await database.prepare(
+    `SELECT status, assigned_judge_id, assigned_judge_name FROM competition_applications WHERE id = ?`,
+  ).bind(id).first<{ status: string; assigned_judge_id: string | null; assigned_judge_name: string | null }>();
+  if (!current) return "not_found";
+  const detail = note.trim().slice(0, 500);
+  if (action === "remind_judge") {
+    if (!current.assigned_judge_id) return "invalid_state";
+    await recordWorkflowEvent({
+      subjectType: "application", subjectId: id, event: "judge_reminder_sent", actor,
+      detail: `${current.assigned_judge_name ?? "Atanmış hakem"}${detail ? ` · ${detail}` : ""}`,
+    });
+  } else if (action === "requeue_analysis") {
+    if (current.status !== "analysis_failed") return "invalid_state";
+    await database.prepare(
+      `UPDATE competition_applications
+       SET status = ?, evaluation_json = NULL, review_json = NULL, updated_at = ? WHERE id = ?`,
+    ).bind(current.assigned_judge_id ? "assigned" : "submitted", new Date().toISOString(), id).run();
+    await recordWorkflowEvent({ subjectType: "application", subjectId: id, event: "analysis_requeued", actor, detail });
+  } else {
+    if (current.status === "completed") return "invalid_state";
+    await database.prepare(
+      `UPDATE competition_applications
+       SET status = 'document_reupload_requested', evaluation_json = NULL, review_json = NULL, updated_at = ? WHERE id = ?`,
+    ).bind(new Date().toISOString(), id).run();
+    await recordWorkflowEvent({ subjectType: "application", subjectId: id, event: "document_reupload_requested", actor, detail });
+  }
+  return await findApplication(id, actor) ?? "not_found";
+}
+
+export async function addSubmissionVersion(input: {
+  applicationId: string;
+  participant: AdminAccount;
+  fileKey: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+}): Promise<CompetitionApplication | "not_found" | "not_allowed"> {
+  const database = await workflowDatabase();
+  const current = await database.prepare(
+    `SELECT participant_id, status, assigned_judge_id FROM competition_applications WHERE id = ?`,
+  ).bind(input.applicationId).first<{ participant_id: string; status: string; assigned_judge_id: string | null }>();
+  if (!current || current.participant_id !== input.participant.id) return "not_found";
+  const details = await database.prepare(`SELECT outcome FROM application_submission_details WHERE application_id = ?`)
+    .bind(input.applicationId).first<{ outcome: string }>();
+  const allowed = current.status === "document_reupload_requested"
+    || (current.status === "completed" && details?.outcome === "revision_required");
+  if (!allowed) return "not_allowed";
+  const latest = await database.prepare(`SELECT MAX(version_number) AS version_number FROM submission_versions WHERE application_id = ?`)
+    .bind(input.applicationId).first<{ version_number: number | null }>();
+  const versionNumber = (Number(latest?.version_number) || 0) + 1;
+  const versionId = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
+  await database.batch([
+    database.prepare(
+      `INSERT INTO submission_versions
+        (id, application_id, version_number, file_key, file_name, mime_type, size_bytes, submitted_by, submitted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(versionId, input.applicationId, versionNumber, input.fileKey, input.fileName, input.mimeType, input.sizeBytes, input.participant.id, timestamp),
+    database.prepare(
+      `UPDATE competition_applications
+       SET current_version_id = ?, file_key = ?, file_name = ?, mime_type = ?, size_bytes = ?,
+           status = ?, evaluation_json = NULL, review_json = NULL, judge_id = NULL, judge_name = NULL,
+           completed_at = NULL, updated_at = ? WHERE id = ?`,
+    ).bind(
+      versionId, input.fileKey, input.fileName, input.mimeType, input.sizeBytes,
+      current.assigned_judge_id ? "assigned" : "resubmitted", timestamp, input.applicationId,
+    ),
+    database.prepare(
+      `UPDATE application_submission_details SET outcome = 'pending', outcome_note = '', decided_at = NULL WHERE application_id = ?`,
+    ).bind(input.applicationId),
+  ]);
+  await recordWorkflowEvent({
+    subjectType: "application", subjectId: input.applicationId, event: "submission_version_added", actor: input.participant,
+    detail: `Sürüm ${versionNumber} · ${input.fileName}`,
+  });
+  return await findApplication(input.applicationId, input.participant) ?? "not_found";
+}
+
+export type StoredSimilarityPeer = {
+  applicationId: string;
+  participantLabel: string;
+  fingerprint: SimilarityFingerprint;
+};
+
+/**
+ * Ham rapor metnini saklamadan aynı yarışma+yıl+aşama havuzuna ait MinHash ve
+ * isteğe bağlı embedding izini kaydeder. Eski rapor sürümünün izi yeni sürümle
+ * atomik olarak değiştirilir; katılımcı metni hiçbir zaman operasyon rolüne açılmaz.
+ */
+export async function saveAndListSimilarityFingerprints(
+  applicationId: string,
+  actor: AdminAccount,
+  fingerprint: SimilarityFingerprint,
+): Promise<StoredSimilarityPeer[] | "not_found" | "forbidden"> {
+  const database = await workflowDatabase();
+  const current = await database.prepare(
+    `SELECT a.competition_key, a.participant_name, a.current_version_id, a.assigned_judge_id,
+            COALESCE(d.team_name, a.participant_name) AS participant_label
+     FROM competition_applications a
+     LEFT JOIN application_submission_details d ON d.application_id = a.id
+     WHERE a.id = ?`,
+  ).bind(applicationId).first<{
+    competition_key: string; participant_name: string; participant_label: string; current_version_id: string | null; assigned_judge_id: string | null;
+  }>();
+  if (!current) return "not_found";
+  if (actor.roleCode === "02" && current.assigned_judge_id !== actor.id) return "forbidden";
+  const timestamp = new Date().toISOString();
+  await database.prepare(
+    `INSERT INTO submission_fingerprints
+      (application_id, submission_version_id, competition_key, participant_label, fingerprint_json, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(application_id) DO UPDATE SET
+       submission_version_id = excluded.submission_version_id,
+       competition_key = excluded.competition_key,
+       participant_label = excluded.participant_label,
+       fingerprint_json = excluded.fingerprint_json,
+       updated_at = excluded.updated_at`,
+  ).bind(applicationId, current.current_version_id, current.competition_key, current.participant_label, JSON.stringify(fingerprint), timestamp).run();
+  const rows = await database.prepare(
+    `SELECT application_id, participant_label, fingerprint_json
+     FROM submission_fingerprints WHERE competition_key = ? AND application_id <> ?`,
+  ).bind(current.competition_key, applicationId).all<{
+    application_id: string; participant_label: string; fingerprint_json: string;
+  }>();
+  return (rows.results ?? []).flatMap((row) => {
+    try {
+      const parsed = JSON.parse(row.fingerprint_json) as SimilarityFingerprint;
+      return parsed?.algorithm === "minhash-v1" && Array.isArray(parsed.signature)
+        ? [{ applicationId: row.application_id, participantLabel: row.participant_label, fingerprint: parsed }]
+        : [];
+    } catch { return []; }
+  });
 }
 
 /**
@@ -671,9 +1119,10 @@ export async function applicationFileKey(id: string, account: AdminAccount): Pro
 export async function markApplicationAnalyzing(id: string, judge: AdminAccount): Promise<"started" | "profile_missing" | "conflict"> {
   const database = await workflowDatabase();
   const current = await database.prepare(
-    `SELECT competition_name, profile_id, status FROM competition_applications WHERE id = ?`,
-  ).bind(id).first<{ competition_name: string; profile_id: string | null; status: string }>();
-  if (!current || !["submitted", "analysis_failed"].includes(current.status)) return "conflict";
+    `SELECT competition_name, profile_id, status, assigned_judge_id FROM competition_applications WHERE id = ?`,
+  ).bind(id).first<{ competition_name: string; profile_id: string | null; status: string; assigned_judge_id: string | null }>();
+  if (!current || !["assigned", "resubmitted", "analysis_failed"].includes(current.status)) return "conflict";
+  if (judge.roleCode === "02" && current.assigned_judge_id !== judge.id) return "conflict";
   // profile_id başvuru anında bağlanmış olsa bile hakem onayından geçmemiş olabilir;
   // o durumda aynı yarışmanın onaylı profiline düşülür.
   const linked = current.profile_id ? await findApprovedProfile(current.profile_id) : null;
@@ -682,7 +1131,7 @@ export async function markApplicationAnalyzing(id: string, judge: AdminAccount):
   const result = await database.prepare(
     `UPDATE competition_applications
      SET status = 'analyzing', profile_id = ?, judge_id = ?, judge_name = ?, updated_at = ?
-     WHERE id = ? AND status IN ('submitted', 'analysis_failed')`,
+     WHERE id = ? AND status IN ('assigned', 'resubmitted', 'analysis_failed')`,
   ).bind(profile.id, judge.id, judge.fullName, new Date().toISOString(), id).run();
   if (!result.meta.changes) return "conflict";
   await recordWorkflowEvent({
@@ -706,7 +1155,11 @@ export async function saveApplicationEvaluation(
   failed = false,
 ): Promise<void> {
   const database = await workflowDatabase();
-  await database.prepare(
+  const current = await database.prepare(
+    `SELECT profile_id, current_version_id FROM competition_applications WHERE id = ?`,
+  ).bind(id).first<{ profile_id: string | null; current_version_id: string | null }>();
+  const timestamp = new Date().toISOString();
+  await database.batch([database.prepare(
     `UPDATE competition_applications
      SET status = ?, evaluation_json = ?, judge_id = ?, judge_name = ?, updated_at = ?
      WHERE id = ?`,
@@ -715,9 +1168,17 @@ export async function saveApplicationEvaluation(
     evaluation ? JSON.stringify(evaluation) : null,
     judge.id,
     judge.fullName,
-    new Date().toISOString(),
+    timestamp,
     id,
-  ).run();
+  ), database.prepare(
+    `INSERT INTO evaluation_results
+      (id, application_id, submission_version_id, profile_id, status, ai_raw_analysis, model, created_at, completed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    crypto.randomUUID(), id, current?.current_version_id ?? null, current?.profile_id ?? null,
+    failed ? "failed" : "completed", evaluation ? JSON.stringify(evaluation) : null,
+    evaluation?.model ?? null, timestamp, failed ? null : timestamp,
+  )]);
   await recordWorkflowEvent({
     subjectType: "application",
     subjectId: id,
@@ -771,8 +1232,14 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
   const completed = review.status === "completed";
   const timestamp = new Date().toISOString();
   const before = await database.prepare(
-    `SELECT status, evaluation_json FROM competition_applications WHERE id = ?`,
-  ).bind(id).first<{ status: string; evaluation_json: string | null }>();
+    `SELECT a.status, a.evaluation_json, a.assigned_judge_id, c.decisions_locked
+     FROM competition_applications a
+     LEFT JOIN competitions c ON c.competition_key = a.competition_key
+     WHERE a.id = ?`,
+  ).bind(id).first<{ status: string; evaluation_json: string | null; assigned_judge_id: string | null; decisions_locked: number | null }>();
+  if (!before) throw new Error("Başvuru bulunamadı.");
+  if (judge.roleCode === "02" && before.assigned_judge_id !== judge.id) throw new Error("Bu başvuru size atanmadı.");
+  if (before.decisions_locked === 1) throw new Error("Bu yarışmanın hakem kararları donduruldu; değişiklik yapılamaz.");
   const evaluation = parseJson<ReportEvaluation>(before?.evaluation_json ?? null);
   await database.batch([database.prepare(
     `UPDATE competition_applications
@@ -845,6 +1312,17 @@ export async function saveCriteriaExtractionRun(
     result.analyzedAt || timestamp,
     timestamp,
   ).run();
+  const key = competitionKey(result.setup.competition, result.setup.year, result.setup.stage);
+  await database.prepare(
+    `INSERT INTO competitions
+      (id, competition_key, competition_name, status, current_profile_id, decisions_locked,
+       results_published_at, created_at, updated_at)
+     VALUES (?, ?, ?, 'criteria_review', NULL, 0, NULL, ?, ?)
+     ON CONFLICT(competition_key) DO UPDATE SET
+       competition_name = excluded.competition_name,
+       status = CASE WHEN competitions.status IN ('draft_criteria', 'criteria_processing', 'criteria_review') THEN 'criteria_review' ELSE competitions.status END,
+       updated_at = excluded.updated_at`,
+  ).bind(crypto.randomUUID(), key, result.setup.competition.slice(0, 240), timestamp, timestamp).run();
   const row = await database.prepare(`SELECT * FROM criteria_extraction_runs WHERE id = ?`)
     .bind(id).first<ExtractionRow>();
   if (!row) throw new Error("Analiz geçmişi kaydedildi ancak geri okunamadı.");
@@ -863,7 +1341,7 @@ export async function listCriteriaExtractionRuns(account: AdminAccount): Promise
 }
 
 /**
- * Değerlendirme Yöneticisi (Rol 03) panosunun sayaçları.
+ * Değerlendirme Yöneticisi (Rol 04) panosunun sayaçları.
  * Görünürlük kuralı listelemeyle aynıdır; 01 yalnızca kendi yarışmalarını sayar.
  */
 export async function operationsSummary(account: AdminAccount): Promise<OperationsSummary> {

@@ -20,55 +20,55 @@ export type RoleDefinition = {
  *
  * Süreçteki yerleri:
  *   00 sistemi yönetir, operasyonel akışın adımı değildir.
- *   01 değerlendirme altyapısını hazırlar → 02 ikinci aşamada doğrular.
- *   04 başvurur → AI ön değerlendirme çalışır → 02 nihai kararı verir.
- *   03 bu akışı üstten izler; içeriğe müdahale etmez.
+ *   01 değerlendirme altyapısını hazırlar ve yayımlar.
+ *   03 başvurur → AI ön değerlendirme çalışır → 02 nihai kararı verir.
+ *   04 iş yükü, hata ve yayın akışını yönetir; teknik karar vermez.
  */
 export const ROLES: RoleDefinition[] = [
   {
     code: "00",
-    title: "Moderatör / Sistem Yöneticisi",
-    shortTitle: "Moderatör",
-    summary: "Kullanıcı hesabı açar, rol atar veya kaldırır, hesapları pasife alır ve yeniden aktifleştirir.",
+    title: "Genel Yönetici / Admin",
+    shortTitle: "Admin",
+    summary: "Personel hesabı açar, rol atar, ilk hakem atamasını yapar ve gerektiğinde sistemdeki bütün iş akışlarına süper yetkiyle erişir.",
     area: "Sistem ve yetki yönetimi",
-    boundary: "Değerlendirme sürecinin operasyonel adımlarından biri değildir; hakem yerine nihai karar veremez.",
+    boundary: "Süper yetkili işlemleri denetim izine yazılır; olağan akışta uzman kararını Hakem verir.",
     assignable: true,
   },
   {
     code: "01",
     title: "Yarışma Yöneticisi",
     shortTitle: "Yarışma Yöneticisi",
-    summary: "Yarışmayı tanımlar; şartname, rapor şablonu, kategori, değerlendirme kriterleri ve puan yapısını hazırlar.",
+    summary: "Şartnameyi ve varsa rapor şablonunu yükler; AI taslağını düzeltir, kriter ve puan kapsamını yayımlar.",
     area: "Kriter Atölyesi",
-    boundary: "Hazırladığı profili kendisi onaylayamaz; ikinci doğrulama hakemdedir.",
+    boundary: "Katılımcı raporunun nihai kabul, ret veya revizyon kararını veremez.",
     assignable: true,
   },
   {
     code: "02",
     title: "Hakem",
     shortTitle: "Hakem",
-    summary: "Yarışma yöneticisinin hazırladığı profili ikinci aşamada doğrular; yarışmacı raporunda AI ön değerlendirmesini inceleyip nihai kararı verir.",
+    summary: "Yayımlanmış kriterlere göre AI ön değerlendirmesini başlatır; kanıtları inceleyip nihai kabul, ret veya revizyon kararını verir.",
     area: "Değerlendirme Atölyesi",
-    boundary: "Hesap ve rol yönetimi yapamaz. AI sonucu öneridir; nihai karar hakemindir.",
+    boundary: "Şartname yükleyemez ve kriter setini oluşturamaz. AI sonucu öneridir; nihai teknik karar Hakemindir.",
     assignable: true,
   },
   {
     code: "03",
-    title: "Değerlendirme Yöneticisi",
-    shortTitle: "Değerlendirme Yöneticisi",
-    summary: "AI analiz durumlarını, hakem kuyruğunu, tamamlanma oranını ve başarısız analizleri izler; operasyonu yönetir.",
-    area: "Operasyon görünümü",
-    boundary: "Kriter değiştiremez, puana dokunamaz, hakem yerine nihai karar veremez.",
-    assignable: true,
+    title: "Yarışmacı",
+    shortTitle: "Yarışmacı",
+    summary: "Açık yarışmayı seçer, raporunu yükler, kendi başvuru sürümlerini ve hakem onaylı sonucunu izler.",
+    area: "Başvuru ve sonuç takibi",
+    boundary: "Yönetim panellerini, başka takımların verilerini ve yayınlanmamış AI taslaklarını göremez.",
+    assignable: false,
   },
   {
     code: "04",
-    title: "Yarışmacı",
-    shortTitle: "Yarışmacı",
-    summary: "Kendisine açık yarışmayı görür, rapor/başvuru dosyasını yükler, başvurur ve kendi başvurusunun durumunu izler.",
-    area: "Başvuru ve sonuç takibi",
-    boundary: "Kriteri, şartnameyi, AI sonucunu ve hakem kararını değiştiremez; başka yarışmacının başvurusunu göremez.",
-    assignable: false,
+    title: "Değerlendirme Yöneticisi",
+    shortTitle: "Değerlendirme Yöneticisi",
+    summary: "Hakem yüklerini ve hata kuyruğunu izler; yeniden atama, hatırlatma, yeniden analiz talebi ve sonuç yayın akışını yönetir.",
+    area: "Operasyon ve süreç takibi",
+    boundary: "Katılımcı raporunu teknik olarak puanlayamaz, kriter değiştiremez ve diskalifiye ya da nihai karar veremez.",
+    assignable: true,
   },
 ];
 
@@ -78,7 +78,7 @@ export const ROLE_CODES: RoleCode[] = ROLES.map((role) => role.code);
 export const ASSIGNABLE_ROLE_CODES: RoleCode[] = ROLES.filter((role) => role.assignable).map((role) => role.code);
 
 /** Yarışmacı rolü; başvuru sahibi kimliğidir, yönetici hesabı değildir. */
-export const PARTICIPANT_ROLE: RoleCode = "04";
+export const PARTICIPANT_ROLE: RoleCode = "03";
 
 export function isRoleCode(value: unknown): value is RoleCode {
   return typeof value === "string" && (ROLE_CODES as string[]).includes(value);
@@ -97,15 +97,22 @@ export function roleLabel(code: RoleCode | null | undefined): string {
 /** Süreç olaylarının kullanıcıya gösterilen karşılıkları (olay bazlı zaman çizelgesi). */
 export const WORKFLOW_EVENT_LABELS: Record<WorkflowEventName, string> = {
   profile_drafted: "Değerlendirme profili oluşturuldu",
-  profile_submitted_for_review: "Değerlendirme profili hakem incelemesine gönderildi",
-  profile_changes_requested: "Hakem düzeltme istedi",
-  profile_criteria_edited: "Hakem kriterleri güncelledi",
-  profile_approved: "Değerlendirme profili hakem tarafından onaylandı",
+  profile_submitted_for_review: "Değerlendirme profili yayıma hazırlandı",
+  profile_changes_requested: "Kriter taslağında düzeltme istendi",
+  profile_criteria_edited: "Yarışma Yöneticisi kriterleri güncelledi",
+  profile_approved: "Değerlendirme profili yayımlandı",
   application_submitted: "Yarışmacı başvurusunu gönderdi",
+  application_assigned: "Başvuru hakeme atandı",
+  application_reassigned: "Başvuru başka hakeme aktarıldı",
+  judge_reminder_sent: "Hakeme hatırlatma gönderildi",
+  analysis_requeued: "AI analizi yeniden sıraya alındı",
+  document_reupload_requested: "Katılımcıdan yeni belge istendi",
+  submission_version_added: "Katılımcı yeni rapor sürümü yükledi",
   ai_analysis_started: "AI ön değerlendirmesi başladı",
   ai_prescreen_completed: "AI ön değerlendirmesi tamamlandı",
   ai_analysis_failed: "AI analizi başarısız oldu",
   judge_review_started: "Hakem nihai değerlendirmeye başladı",
   judge_score_adjusted: "Hakem AI puanını değiştirdi",
   judge_decision_completed: "Nihai değerlendirme tamamlandı",
+  competition_stage_changed: "Yarışma süreci güncellendi",
 };

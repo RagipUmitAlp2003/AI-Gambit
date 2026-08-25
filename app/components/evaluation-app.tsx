@@ -407,7 +407,8 @@ function PoolView({ profile, profileError, onProfileFile, records, uploadError, 
               <div className="sample-copy"><span>{APPLICATION_STATUS_LABELS[application.status]}</span><h3>{application.teamName}</h3><p>{application.applicantFullName} · {application.fileName ?? "Başvuru PDF'i"} · {formatBytes(application.sizeBytes ?? 0)}</p><small>{application.teamMembers.length ? `${application.teamMembers.length} ekip üyesi` : "Bireysel başvuru"}</small></div>
               <div className="sample-actions eval-pool-actions">
                 <a className="text-button" href={`/api/applications/${application.id}/file`} target="_blank" rel="noreferrer">PDF&apos;i aç</a>
-                {application.status === "submitted" || application.status === "analysis_failed" ? <button type="button" className="primary-button" disabled={analyzingId !== null} onClick={() => onOpenApplication(application, true)}>{analyzingId === `server-${application.id}` ? "Analiz ediliyor…" : "AI ile değerlendir"}</button>
+                {["assigned", "resubmitted", "analysis_failed"].includes(application.status) ? <button type="button" className="primary-button" disabled={analyzingId !== null} onClick={() => onOpenApplication(application, true)}>{analyzingId === `server-${application.id}` ? "Analiz ediliyor…" : "AI ile değerlendir"}</button>
+                  : application.status === "submitted" ? <span className="eval-analyzing-note">Admin hakem ataması bekleniyor</span>
                   : application.status === "analyzing" ? <span className="eval-analyzing-note">Analiz ediliyor…</span>
                     : <button type="button" className="secondary-button" disabled={analyzingId !== null} onClick={() => onOpenApplication(application, false)}>{application.status === "completed" ? "Tamamlanan incelemeyi aç" : "Hakem incelemesini aç"}</button>}
               </div>
@@ -1376,6 +1377,18 @@ export default function EvaluationApp() {
         peers,
         gateChecks: record.gateChecks,
       });
+      if (record.sourceApplicationId) {
+        try {
+          const { check } = await workflowApi.similarityCheck(record.sourceApplicationId, extracted.pages.join("\n"));
+          evaluation.preChecks = [...evaluation.preChecks.filter((item) => item.kind !== "similarity"), check];
+        } catch (similarityError) {
+          evaluation.analysisWarnings.push(
+            similarityError instanceof Error
+              ? `Aynı yarışma havuzu benzerlik kontrolü tamamlanamadı: ${similarityError.message}`
+              : "Aynı yarışma havuzu benzerlik kontrolü tamamlanamadı.",
+          );
+        }
+      }
       // Analiz sürerken rapor silinmiş olabilir; silinen kayıt depoya geri yazılmaz.
       if (deletedIds.current.has(record.id)) return;
       const updated: StoredReport = {

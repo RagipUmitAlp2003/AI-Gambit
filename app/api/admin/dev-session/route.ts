@@ -23,8 +23,8 @@ const DEMO_IDENTITIES: Record<RoleCode, { fullName: string; email: string }> = {
   "00": { fullName: "Demo Moderatör", email: "demo.bas.yonetici@yerel.test" },
   "01": { fullName: "Demo Yarışma Yöneticisi", email: "demo.yarisma.yoneticisi@yerel.test" },
   "02": { fullName: "Demo Hakem", email: "demo.hakem@yerel.test" },
-  "03": { fullName: "Demo Değerlendirme Yöneticisi", email: "demo.degerlendirme.yoneticisi@yerel.test" },
-  "04": { fullName: "Demo Yarışmacı", email: "demo.yarismaci@yerel.test" },
+  "03": { fullName: "Demo Yarışmacı", email: "demo.yarismaci@yerel.test" },
+  "04": { fullName: "Demo Değerlendirme Yöneticisi", email: "demo.degerlendirme.yoneticisi@yerel.test" },
 };
 
 /**

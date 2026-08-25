@@ -8,7 +8,6 @@ import AuditPanel from "./audit-panel";
 import JudgeQueuePanel from "./judge-queue-panel";
 import OperationsPanel from "./operations-panel";
 import ParticipantPortal from "./participant-portal";
-import ProfileReviewPanel from "./profile-review-panel";
 import ManagerProfileHistory from "./manager-profile-history";
 import { AdminApiError, adminApi } from "../lib/admin-client";
 import type { AuditEntryView } from "../lib/admin-client";
@@ -16,7 +15,7 @@ import { PARTICIPANT_ROLE, ROLES, roleByCode } from "../lib/admin-roles";
 import type { AdminAccount, MailDelivery, RoleCode } from "../lib/admin-types";
 import { can } from "../lib/authorization";
 
-type Section = "overview" | "profile-review" | "extractions" | "profiles" | "accounts" | "audit";
+type Section = "overview" | "extractions" | "profiles" | "accounts" | "audit";
 
 type AdminData = {
   accounts: AdminAccount[];
@@ -35,23 +34,23 @@ const EMPTY: AdminData = { accounts: [], mail: [], audit: [], mailReady: false, 
 const ROLE_WORKSPACES: Record<RoleCode, { title: string; intro: string }> = {
   "00": {
     title: "Sistem yönetimi",
-    intro: "Kullanıcı hesabı açın, rol atayın veya kaldırın, hesapları pasife alın. Değerlendirme kararları bu alandan verilmez.",
+    intro: "Personel hesaplarını ve ilk hakem atamalarını yönetin; gerektiğinde bütün çalışma alanlarına süper yetkiyle erişin.",
   },
   "01": {
     title: "Yarışma hazırlık alanı",
-    intro: "Şartnameyi ve rapor şablonunu yükleyin, kriterleri ve puan yapısını oluşturun, hazırladığınız profili hakem incelemesine gönderin.",
+    intro: "Şartnameyi ve varsa rapor şablonunu yükleyin; kriterleri, kapsamı ve puan yapısını doğrulayıp yayımlayın.",
   },
   "02": {
     title: "Hakem çalışma alanı",
-    intro: "Yarışma yöneticisinin hazırladığı profili ikinci aşamada doğrulayın; AI ön değerlendirmesini inceleyip nihai kararı siz verin.",
+    intro: "Yayımlanmış kriter profiline göre AI ön değerlendirmesini başlatın; kanıtları inceleyip nihai kararı verin.",
   },
   "03": {
-    title: "Değerlendirme operasyonları",
-    intro: "AI analiz durumlarını, hakem kuyruğunu ve tamamlanma oranını izleyin. Bu alandan kriter, puan veya karar değiştirilemez.",
+    title: "Yarışmacı alanı",
+    intro: "Bu rol yönetim panelinde kullanılmaz; yarışmacı kendi başvuru ve sonuç portalını görür.",
   },
   "04": {
-    title: "Yarışmacı alanı",
-    intro: "Bu rol yönetim panelinde kullanılmaz; yarışmacı kendi portalını görür.",
+    title: "Değerlendirme operasyonları",
+    intro: "Hakem yüklerini, analiz hatalarını ve tamamlanma oranını izleyin; tıkanıklıkları giderip sonuç yayın akışını yönetin.",
   },
 };
 
@@ -136,7 +135,6 @@ export default function ManagementApp() {
   const role = roleByCode(session.roleCode);
   const workspace = ROLE_WORKSPACES[session.roleCode];
   const canAuthorProfile = can(session, "author_profile");
-  const canReviewProfile = can(session, "review_profile");
   const canJudge = can(session, "final_judgement");
   const canOpenEvaluation = can(session, "run_ai_prescreen");
   const canOperate = can(session, "operations_dashboard");
@@ -144,12 +142,9 @@ export default function ManagementApp() {
   // Bölümler yetki matrisinden türetilir; hiçbir rol adı burada sabitlenmez.
   const sections: Array<{ id: Section; label: string; detail: string }> = [
     { id: "overview", label: "Çalışma alanım", detail: role?.area ?? "Rol görünümü" },
-    ...(canReviewProfile ? [
-      { id: "profile-review" as const, label: "Profil doğrulama", detail: "Hakem onayı bekleyen değerlendirme profilleri" },
-    ] : []),
     ...(canAuthorProfile ? [
       { id: "extractions" as const, label: "Geçmiş ayıklamalar", detail: "Analiz edilen şartname PDF'leri" },
-      { id: "profiles" as const, label: "Profillerim", detail: "Hakem onay durumu" },
+      { id: "profiles" as const, label: "Yayımlanan profiller", detail: "Aktif kriter ve puan kapsamı" },
     ] : []),
     ...(isModerator ? [
       { id: "accounts" as const, label: "Hesap ve yetkiler", detail: "Kullanıcı hesaplarını yönet" },
@@ -207,7 +202,7 @@ export default function ManagementApp() {
                 {canAuthorProfile ? (
                   <Link href="/kriter-atolyesi" className="role-action primary">
                     <span>01</span>
-                    <div><strong>Kriter Atölyesi&apos;ni aç</strong><p>Şartnameyi analiz et, kriterleri ve puan yapısını doğrula, profili hakem incelemesine gönder.</p></div>
+                    <div><strong>Kriter Atölyesi&apos;ni aç</strong><p>Şartnameyi analiz et, rapor kapsamındaki kriterleri doğrula ve profili yayımla.</p></div>
                     <b aria-hidden="true">→</b>
                   </Link>
                 ) : null}
@@ -221,9 +216,8 @@ export default function ManagementApp() {
               </div>
             ) : null}
 
-            {canReviewProfile ? <ProfileReviewPanel compact onChanged={refresh} /> : null}
             {canJudge ? <JudgeQueuePanel /> : null}
-            {canOperate ? <OperationsPanel /> : null}
+            {canOperate ? <OperationsPanel canInitialAssign={isModerator} /> : null}
             {canAuthorProfile ? <ManagerProfileHistory mode="profiles" compact /> : null}
 
             <div className="role-boundary">
@@ -242,7 +236,6 @@ export default function ManagementApp() {
           </section>
         ) : null}
 
-        {!loading && section === "profile-review" && canReviewProfile ? <ProfileReviewPanel onChanged={refresh} /> : null}
         {!loading && section === "extractions" && canAuthorProfile ? <ManagerProfileHistory mode="extractions" /> : null}
         {!loading && section === "profiles" && canAuthorProfile ? <ManagerProfileHistory mode="profiles" /> : null}
 

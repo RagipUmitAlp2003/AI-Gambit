@@ -1,7 +1,7 @@
 import { handleError, json, jsonError, readJson, requirePermission } from "../../../lib/admin-guard";
-import { findApplication, markApplicationAnalyzing, saveApplicationEvaluation, saveApplicationReview } from "../../../lib/workflow-db";
+import { assignApplication, coordinateApplication, findApplication, markApplicationAnalyzing, saveApplicationEvaluation, saveApplicationReview } from "../../../lib/workflow-db";
 import type { JudgeReview, ReportEvaluation } from "../../../lib/types";
-import { recordAudit } from "../../../lib/admin-db";
+import { findAccountById, recordAudit } from "../../../lib/admin-db";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -31,24 +31,44 @@ export async function GET(request: Request, context: RouteContext): Promise<Resp
 /**
  * Başvuru üzerindeki işlemler iki ayrı yetkiye bölünür:
  *   AI ön değerlendirmesi  (start_analysis / save_evaluation / analysis_failed) → 00, 02
- *   Nihai uzman kararı     (save_review)                                        → yalnızca 02
+ *   Nihai uzman kararı     (save_review)                                        → 02; Admin süper yetkiyle erişebilir
  *
- * Nihai karar hakem dışında hiçbir role açık değildir; moderatör de veremez.
+ * Normal iş akışında nihai karar Hakeme aittir; Admin acil durum ve denetim için süper yetkilidir.
  */
 export async function PATCH(request: Request, context: RouteContext): Promise<Response> {
-  const preflight = await requirePermission(request, "run_ai_prescreen");
-  if (!preflight.ok) return preflight.response;
   try {
     const id = (await context.params).id;
     const body = await readJson(request);
-    const auth = body.action === "save_review"
-      ? await requirePermission(request, "final_judgement")
-      : preflight;
+    const permission = body.action === "save_review"
+      ? "final_judgement"
+      : body.action === "assign_judge" || ["remind_judge", "requeue_analysis", "request_document"].includes(String(body.action))
+        ? "coordinate_evaluation"
+        : "run_ai_prescreen";
+    const auth = await requirePermission(request, permission);
     if (!auth.ok) return auth.response;
-    if (!await findApplication(id, auth.account)) return jsonError(404, "Başvuru bulunamadı.");
-    if (body.action === "start_analysis") {
+    const visibleApplication = await findApplication(id, auth.account);
+    if (!visibleApplication) return jsonError(404, "Başvuru bulunamadı.");
+    if (body.action === "assign_judge") {
+      const judgeId = typeof body.judgeId === "string" ? body.judgeId.trim() : "";
+      const judge = judgeId ? await findAccountById(judgeId) : null;
+      if (!judge || judge.status !== "active" || judge.roleCode !== "02") return jsonError(400, "Aktif bir Hakem seçin.");
+      const assigned = await assignApplication(id, judge, auth.account, typeof body.note === "string" ? body.note : "");
+      if (assigned === "initial_requires_admin") return jsonError(403, "İlk hakem atamasını yalnızca Admin yapabilir.");
+      if (assigned === "already_assigned") return jsonError(409, "Bu başvuru zaten seçilen Hakeme atanmış.");
+      if (assigned === "completed") return jsonError(409, "Tamamlanmış başvuru yeniden atanamaz.");
+      if (assigned === "not_found") return jsonError(404, "Başvuru bulunamadı.");
+    } else if (["remind_judge", "requeue_analysis", "request_document"].includes(String(body.action))) {
+      const coordinated = await coordinateApplication(
+        id,
+        body.action as "remind_judge" | "requeue_analysis" | "request_document",
+        auth.account,
+        typeof body.note === "string" ? body.note : "",
+      );
+      if (coordinated === "invalid_state") return jsonError(409, "Bu işlem başvurunun mevcut durumunda uygulanamaz.");
+      if (coordinated === "not_found") return jsonError(404, "Başvuru bulunamadı.");
+    } else if (body.action === "start_analysis") {
       const start = await markApplicationAnalyzing(id, auth.account);
-      if (start === "profile_missing") return jsonError(409, "Bu yarışma için hakem onaylı değerlendirme profili yok. Yarışma yöneticisi profili hazırlayıp hakem incelemesine göndermeli, hakem de onaylamalıdır.");
+      if (start === "profile_missing") return jsonError(409, "Bu yarışma için yayımlanmış değerlendirme profili yok. Yarışma Yöneticisi şartname kriterlerini doğrulayıp profili yayımlamalıdır.");
       if (start === "conflict") return jsonError(409, "Bu başvuru başka bir işlemde veya zaten analiz edilmiş.");
     } else if (body.action === "save_evaluation") {
       const evaluation = body.evaluation as ReportEvaluation | undefined;
@@ -59,6 +79,9 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
     } else if (body.action === "save_review") {
       const review = body.review as JudgeReview | undefined;
       if (!review || !validReview(review)) return jsonError(400, "Hakem değerlendirmesi geçerli değil.");
+      if (auth.account.roleCode === "02" && !["awaiting_judge", "judge_in_review", "completed"].includes(visibleApplication.status)) {
+        return jsonError(409, "Nihai karar verilmeden önce bu raporun AI ön analizi tamamlanmalıdır.");
+      }
       if (!["pending", "accepted", "rejected", "revision_required"].includes(review.outcome)) return jsonError(400, "Başvuru sonucu geçerli değil.");
       if (review.status === "completed" && review.outcome === "pending") return jsonError(400, "Değerlendirmeyi tamamlamak için kabul, ret veya düzeltme sonucu seçin.");
       if (typeof review.outcomeNote !== "string" || review.outcomeNote.length > 1_000) return jsonError(400, "Sonuç açıklaması en fazla 1000 karakter olabilir.");

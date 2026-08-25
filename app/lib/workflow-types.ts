@@ -15,29 +15,84 @@ import type { RoleCode } from "./admin-types";
  */
 export type ApplicationStatus =
   | "submitted"
+  | "assigned"
+  | "resubmitted"
   | "analyzing"
   | "awaiting_judge"
   | "judge_in_review"
   | "completed"
-  | "analysis_failed";
+  | "analysis_failed"
+  | "document_reupload_requested";
 
 export const APPLICATION_STATUSES: ApplicationStatus[] = [
   "submitted",
+  "assigned",
+  "resubmitted",
   "analyzing",
   "awaiting_judge",
   "judge_in_review",
   "completed",
   "analysis_failed",
+  "document_reupload_requested",
 ];
 
 /** Başvuru durumlarının kullanıcıya gösterilen karşılıkları. */
 export const APPLICATION_STATUS_LABELS: Record<ApplicationStatus, string> = {
   submitted: "AI ön değerlendirmesi bekliyor",
+  assigned: "Hakeme atandı · AI bekliyor",
+  resubmitted: "Yeni sürüm gönderildi",
   analyzing: "AI ön değerlendirmesinde",
   awaiting_judge: "Hakem bekliyor",
   judge_in_review: "Hakem değerlendirmesinde",
   completed: "Nihai değerlendirme tamamlandı",
   analysis_failed: "AI analizi başarısız",
+  document_reupload_requested: "Yeni belge istendi",
+};
+
+export type CompetitionStatus =
+  | "draft_criteria"
+  | "criteria_processing"
+  | "criteria_review"
+  | "open"
+  | "applications_closed"
+  | "evaluating"
+  | "decisions_frozen"
+  | "results_published"
+  | "archived";
+
+export const COMPETITION_STATUS_LABELS: Record<CompetitionStatus, string> = {
+  draft_criteria: "Kriter taslağı",
+  criteria_processing: "Kriter çıkarılıyor",
+  criteria_review: "Yönetici incelemesinde",
+  open: "Başvuruya açık",
+  applications_closed: "Başvuru alımı kapalı",
+  evaluating: "Değerlendirme sürüyor",
+  decisions_frozen: "Kararlar donduruldu",
+  results_published: "Sonuçlar yayımlandı",
+  archived: "Arşivlendi",
+};
+
+export type CompetitionWorkflow = {
+  id: string;
+  competitionKey: string;
+  competitionName: string;
+  status: CompetitionStatus;
+  currentProfileId: string | null;
+  decisionsLocked: boolean;
+  resultsPublishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SubmissionVersion = {
+  id: string;
+  applicationId: string;
+  versionNumber: number;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  submittedBy: string;
+  submittedAt: string;
 };
 
 export type ApplicationOutcome = "pending" | "accepted" | "rejected" | "revision_required";
@@ -58,7 +113,7 @@ export const PROFILE_STATUS_LABELS: Record<ProfileStatus, string> = {
   draft: "Taslak",
   judge_review_pending: "Hakem onayı bekliyor",
   changes_requested: "Düzeltme istendi",
-  approved: "Hakem onaylı · aktif",
+  approved: "Yayımlandı · aktif",
 };
 
 export type ApplicationTeamMember = {
@@ -111,6 +166,10 @@ export type CompetitionApplication = {
   review: JudgeReview | null;
   judgeId: string | null;
   judgeName: string | null;
+  assignedJudgeId: string | null;
+  assignedJudgeName: string | null;
+  currentVersionId: string | null;
+  currentVersionNumber: number;
   outcome: ApplicationOutcome;
   outcomeNote: string;
   decidedAt: string | null;
@@ -135,7 +194,7 @@ export type CriteriaExtractionRun = {
 /** Hakemin profil doğrulamasında verebileceği karar. */
 export type ProfileReviewDecision = "approve" | "request_changes";
 
-/** Süreç panolarında gösterilen özet sayaçlar (Rol 03). */
+/** Süreç panolarında gösterilen özet sayaçlar (Rol 04). */
 export type OperationsSummary = {
   total: number;
   aiPending: number;
@@ -146,6 +205,14 @@ export type OperationsSummary = {
   completed: number;
   failed: number;
   completionRate: number;
+};
+
+export type JudgeWorkload = {
+  judgeId: string;
+  judgeName: string;
+  active: number;
+  completed: number;
+  failed: number;
 };
 
 export type TimelineEntry = {
