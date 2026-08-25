@@ -24,12 +24,15 @@ export default function JudgeQueuePanel() {
       .finally(() => setLoading(false));
   }, []);
 
+  // Yeni gelen başvuru da kuyruğa girer: hakem AI analizini buradan başlatır.
   const queue = useMemo(
-    () => applications.filter((item) => item.status === "awaiting_judge" || item.status === "judge_in_review"),
+    () => applications.filter((item) => [
+      "submitted", "assigned", "resubmitted", "analysis_failed", "awaiting_judge", "judge_in_review",
+    ].includes(item.status)),
     [applications],
   );
   const counts = useMemo(() => ({
-    pending: applications.filter((item) => item.status === "submitted").length,
+    pending: applications.filter((item) => ["submitted", "assigned", "resubmitted", "analysis_failed"].includes(item.status)).length,
     analyzing: applications.filter((item) => item.status === "analyzing").length,
     awaiting: applications.filter((item) => item.status === "awaiting_judge").length,
     inReview: applications.filter((item) => item.status === "judge_in_review").length,
@@ -43,7 +46,7 @@ export default function JudgeQueuePanel() {
         <div>
           <span className="role-code">Aşama D · nihai değerlendirme</span>
           <h2 id="judge-queue-title">Hakem kuyruğu</h2>
-          <p>AI ön değerlendirmesi tamamlanan başvurular. AI önerdiği puanı sunar; nihai kararı siz verirsiniz.</p>
+          <p>Size düşen başvurular. AI analizini siz başlatırsınız; analiz, Yarışma Yöneticisinin yayımladığı şartname kriterlerine göre çalışır ve nihai kararı yine siz verirsiniz.</p>
         </div>
         <Link href="/degerlendirme" className="secondary-button">Değerlendirme Atölyesi</Link>
       </header>
@@ -71,7 +74,7 @@ export default function JudgeQueuePanel() {
                   <small>
                     {proposed
                       ? `AI önerilen ham puan: ${proposed.rawScore ?? "—"} / ${proposed.declaredTotal ?? "—"} · ${proposed.pendingCriteria} kriter hakem kararı bekliyor`
-                      : "AI ön değerlendirmesi henüz okunmadı"}
+                      : "AI analizi henüz başlatılmadı · Değerlendirme Atölyesi'nden başlatın"}
                   </small>
                 </div>
                 <small>{formatDateTime(application.updatedAt)}</small>
@@ -80,7 +83,7 @@ export default function JudgeQueuePanel() {
           })}
         </div>
       ) : (
-        <div className="participant-empty"><strong>Kuyrukta bekleyen başvuru yok</strong><p>AI ön değerlendirmesi tamamlanan başvurular burada listelenir.</p></div>
+        <div className="participant-empty"><strong>Kuyrukta bekleyen başvuru yok</strong><p>Yarışmacı başvurusu geldiğinde burada listelenir.</p></div>
       )}
     </section>
   );

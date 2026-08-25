@@ -20,7 +20,7 @@ Sabit bir puanlama şablonu sunmaz. Belgedeki biçim kurallarını, zorunlu içe
 
 ## Operating Context
 
-İlk modül üç adımdan oluşur: resmî kriter PDF'si ile isteğe bağlı rapor şablonunun yüklenmesi, kriterlerin dinamik inceleme/düzeltmesi ve profilin Yarışma Yöneticisi tarafından yayımlanması. Yarışmacı portalı yarışma seçimi, PDF başvurusu, revizyon sürümü ve sonuç takibini yürütür. PDF yüklenince analiz başlamaz; Admin ilk Hakemi atar. Değerlendirme Atölyesi yayımlanmış profili katılımcı raporuna yalnızca Hakem “AI ile değerlendir” dediğinde uygular. Değerlendirme Yöneticisi iş yükü, yeniden atama, hata kuyruğu, süreç kilitleme ve sonuç yayın akışını yönetir; proje içeriğini ve nihai kararı değiştiremez.
+İlk modül üç adımdan oluşur: resmî kriter PDF'si ile isteğe bağlı rapor şablonunun yüklenmesi, kriterlerin dinamik inceleme/düzeltmesi ve profilin Yarışma Yöneticisi tarafından yayımlanması. Yarışmacı portalı yarışma seçimi, PDF başvurusu, revizyon sürümü ve sonuç takibini yürütür. PDF yüklenince analiz başlamaz; başvuru doğrudan Hakem paneline düşer. Değerlendirme Atölyesi yayımlanmış profili katılımcı raporuna yalnızca Hakem “AI analizini başlat” dediğinde uygular ve analizi başlatan Hakem dosyayı üstlenir; Admin dilerse baştan belirli bir Hakeme atar. Sonuç, uygunluk önerisi ve ret gerekçesi taslağı olarak sunulur; kabul/ret kararını Hakem verir ve karar yarışmacıya e-posta ile bildirilir. Değerlendirme Yöneticisi iş yükü, yeniden atama, hata kuyruğu, süreç kilitleme ve sonuç yayın akışını yönetir; proje içeriğini ve nihai kararı değiştiremez.
 
 ## Capabilities and Constraints
 

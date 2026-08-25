@@ -6,6 +6,7 @@ import FileBadge from "./file-badge";
 import DocumentLibraryModal from "./document-library-modal";
 import TopbarSession from "./topbar-session";
 import { applyPenalties, criterionEffectOf, criterionEliminates, normalizeScoreDetailed } from "../lib/evaluation-summary";
+import { assessCompliance } from "../lib/compliance-verdict";
 import { extractPdfText } from "../lib/pdf-reader";
 import { loadLastApprovedProfile, readProfileFile, saveActiveProfile } from "../lib/profile-loader";
 import { createReportId, deleteReport, listReports, saveReport, type StoredReport } from "../lib/report-pool";
@@ -384,7 +385,7 @@ function PoolView({ profile, profileError, onProfileFile, records, uploadError, 
     return (
       <section className="workspace eval-pool-workspace" aria-labelledby="pool-title">
         <div className="workspace-heading">
-          <div><span className="section-kicker">Katılımcı başvuruları</span><h1 id="pool-title">Başvuru havuzu</h1><p>PDF&apos;ler yarışmacı gönderdiğinde burada görünür. AI analizi yalnızca hakem başlattığında çalışır.</p></div>
+          <div><span className="section-kicker">Katılımcı başvuruları</span><h1 id="pool-title">Başvuru havuzu</h1><p>PDF&apos;ler yarışmacı gönderdiğinde burada görünür. AI analizi yalnızca hakem başlattığında çalışır ve yalnızca Yarışma Yöneticisinin yayımladığı şartname kriterlerini kullanır.</p></div>
           <span className="step-fraction">1 / 3</span>
         </div>
         {uploadError ? <div className="inline-error eval-panel-margin" role="alert"><strong>İşlem tamamlanamadı.</strong><span>{uploadError}</span></div> : null}
@@ -407,8 +408,7 @@ function PoolView({ profile, profileError, onProfileFile, records, uploadError, 
               <div className="sample-copy"><span>{APPLICATION_STATUS_LABELS[application.status]}</span><h3>{application.teamName}</h3><p>{application.applicantFullName} · {application.fileName ?? "Başvuru PDF'i"} · {formatBytes(application.sizeBytes ?? 0)}</p><small>{application.teamMembers.length ? `${application.teamMembers.length} ekip üyesi` : "Bireysel başvuru"}</small></div>
               <div className="sample-actions eval-pool-actions">
                 <a className="text-button" href={`/api/applications/${application.id}/file`} target="_blank" rel="noreferrer">PDF&apos;i aç</a>
-                {["assigned", "resubmitted", "analysis_failed"].includes(application.status) ? <button type="button" className="primary-button" disabled={analyzingId !== null} onClick={() => onOpenApplication(application, true)}>{analyzingId === `server-${application.id}` ? "Analiz ediliyor…" : "AI ile değerlendir"}</button>
-                  : application.status === "submitted" ? <span className="eval-analyzing-note">Admin hakem ataması bekleniyor</span>
+                {["submitted", "assigned", "resubmitted", "analysis_failed"].includes(application.status) ? <button type="button" className="primary-button" disabled={analyzingId !== null} onClick={() => onOpenApplication(application, true)}>{analyzingId === `server-${application.id}` ? "Analiz ediliyor…" : "AI analizini başlat"}</button>
                   : application.status === "analyzing" ? <span className="eval-analyzing-note">Analiz ediliyor…</span>
                     : <button type="button" className="secondary-button" disabled={analyzingId !== null} onClick={() => onOpenApplication(application, false)}>{application.status === "completed" ? "Tamamlanan incelemeyi aç" : "Hakem incelemesini aç"}</button>}
               </div>
@@ -688,6 +688,8 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
   // için kullanılır; kullanıcıya otomatik 100'lük puan gösterilmez.
   const normalized = normalizeScoreDetailed(finalTotal, declaredTotal ?? 0);
   const flaggedChecks = evaluation.preChecks.filter((check) => check.status === "flagged" || check.status === "failed");
+  // Yayımlanmış kriter profiline göre uygunluk önerisi. Karar değil, gerekçeli öneridir.
+  const compliance = assessCompliance(evaluation, profileMatches ? profile : null);
   // Geçiş / baraj / ceza / eleme maddelerinin bu rapordaki durumu: bulgu + görevli kararı.
   const ruleAudit = profile && profileMatches ? (() => {
     const columns: Array<{ key: string; title: string; items: RuleAuditItem[] }> = [
@@ -724,11 +726,15 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
     }
     return { columns, pending, failed };
   })() : null;
-  const canComplete =
-    reviewConfirmed &&
-    decidedScores.length === scoreFindings.length &&
-    decisionPending.length === 0 &&
-    review.outcome !== "pending";
+  // Reddedilen başvuru puanlanmaz: şartname koşulu karşılanmadığı için dosya zaten
+  // değerlendirme dışıdır. Bu durumda yalnızca yarışmacıya iletilecek gerekçe aranır.
+  const rejecting = review.outcome === "rejected";
+  const canComplete = rejecting
+    ? reviewConfirmed && review.outcomeNote.trim().length > 0
+    : reviewConfirmed
+      && decidedScores.length === scoreFindings.length
+      && decisionPending.length === 0
+      && review.outcome !== "pending";
 
   function patchDecision(criterionId: string, patch: Partial<JudgeDecision>) {
     if (!record || !review) return;
@@ -817,6 +823,78 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
           </ul>
         </div>
       ) : null}
+
+      <section className={`compliance-verdict eval-panel-margin ${compliance.verdict}`} aria-labelledby="compliance-verdict-title">
+        <div className="compliance-head">
+          <div>
+            <span className="section-kicker">AI uygunluk önerisi · karar hakemde</span>
+            <h2 id="compliance-verdict-title">
+              {compliance.verdict === "compliant" ? "Başvuru şartname kriterlerine uygun"
+                : compliance.verdict === "not_compliant" ? "Başvuru şartname kriterlerine uygun değil"
+                  : "Uygunluk için hakem kararı gerekiyor"}
+            </h2>
+            <p>{compliance.summary}</p>
+          </div>
+          <span className="compliance-count">{compliance.metRequired}/{compliance.totalRequired}<small>zorunlu koşul</small></span>
+        </div>
+
+        {compliance.blocking.length ? (
+          <div className="compliance-issues blocking">
+            <strong>Karşılanmayan zorunlu koşullar</strong>
+            <ul>
+              {compliance.blocking.map((issue) => (
+                <li key={`${issue.source}-${issue.id}`}>
+                  <span>{issue.name}{issue.sourcePage ? ` · s. ${issue.sourcePage}` : ""}</span>
+                  <small>{issue.detail}</small>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {compliance.review.length ? (
+          <div className="compliance-issues review">
+            <strong>Hakem kararı bekleyen maddeler</strong>
+            <ul>
+              {compliance.review.map((issue) => (
+                <li key={`${issue.source}-${issue.id}`}>
+                  <span>{issue.name}{issue.sourcePage ? ` · s. ${issue.sourcePage}` : ""}</span>
+                  <small>{issue.detail}</small>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        <div className="compliance-actions">
+          <button
+            type="button"
+            className="primary-button"
+            onClick={() => patchReview({
+              outcome: "accepted",
+              outcomeNote: review.outcomeNote.trim() || "Başvurunuz, yayımlanmış şartname kriterlerini karşıladığı için kabul edilmiştir.",
+            })}
+          >
+            Başvuruyu onayla
+          </button>
+          <button
+            type="button"
+            className="danger-button"
+            onClick={() => patchReview({
+              outcome: "rejected",
+              outcomeNote: compliance.rejectionDraft
+                || review.outcomeNote.trim()
+                || "Başvurunuz, yayımlanmış şartname kriterlerini karşılamadığı için reddedilmiştir.",
+            })}
+          >
+            Başvuruyu reddet{compliance.rejectionDraft ? " · AI gerekçesiyle" : ""}
+          </button>
+          <small>
+            Seçtiğiniz sonuç ve gerekçe aşağıdaki “Başvuru sonucu” alanına yazılır; göndermeden önce
+            metni serbestçe değiştirebilirsiniz.
+          </small>
+        </div>
+      </section>
 
       <div className="eval-panel-margin">
         <PreCheckList checks={evaluation.preChecks} title="Ön kontroller" />
@@ -1056,7 +1134,7 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
               <option value="revision_required">Hatalar düzeltilmeli</option>
             </select>
           </Field>
-          <Field label="Yarışmacıya sonuç açıklaması" hint="Kısa, açık ve uygulanabilir bir açıklama yazın.">
+          <Field label="Yarışmacıya sonuç açıklaması" hint={rejecting ? "Ret gerekçesi zorunludur; yarışmacıya e-posta ile de gönderilir. AI taslağını olduğu gibi bırakabilir veya kendiniz yazabilirsiniz." : "Kısa, açık ve uygulanabilir bir açıklama yazın."}>
             <textarea maxLength={1000} value={review.outcomeNote} onChange={(event) => patchReview({ outcomeNote: event.target.value })} placeholder="Sonucun kısa gerekçesi veya beklenen düzeltme" />
           </Field>
         </div>
@@ -1077,9 +1155,13 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
           </label>
           {!canComplete ? (
             <small>
-              {decidedScores.length !== scoreFindings.length && `${scoreFindings.length - decidedScores.length} puan kriteri kararsız. `}
-              {decisionPending.length > 0 && `${decisionPending.length} görevli kararı bekliyor. `}
-              {review.outcome === "pending" && "Başvuru sonucunu seçin. "}
+              {rejecting
+                ? !review.outcomeNote.trim() && "Yarışmacıya iletilecek ret gerekçesini yazın. "
+                : <>
+                  {decidedScores.length !== scoreFindings.length && `${scoreFindings.length - decidedScores.length} puan kriteri kararsız. `}
+                  {decisionPending.length > 0 && `${decisionPending.length} görevli kararı bekliyor. `}
+                  {review.outcome === "pending" && "Başvuru sonucunu seçin. "}
+                </>}
               {!reviewConfirmed && "Hakem kontrolünü onaylayın."}
             </small>
           ) : <small className="ready-note">İnceleme tamamlanmaya hazır.</small>}
@@ -1490,7 +1572,13 @@ export default function EvaluationApp() {
       const saveRemote = () => {
         remoteReviewTimers.current.delete(applicationId);
         workflowApi.updateApplication(applicationId, "save_review", { review })
-          .then((saved) => setApplications((current) => current.map((item) => item.id === saved.application.id ? saved.application : item)))
+          .then((saved) => {
+            setApplications((current) => current.map((item) => item.id === saved.application.id ? saved.application : item));
+            // Karar kaydedildi; yalnızca yarışmacı bildirimi düşmüşse uyarılır.
+            setUploadError(saved.notificationWarning
+              ? `Karar kaydedildi. Ancak yarışmacıya sonuç e-postası gönderilemedi: ${saved.notificationWarning}`
+              : "");
+          })
           .catch(reportPersistFailure);
       };
       if (status === "reviewed") saveRemote();

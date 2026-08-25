@@ -1,8 +1,9 @@
 import { ConflictError, DatabaseUnavailableError, findSessionAccount } from "./admin-db";
+import { ReportStorageUnavailableError } from "./workflow-db";
 import { ASSIGNABLE_ROLE_CODES, isRoleCode } from "./admin-roles";
 import { PERMISSIONS, type Permission } from "./authorization";
 import type { AdminAccount, RoleCode } from "./admin-types";
-import { AuthConfigError, authConfigured, hashToken, readSignedToken } from "./session";
+import { AuthConfigError, authConfigured, hashToken, isProduction, readSignedToken } from "./session";
 
 /**
  * Yönetici uçlarının ortak yanıt, doğrulama ve yetki yardımcıları.
@@ -111,15 +112,59 @@ export function handleError(error: unknown): Response {
     console.error("[db] D1 bağlaması bulunamadı; hosting.json içindeki d1 alanını ve dağıtım ayarını kontrol edin.");
     return jsonError(503, error.message, { databaseUnavailable: true });
   }
+  if (error instanceof ReportStorageUnavailableError) {
+    // R2 baglamasi yoksa basvuru PDF'i hicbir yere yazilamaz; sebebi acikca soylenir.
+    console.error("[r2] REPORTS baglamasi bulunamadi; .openai/hosting.json ve dagitim ayarini kontrol edin.");
+    return jsonError(
+      503,
+      "Basvuru PDF'i saklanamiyor: sunucudaki dosya deposu (R2 “REPORTS” baglamasi) tanimli degil. "
+      + "Sistem yoneticisi bu baglamayi tanimlayana kadar basvuru alinamaz.",
+      { storageUnavailable: true },
+    );
+  }
   if (error instanceof ValidationError) {
     return jsonError(400, error.message);
   }
   if (error instanceof ConflictError) {
     return jsonError(409, error.message);
   }
-  // Beklenmeyen hatanın içeriği (SQL, yol, iç kimlik) istemciye gitmez.
-  console.error("[admin] beklenmeyen hata", error);
-  return jsonError(500, "İşlem tamamlanamadı.");
+  // Beklenmeyen hata. Referans kodu hem günlüğe hem yanıta yazılır: kullanıcının
+  // ekranda gördüğü kod, sunucu günlüğündeki satırla birebir eşleşir.
+  const reference = crypto.randomUUID().slice(0, 8).toUpperCase();
+  console.error(`[admin] beklenmeyen hata · Ref ${reference}`, error);
+  const cause = describeUnexpected(error);
+  return jsonError(
+    500,
+    // Üretimde teknik ayrıntı (SQL, tablo adı, yol) istemciye gitmez; yalnızca
+    // referans kodu gider ve ayrıntı sunucu günlüğünde kalır.
+    isProduction()
+      ? `İşlem tamamlanamadı. Sunucuda beklenmeyen bir hata oluştu (Ref: ${reference}). Bu kodu sistem yöneticisine iletin.`
+      : `İşlem tamamlanamadı: ${cause} (Ref: ${reference})`,
+    { reference, ...(isProduction() ? {} : { detail: cause }) },
+  );
+}
+
+/**
+ * Beklenmeyen hatayı tek satırlık, okunur bir nedene indirger.
+ * Sık görülen SQLite/D1 ihlalleri için Türkçe karşılık üretir ki ekrandaki
+ * mesaj "İşlem tamamlanamadı" gibi boş bir cümle olarak kalmasın.
+ */
+function describeUnexpected(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? "");
+  const message = raw.trim() || "bilinmeyen hata";
+  if (/UNIQUE constraint failed/i.test(message)) {
+    const column = message.match(/UNIQUE constraint failed:\s*([^\s)]+)/i)?.[1] ?? "";
+    return `aynı kayıt zaten var (benzersizlik ihlali${column ? `: ${column}` : ""})`;
+  }
+  if (/NOT NULL constraint failed/i.test(message)) {
+    const column = message.match(/NOT NULL constraint failed:\s*([^\s)]+)/i)?.[1] ?? "";
+    return `zorunlu alan boş gönderildi${column ? ` (${column})` : ""}`;
+  }
+  if (/FOREIGN KEY constraint failed/i.test(message)) return "bağlı kayıt bulunamadı (yabancı anahtar ihlali)";
+  if (/no such table|no such column/i.test(message)) return `veri tabanı şeması güncel değil (${message})`;
+  if (/too many SQL variables|expression tree is too large/i.test(message)) return "tek işlemde gönderilen kayıt sayısı veri tabanı sınırını aşıyor";
+  if (/D1_ERROR/i.test(message)) return message.replace(/^D1_ERROR:?\s*/i, "veri tabanı hatası: ");
+  return message.slice(0, 300);
 }
 
 export async function readJson(request: Request): Promise<Record<string, unknown>> {

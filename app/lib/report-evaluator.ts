@@ -114,8 +114,13 @@ export async function evaluateReport(input: {
     }
 
     if (response.status === 501 || response.status === 404 || response.status === 503) {
+      // 503 = motor geçici olarak yok (model yoğun, kota, zaman aşımı ya da anahtar
+      // eksik). Sunucu gerçek nedeni yazdıysa onu göster: "anahtar kullanılamıyor"
+      // gibi sabit bir cümle yanlış teşhise yol açıyordu. Analiz düşmez; Hakem
+      // deterministik ön kontrollerle çalışmaya devam eder.
+      const serverReason = typeof payload?.error === "string" ? payload.error.trim() : "";
       offlineReason = response.status === 503
-        ? "AI servis anahtarı bu ortamda kullanılamıyor; yalnızca kesin kontroller çalıştırıldı."
+        ? `${serverReason || "AI analiz motoru şu anda yanıt vermiyor"} Bu rapor için yalnızca kesin (deterministik) kontroller çalıştırıldı; kriter bulguları üretilemedi.`
         : "AI analiz motoru bu ortamda bağlı değil; yalnızca kesin kontroller çalıştırıldı.";
     } else {
       throw new ReportEngineError(

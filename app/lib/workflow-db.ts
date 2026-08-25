@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
-import { getDatabase, recordWorkflowEvent, recordWorkflowEvents } from "./admin-db";
-import { fold } from "./competitions";
+import { ConflictError, getDatabase, recordWorkflowEvent, recordWorkflowEvents } from "./admin-db";
+import { COMPETITIONS, fold, type CompetitionEntry } from "./competitions";
 import type { AdminAccount, WorkflowEventInput } from "./admin-types";
 import type { AnalysisResult, JudgeReview, ProfileExport, ReportEvaluation } from "./types";
 import type { SimilarityFingerprint } from "./similarity-engine";
@@ -398,8 +398,11 @@ function toApplication(
   view: "full" | "participant" | "operations",
 ): CompetitionApplication {
   const operations = view === "operations";
+  // Kabul sonucu, yarışma sonuçları yayımlanana kadar yarışmacıya kapalıdır.
+  // Ret ve revizyon kararları bunun dışındadır: yarışmacı reddedildiğini ve
+  // gerekçesini anında görmelidir, aksi hâlde düzeltme hakkını kullanamaz.
   const participantResultHidden = view === "participant"
-    && row.outcome !== "revision_required"
+    && !["revision_required", "rejected"].includes(row.outcome ?? "")
     && !["results_published", "archived"].includes(row.competition_status ?? "");
   const evaluation = parseJson<ReportEvaluation>(row.evaluation_json);
   return {
@@ -519,7 +522,12 @@ export async function submitProfileForReview(profile: ProfileExport, actor: Admi
          source_page, source_text, criterion_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
-      criterion.id || crypto.randomUUID(),
+      // `criteria.id` genel bir birincil anahtardır; analiz çıktısı ise her belgede
+      // aynı "criterion-1..N" kimliklerini üretir. Satır kimliği bu yüzden profil ve
+      // sıra ile nitelenir — aksi hâlde ikinci profil yayımı UNIQUE ihlaliyle
+      // “İşlem tamamlanamadı” hatası veriyordu. Kriterin kendi kimliği
+      // `criterion_json` içinde olduğu gibi korunur; bulgu eşleştirmesi orayı kullanır.
+      `${id}:${position}:${criterion.id || "kriter"}`,
       id,
       position,
       criterion.name,
@@ -669,6 +677,41 @@ export async function listCompetitionWorkflows(): Promise<CompetitionWorkflow[]>
 export async function competitionAcceptsApplications(name: string): Promise<boolean> {
   const competition = await findCompetitionWorkflow(name);
   return competition?.status === "open" && Boolean(competition.currentProfileId);
+}
+
+/**
+ * Şu anda başvuruya açık yarışmalar.
+ *
+ * Yayımlanmış profilin yarışma adı ŞARTNAMEDEN çıkarılır; kodda sabit duran
+ * `COMPETITIONS` havuzunda bulunmayabilir (ör. “TEKNOFEST Havacılık, Uzay ve
+ * Teknoloji Festivali”). Başvuru seçimi bu yüzden sabit havuzdan değil,
+ * yayımlanmış profillerden beslenir — aksi hâlde yönetici “yayında” bildirimi
+ * alırken yarışmacı aynı yarışmayı listede hiç göremiyordu.
+ *
+ * `field` gosterim etiketidir: profilin kategorisi, yoksa aşama, o da yoksa
+ * kayıtlı havuzdaki alan adı.
+ */
+export async function listOpenCompetitions(): Promise<CompetitionEntry[]> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(
+    `SELECT c.competition_name, p.category, p.stage
+     FROM competitions c
+     LEFT JOIN competition_profiles p ON p.id = c.current_profile_id
+     WHERE c.status = 'open' AND c.current_profile_id IS NOT NULL
+     ORDER BY c.competition_name`,
+  ).all<{ competition_name: string; category: string | null; stage: string | null }>();
+  const seen = new Set<string>();
+  const entries: CompetitionEntry[] = [];
+  for (const row of result.results ?? []) {
+    if (seen.has(row.competition_name)) continue;
+    seen.add(row.competition_name);
+    const registered = COMPETITIONS.find((item) => item.name === row.competition_name);
+    entries.push({
+      name: row.competition_name,
+      field: (row.category ?? "").trim() || (row.stage ?? "").trim() || registered?.field || "Başvuruya açık",
+    });
+  }
+  return entries;
 }
 
 export type CompetitionStageResult = CompetitionWorkflow | "not_found" | "invalid_transition" | "unresolved";
@@ -823,7 +866,15 @@ export async function createApplication(input: {
  */
 function applicationVisibility(account: AdminAccount, alias = "a"): { sql: string; binds: unknown[] } {
   if (account.roleCode === "03") return { sql: `WHERE ${alias}.participant_id = ?`, binds: [account.id] };
-  if (account.roleCode === "02") return { sql: `WHERE ${alias}.assigned_judge_id = ?`, binds: [account.id] };
+  if (account.roleCode === "02") {
+    // Hakem, kendisine atanmış başvuruların yanında HENÜZ HİÇBİR HAKEME ATANMAMIŞ
+    // başvuruları da görür; böylece yeni başvuru atama beklemeden panele düşer.
+    // Başka bir hakeme atanmış dosya bu hesaba hiç gönderilmez.
+    return {
+      sql: `WHERE (${alias}.assigned_judge_id = ? OR ${alias}.assigned_judge_id IS NULL)`,
+      binds: [account.id],
+    };
+  }
   if (account.roleCode === "01") {
     return {
       sql: `WHERE ${alias}.competition_key IN (SELECT competition_key FROM competition_profiles WHERE created_by = ?)`,
@@ -1112,28 +1163,64 @@ export async function saveAndListSimilarityFingerprints(
   });
 }
 
+/** AI ön değerlendirmesinin başlatılabildiği başvuru durumları. */
+const ANALYZABLE_STATUSES = ["submitted", "assigned", "resubmitted", "analysis_failed"];
+
 /**
- * AI ön değerlendirmesini başlatır (Aşama C).
- * Yalnızca HAKEM ONAYLI profil varsa çalışır; onaysız profille değerlendirme yapılmaz.
+ * AI ön değerlendirmesini başlatır (Aşama C) — Hakemin “AI analizini başlat” komutu.
+ * Yalnızca yayımlanmış profil varsa çalışır; yayımlanmamış profille değerlendirme yapılmaz.
+ *
+ * Başvuru henüz hiçbir hakeme atanmamışsa analizi başlatan hakem dosyayı
+ * üstlenir (self-assign); böylece yeni başvuru bir yönetici atamasını beklemeden
+ * hakem panelinde işlenebilir. Başka hakeme atanmış dosya bu yolla ele geçirilemez.
  */
 export async function markApplicationAnalyzing(id: string, judge: AdminAccount): Promise<"started" | "profile_missing" | "conflict"> {
   const database = await workflowDatabase();
   const current = await database.prepare(
     `SELECT competition_name, profile_id, status, assigned_judge_id FROM competition_applications WHERE id = ?`,
   ).bind(id).first<{ competition_name: string; profile_id: string | null; status: string; assigned_judge_id: string | null }>();
-  if (!current || !["assigned", "resubmitted", "analysis_failed"].includes(current.status)) return "conflict";
-  if (judge.roleCode === "02" && current.assigned_judge_id !== judge.id) return "conflict";
+  if (!current || !ANALYZABLE_STATUSES.includes(current.status)) return "conflict";
+  if (judge.roleCode === "02" && current.assigned_judge_id && current.assigned_judge_id !== judge.id) return "conflict";
   // profile_id başvuru anında bağlanmış olsa bile hakem onayından geçmemiş olabilir;
   // o durumda aynı yarışmanın onaylı profiline düşülür.
   const linked = current.profile_id ? await findApprovedProfile(current.profile_id) : null;
   const profile = linked ?? await findLatestProfileForCompetition(current.competition_name);
   if (!profile) return "profile_missing";
+  const timestamp = new Date().toISOString();
+  // Yalnızca Hakem (02) dosyayı üstlenir. Admin süper yetkiyle analiz başlatabilir
+  // ama atanmış hakem olarak yazılmaz; aksi hâlde dosya hakem havuzundan düşerdi.
+  const claiming = !current.assigned_judge_id && judge.roleCode === "02";
+  const claimColumns = claiming ? ", assigned_judge_id = ?, assigned_judge_name = ?" : "";
+  // Koşul WHERE'de tutulur: iki hakem aynı anda başlatırsa yalnızca biri geçer.
   const result = await database.prepare(
     `UPDATE competition_applications
-     SET status = 'analyzing', profile_id = ?, judge_id = ?, judge_name = ?, updated_at = ?
-     WHERE id = ? AND status IN ('assigned', 'resubmitted', 'analysis_failed')`,
-  ).bind(profile.id, judge.id, judge.fullName, new Date().toISOString(), id).run();
+     SET status = 'analyzing', profile_id = ?, judge_id = ?, judge_name = ?, updated_at = ?${claimColumns}
+     WHERE id = ? AND status IN (${ANALYZABLE_STATUSES.map(() => "?").join(", ")})
+       ${claiming ? "AND assigned_judge_id IS NULL" : ""}`,
+  ).bind(
+    profile.id, judge.id, judge.fullName, timestamp,
+    ...(claiming ? [judge.id, judge.fullName] : []),
+    id, ...ANALYZABLE_STATUSES,
+  ).run();
   if (!result.meta.changes) return "conflict";
+  if (claiming) {
+    // Atama kaydı yalnızca üstlenme gerçekleştikten sonra yazılır.
+    await database.batch([
+      database.prepare(`UPDATE application_assignments SET active = 0 WHERE application_id = ? AND active = 1`).bind(id),
+      database.prepare(
+        `INSERT INTO application_assignments
+          (id, application_id, judge_id, judge_name, assigned_by, assigned_by_name, reason, active, assigned_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      ).bind(
+        crypto.randomUUID(), id, judge.id, judge.fullName, judge.id, judge.fullName,
+        "Hakem AI analizini başlatarak dosyayı üstlendi.", timestamp,
+      ),
+    ]);
+    await recordWorkflowEvent({
+      subjectType: "application", subjectId: id, event: "application_assigned", actor: judge,
+      detail: `${judge.fullName} · AI analizini başlatarak dosyayı üstlendi`,
+    });
+  }
   await recordWorkflowEvent({
     subjectType: "application",
     subjectId: id,
@@ -1237,9 +1324,13 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
      LEFT JOIN competitions c ON c.competition_key = a.competition_key
      WHERE a.id = ?`,
   ).bind(id).first<{ status: string; evaluation_json: string | null; assigned_judge_id: string | null; decisions_locked: number | null }>();
-  if (!before) throw new Error("Başvuru bulunamadı.");
-  if (judge.roleCode === "02" && before.assigned_judge_id !== judge.id) throw new Error("Bu başvuru size atanmadı.");
-  if (before.decisions_locked === 1) throw new Error("Bu yarışmanın hakem kararları donduruldu; değişiklik yapılamaz.");
+  if (!before) throw new ConflictError("Başvuru bulunamadı.");
+  // Analizi başlatan hakem dosyayı zaten üstlenmiştir; yalnızca BAŞKA bir hakeme
+  // atanmış dosyada karar verilmesi engellenir.
+  if (judge.roleCode === "02" && before.assigned_judge_id && before.assigned_judge_id !== judge.id) {
+    throw new ConflictError("Bu başvuru başka bir hakeme atanmış; kararı atanan hakem verir.");
+  }
+  if (before.decisions_locked === 1) throw new ConflictError("Bu yarışmanın hakem kararları donduruldu; değişiklik yapılamaz.");
   const evaluation = parseJson<ReportEvaluation>(before?.evaluation_json ?? null);
   await database.batch([database.prepare(
     `UPDATE competition_applications

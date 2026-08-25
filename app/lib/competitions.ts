@@ -187,13 +187,41 @@ export type CompetitionSearchResult = {
  * aranır; eşleşmeler "adın başı → kelime başı → içerik" sırasına göre döner.
  */
 export function searchCompetitions(query: string, limit = COMPETITION_RESULT_LIMIT): CompetitionSearchResult {
+  return rankCompetitions(SEARCH_INDEX, COMPETITIONS, query, limit);
+}
+
+/**
+ * Kayitli olmayan bir yarisma listesinde ayni arama.
+ *
+ * Yayimlanmis profillerin yarisma adi sartnameden cikarilir; kayitli havuzda
+ * bulunmayabilir. Yarismaci portali basvuruya acik yarismalari bu yolla arar ki
+ * "yayimlandi ama secilemiyor" durumu olusmasin.
+ */
+export function searchCompetitionList(
+  entries: CompetitionEntry[],
+  query: string,
+  limit = COMPETITION_RESULT_LIMIT,
+): CompetitionSearchResult {
+  const index = entries.map((entry) => {
+    const foldedName = fold(entry.name);
+    return { ...entry, foldedName, haystack: `${foldedName} ${fold(entry.field)}` };
+  });
+  return rankCompetitions(index, entries, query, limit);
+}
+
+function rankCompetitions(
+  index: IndexedCompetition[],
+  all: CompetitionEntry[],
+  query: string,
+  limit: number,
+): CompetitionSearchResult {
   const normalized = fold(query.trim());
   if (!normalized) {
-    return { items: COMPETITIONS.slice(0, limit), total: COMPETITIONS.length };
+    return { items: all.slice(0, limit), total: all.length };
   }
   const tokens = normalized.split(/\s+/).filter(Boolean);
   const ranked: Array<{ entry: CompetitionEntry; rank: number }> = [];
-  for (const indexed of SEARCH_INDEX) {
+  for (const indexed of index) {
     if (!tokens.every((token) => indexed.haystack.includes(token))) continue;
     const rank = indexed.foldedName.startsWith(normalized)
       ? 0

@@ -18,9 +18,14 @@ import type {
   ReportEvaluation,
 } from "../../lib/types";
 import { recordUsage } from "../../lib/usage-metrics";
+import { describeGeminiFailure, runGeneration } from "../../lib/gemini-generation";
 
 const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
 const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite";
+// Birincil ve yedek modelin aynı anda “high demand” (503) döndüğü dalgalarda
+// rapor analizinin komple düşmemesi için isteğe bağlı üçüncü kademe.
+const THIRD_MODEL = process.env.GEMINI_THIRD_MODEL || "";
+const REPORT_MODELS = [PRIMARY_MODEL, FALLBACK_MODEL, THIRD_MODEL].filter(Boolean);
 const PROMPT_VERSION = "report-v2";
 const MAX_REPORT_BYTES = 50 * 1024 * 1024;
 const MAX_INLINE_REPORT_BYTES = 18 * 1024 * 1024;
@@ -519,49 +524,27 @@ ${profile.templateProfile?.provided
     });
 
     const modelStarted = Date.now();
-    let payload: unknown = null;
-    let modelUsed = PRIMARY_MODEL;
-    let lastStatus = 502;
-    let lastDetail = "";
-    for (const model of [...new Set([PRIMARY_MODEL, FALLBACK_MODEL])]) {
-      modelUsed = model;
-      try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-          body,
-          signal: AbortSignal.timeout(150_000),
-        });
-        if (response.ok) { payload = await response.json(); break; }
-        // 401/403 kota değil kimlik sorunudur; mesajı ayırt edilebilir kalsın.
-        lastStatus = response.status === 429
-          ? 429
-          : response.status === 401 || response.status === 403
-            ? response.status
-            : 502;
-        const error = await response.json().catch(() => ({})) as { error?: { message?: string } };
-        lastDetail = error.error?.message || `HTTP ${response.status}`;
-        if (![429, 500, 502, 503, 504].includes(response.status)) break;
-      } catch {
-        lastStatus = 504;
-        lastDetail = "zaman aşımı";
-      }
-    }
+    // Şartname analiziyle AYNI dayanıklılık politikası: model listesi birden çok
+    // tur taranır, yanıt vermeyen model kısa süre soğumaya alınır ve hata nedeni
+    // ayrıştırılır. Önceki tek turluk döngü, birincil model 503 döndüğünde
+    // analizi “AI rapor analizi tamamlanamadı” ile komple düşürüyordu.
+    const generation = await runGeneration({
+      apiKey,
+      body,
+      models: REPORT_MODELS,
+      timeoutMs: 150_000,
+      startedAt,
+      label: "evaluate-report",
+    });
     const modelMs = Date.now() - modelStarted;
-    if (!payload) {
-      console.error("Katılımcı raporu AI analizi başarısız:", { status: lastStatus, detail: lastDetail });
-      recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true });
-      const upstreamAuthFailure = lastStatus === 401 || lastStatus === 403;
-      const message = lastStatus === 504
-        ? "AI modeli zaman sınırı içinde yanıt vermedi."
-        : lastStatus === 429
-          ? "AI servisinin geçici kullanım sınırına ulaşıldı. Yaklaşık bir dakika sonra yeniden deneyin."
-        : upstreamAuthFailure
-          ? "AI servisi anahtarı reddetti (kimlik doğrulama hatası). Bu bir kota sorunu değildir: GEMINI_API_KEY geçersiz, süresi dolmuş ya da Gemini API için yetkili değil."
-        : "AI rapor analizi tamamlanamadı. Lütfen yeniden deneyin.";
-      // Oturum katmanı 401'i "yeniden giriş yap" saydığı için 502 ile iletilir.
-      return Response.json({ error: message }, { status: upstreamAuthFailure ? 502 : lastStatus });
+    if (!generation.ok) {
+      console.error("Katılımcı raporu AI analizi başarısız:", { status: generation.status, detail: generation.detail });
+      recordUsage({ model: PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true });
+      const described = describeGeminiFailure(generation.status, generation.detail, "AI rapor analizi");
+      return Response.json({ error: described.message }, { status: described.httpStatus });
     }
+    const payload = generation.payload;
+    const modelUsed = generation.model;
 
     const rawText = extractGeminiText(payload);
     if (!rawText) return Response.json({ error: "AI modeli geçerli bir değerlendirme çıktısı döndürmedi." }, { status: 502 });

@@ -5,11 +5,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import DocumentLibraryModal from "./document-library-modal";
 import FileBadge from "./file-badge";
 import TemplatePreview from "./template-preview";
+import CompetitionSelect from "./competition-select";
 import TopbarSession from "./topbar-session";
 import { analyzeWithGemini } from "../lib/gemini-analyzer";
 import { criterionEffectOf as criterionEffect, deriveDecisionRules, maxRawScoreOf, scopeCriteriaToGroups } from "../lib/evaluation-summary";
 import { getPdfPageCount } from "../lib/pdf-reader";
-import { workflowApi } from "../lib/workflow-client";
+import { WorkflowApiError, workflowApi } from "../lib/workflow-client";
 import { SAMPLE_DOCUMENTS } from "../lib/sample-documents";
 import {
   clearDraftSnapshot,
@@ -96,10 +97,22 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/**
+ * Aktif/pasif artık Yarışma Yöneticisinin elle çevirdiği bir anahtar değildir.
+ * Kriter listesinde duran her madde değerlendirmede kullanılır; istenmeyen madde
+ * silinir. `active` yalnızca kapsam sınıfından deterministik olarak türetilir:
+ * PDF üzerinde denetlenemeyen (fiziksel, haricî, bilgi notu) maddeler rapor
+ * puanına girmez ama kaynak olarak profilde kalır.
+ */
+function isReportScoped(item: Criterion): boolean {
+  return ["report", "upload"].includes(item.applicability ?? "report");
+}
+
 function applyDecisionSafetyPolicy(item: Criterion): Criterion {
-  const reviewStatus = item.reviewStatus
-    ?? (!item.active && item.issue ? "needs_review" : item.active ? "ready" : "excluded");
-  return { ...item, reviewStatus };
+  const reviewStatus = item.reviewStatus === "excluded" || !item.reviewStatus
+    ? (item.issue ? "needs_review" : "ready")
+    : item.reviewStatus;
+  return { ...item, active: isReportScoped(item), reviewStatus };
 }
 
 function Field({
@@ -343,6 +356,7 @@ function UploadStep({
 
 function CriteriaReview({
   setup,
+  setSetup,
   file,
   documentUrl,
   result,
@@ -358,6 +372,7 @@ function CriteriaReview({
   approvalError,
 }: {
   setup: SetupData;
+  setSetup: (setup: SetupData) => void;
   file: File;
   documentUrl: string;
   result: AnalysisResult;
@@ -378,6 +393,7 @@ function CriteriaReview({
   const [reviewFilter, setReviewFilter] = useState<"all" | "needs_review">("all");
   const [reviewConfirmed, setReviewConfirmed] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [confirmingPublish, setConfirmingPublish] = useState(false);
 
   const selected = criteria.find((item) => item.id === selectedId) ?? criteria[0];
   const scopes = [...new Set(criteria.map((item) => item.scope || "Genel"))];
@@ -388,9 +404,9 @@ function CriteriaReview({
     const reviewMatch = reviewFilter === "all" || item.reviewStatus === "needs_review";
     return queryMatch && scopeMatch && reviewMatch;
   }).sort((left, right) => {
-    const rank = (item: Criterion) => item.reviewStatus === "needs_review" ? 3
-      : ["physical", "external", "informational"].includes(item.applicability || "report") ? 2
-        : item.active ? 0 : 1;
+    const rank = (item: Criterion) => item.reviewStatus === "needs_review" ? 2
+      : ["physical", "external", "informational"].includes(item.applicability || "report") ? 1
+        : 0;
     return rank(left) - rank(right);
   });
   const active = criteria.filter((item) => item.active);
@@ -415,6 +431,11 @@ function CriteriaReview({
   // resmî ölçeğini korur; kriter toplamı bu ölçekle uyuşmuyorsa profil onaylanmaz.
   const scopedCriteria = scopeCriteriaToGroups(criteria, groups, includedIds);
   const criterionTotal = maxRawScoreOf(scopedCriteria);
+  // Profile GERÇEKTEN denetlenebilir olarak girecek kriterler. Puanlama kapalıyken
+  // puan/ceza/baraj maddeleri kaynak olarak korunur ama rapor denetimine girmez;
+  // onay penceresi bu gerçek sayıyı gösterir, ekrandaki ham sayıyı değil.
+  const publishedActive = scopedCriteria.filter((item) => item.active
+    && (scoringEnabled || !["score", "penalty", "threshold"].includes(criterionEffect(item))));
   const groupTotal = included.reduce((sum, group) => sum + group.maxScore, 0);
   const officialTotal = scoringEnabled ? (groups.length ? groupTotal : (displayTotal ?? criterionTotal)) : 0;
   // Eski kayıtlarda veya görevli düzenlemesinden sonra toplam farklılaşırsa
@@ -424,7 +445,10 @@ function CriteriaReview({
     : null;
   // Şartname birden çok aşamayı topluyorsa yalnızca kapsama alınan gruplar puanlanır.
   const scopeNarrowed = groups.length > 1 && included.length > 0 && included.length < groups.length;
-  const canApprove = reviewConfirmed && pendingReview.length === 0 && active.length > 0
+  // Karar bekleyen bulgular artık yayımı kilitlemez: liste analizden geldiği gibi
+  // durur, yönetici istemediğini siler ve yayım öncesi ikinci doğrulama penceresinde
+  // kararını teyit eder.
+  const canApprove = reviewConfirmed && criteria.length > 0 && Boolean(setup.competition.trim())
     && (!scoringEnabled || groups.length === 0 || included.length > 0);
 
   function toggleGroup(groupId: string, on: boolean) {
@@ -453,21 +477,16 @@ function CriteriaReview({
     setReviewConfirmed(false);
   }
 
-  function resolvePendingCriterion(decision: "confirm" | "exclude") {
+  function confirmPendingCriterion() {
     if (!selected) return;
     update({
-      active: decision === "confirm",
-      reviewStatus: decision === "confirm" ? "confirmed" : "excluded",
-      confidence: decision === "confirm" ? "high" : selected.confidence,
+      reviewStatus: "confirmed",
+      confidence: "high",
       evidence: selected.evidence ? {
-        status: decision === "confirm" ? "verified" : selected.evidence.status,
-        reason: decision === "confirm"
-          ? "Görevli PDF sayfasını ve alıntıyı doğrudan kontrol ederek doğruladı."
-          : "Görevli bu bulgunun uygulanabilir bir değerlendirme kriteri olmadığına karar verdi.",
+        status: "verified",
+        reason: "Görevli PDF sayfasını ve alıntıyı doğrudan kontrol ederek doğruladı.",
       } : undefined,
-      issue: decision === "confirm"
-        ? "Görevli kaynak sayfayı kontrol ederek bu kriteri onayladı."
-        : "Görevli bu bulgunun değerlendirme kriteri olmadığına karar verdi.",
+      issue: "Görevli kaynak sayfayı kontrol ederek bu kriteri onayladı.",
     });
     setReviewConfirmed(false);
   }
@@ -503,6 +522,12 @@ function CriteriaReview({
     requestAnimationFrame(() => document.getElementById("criterion-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
 
+  /** Silme onayı denetçinin altındadır; düğmeye basınca oraya kaydırılır. */
+  function requestDelete() {
+    setConfirmingDelete(true);
+    requestAnimationFrame(() => document.getElementById("criterion-delete")?.scrollIntoView({ behavior: "smooth", block: "center" }));
+  }
+
   function removeSelectedCriterion() {
     if (!selected) return;
     const remaining = criteria.filter((item) => item.id !== selected.id);
@@ -524,13 +549,62 @@ function CriteriaReview({
       </div>
 
       <div className="analysis-summary" aria-label="Analiz özeti">
-        <div><strong>{active.length}</strong><span>aktif kural</span></div>
+        <div><strong>{criteria.length}</strong><span>çıkarılan kriter</span></div>
+        <div><strong>{active.length}</strong><span>PDF üzerinde denetlenir</span></div>
         <div><strong>{scoreGroupCount}</strong><span>puan grubu</span></div>
         <div><strong>{deterministicCount}</strong><span>kesin kontrol</span></div>
         <div><strong>{humanReviewCount}</strong><span>görevli onayı</span></div>
         <div className="summary-ok"><strong>{result.provider === "api" ? "AI" : "Demo"}</strong><span>çıkarım kaynağı</span></div>
         <div><strong>{displayTotal ?? "—"}</strong><span>PDF toplam puanı</span></div>
       </div>
+
+      <section className="publish-target" aria-labelledby="publish-target-title">
+        <div className="criteria-section-heading">
+          <div>
+            <span className="section-kicker">Yayım hedefi</span>
+            <h2 id="publish-target-title">Bu kriterler hangi yarışma için yayımlanacak?</h2>
+            <p>
+              Yarışma adı şartnameden okundu. Yanlış ya da eksikse düzeltin: yarışmacılar
+              başvuru ekranında yarışmayı <strong>tam olarak bu adla</strong> görür ve seçer.
+            </p>
+          </div>
+        </div>
+        <div className="form-grid two-col publish-target-grid">
+          <Field label="Yarışma adı" hint="Kayıtlı yarışmalardan seçebilir veya kendiniz yazabilirsiniz.">
+            <CompetitionSelect
+              value={setup.competition}
+              onChange={(competition) => { setSetup({ ...setup, competition }); setReviewConfirmed(false); }}
+              onPick={(competition) => { setSetup({ ...setup, competition }); setReviewConfirmed(false); }}
+            />
+          </Field>
+          <Field label="Yıl" hint="Aynı yarışmanın farklı yılları birbirine karışmaz.">
+            <input
+              value={setup.year}
+              maxLength={12}
+              onChange={(event) => { setSetup({ ...setup, year: event.target.value }); setReviewConfirmed(false); }}
+            />
+          </Field>
+          <Field label="Aşama" hint="Ör. “Ön Tasarım Raporu”, “Kritik Tasarım Raporu”.">
+            <input
+              value={setup.stage}
+              maxLength={120}
+              onChange={(event) => { setSetup({ ...setup, stage: event.target.value }); setReviewConfirmed(false); }}
+            />
+          </Field>
+          <Field label="Rapor türü">
+            <input
+              value={setup.reportType}
+              maxLength={120}
+              onChange={(event) => { setSetup({ ...setup, reportType: event.target.value }); setReviewConfirmed(false); }}
+            />
+          </Field>
+        </div>
+        {!setup.competition.trim() ? (
+          <p className="score-audit-note warning">
+            Yarışma adı boş. Ad girilmeden profil yayımlanamaz; yarışmacı hiçbir şey seçemez.
+          </p>
+        ) : null}
+      </section>
 
       <section className="fixed-prechecks" aria-labelledby="fixed-prechecks-title">
         <div className="criteria-section-heading">
@@ -728,7 +802,7 @@ function CriteriaReview({
                 type="button"
                 role="option"
                 aria-selected={item.id === selected?.id}
-                className={`criterion-row ${item.id === selected?.id ? "selected" : ""} ${!item.active ? "inactive" : ""}`}
+                className={`criterion-row ${item.id === selected?.id ? "selected" : ""}`}
                 onClick={() => {
                   setSelectedId(item.id);
                   setConfirmingDelete(false);
@@ -738,7 +812,7 @@ function CriteriaReview({
                 <span className={`type-mark ${item.type}`} aria-hidden="true" />
                 <span className="criterion-main">
                   <strong>{item.name}</strong>
-                  <small>{item.scope || "Genel"} · {EFFECT_LABELS[criterionEffect(item)]} · {item.sourcePage ? `Sayfa ${item.sourcePage}` : "Kaynak sayfa yok"}{item.evidence ? ` · ${EVIDENCE_LABELS[item.evidence.status]}` : ""}</small>
+                  <small>{item.scope || "Genel"} · {EFFECT_LABELS[criterionEffect(item)]} · {item.sourcePage ? `Sayfa ${item.sourcePage}` : "Kaynak sayfa yok"}{item.evidence ? ` · ${EVIDENCE_LABELS[item.evidence.status]}` : ""}{isReportScoped(item) ? "" : ` · ${APPLICABILITY_LABELS[item.applicability || "report"]}`}</small>
                 </span>
                 <span className={`criterion-value ${criterionEffect(item)}`}>
                   {criterionEffect(item) === "score" && item.maxScore !== null
@@ -771,23 +845,9 @@ function CriteriaReview({
                 <span className="origin-label">{selected.origin === "document" ? "AI tarafından belgeden çıkarıldı" : "Yönetici tarafından eklendi"}</span>
                 {selected.evidence ? <span className="origin-label">{EVIDENCE_LABELS[selected.evidence.status]}</span> : null}
               </div>
-              <label className="active-toggle">
-                <input
-                  type="checkbox"
-                  checked={selected.active}
-                  onChange={(event) => {
-                    update({
-                      active: event.target.checked,
-                      reviewStatus: event.target.checked
-                        ? "confirmed"
-                        : selected.reviewStatus === "needs_review" ? "needs_review" : "excluded",
-                    });
-                    setReviewConfirmed(false);
-                  }}
-                />
-                <span />
-                {selected.active ? "Aktif" : "Pasif"}
-              </label>
+              <button type="button" className="danger-button ghost inspector-delete" onClick={requestDelete}>
+                Kriteri sil
+              </button>
             </div>
 
             {selected.issue ? (
@@ -804,8 +864,8 @@ function CriteriaReview({
                   <p>PDF sayfasında koşulu, varsa sayısal değeri ve ihlal sonucunu birlikte kontrol edin. Tamamı destekleniyorsa kriteri etkinleştirin.</p>
                 </div>
                 <div>
-                  <button type="button" className="primary-button" onClick={() => resolvePendingCriterion("confirm")}>Kaynağı doğruladım, kriteri etkinleştir</button>
-                  <button type="button" className="secondary-button" onClick={() => resolvePendingCriterion("exclude")}>Kriter değil, dışarıda bırak</button>
+                  <button type="button" className="primary-button" onClick={confirmPendingCriterion}>Kaynağı doğruladım</button>
+                  <button type="button" className="secondary-button" onClick={requestDelete}>Kriter değil, listeden sil</button>
                 </div>
               </div>
             ) : null}
@@ -832,7 +892,12 @@ function CriteriaReview({
                 <Field label="Kanıtın inceleneceği yer">
                   <select
                     value={selected.applicability || "report"}
-                    onChange={(event) => { update({ applicability: event.target.value as CriterionApplicability }); setReviewConfirmed(false); }}
+                    onChange={(event) => {
+                      // Kapsam sınıfı değişince kriterin PDF puanına girip girmediği de değişir.
+                      const applicability = event.target.value as CriterionApplicability;
+                      update({ applicability, active: isReportScoped({ ...selected, applicability }) });
+                      setReviewConfirmed(false);
+                    }}
                   >
                     {(Object.keys(APPLICABILITY_LABELS) as CriterionApplicability[]).map((key) => (
                       <option key={key} value={key}>{APPLICABILITY_LABELS[key]}</option>
@@ -915,49 +980,94 @@ function CriteriaReview({
               </div>
             </div>
 
-            {selected.id.startsWith("manual-") ? (
-              <div className="inspector-section delete-section">
-                <span className="inspector-label">Kriteri kaldır</span>
-                {confirmingDelete ? (
-                  <div className="delete-confirm-row" role="alertdialog" aria-label="Kriter silme onayı">
-                    <p><strong>“{selected.name}”</strong> kalıcı olarak silinecek. Emin misiniz?</p>
-                    <div>
-                      <button type="button" className="danger-button" onClick={removeSelectedCriterion}>Evet, kriteri sil</button>
-                      <button type="button" className="text-button" onClick={() => setConfirmingDelete(false)}>Vazgeç</button>
-                    </div>
+            <div className="inspector-section delete-section" id="criterion-delete">
+              <span className="inspector-label">Kriteri kaldır</span>
+              {confirmingDelete ? (
+                <div className="delete-confirm-row" role="alertdialog" aria-label="Kriter silme onayı">
+                  <p><strong>“{selected.name}”</strong> bu profilden kalıcı olarak silinecek. Emin misiniz?</p>
+                  <div>
+                    <button type="button" className="danger-button" onClick={removeSelectedCriterion}>Evet, kriteri sil</button>
+                    <button type="button" className="text-button" onClick={() => setConfirmingDelete(false)}>Vazgeç</button>
                   </div>
-                ) : (
-                  <div className="delete-confirm-row">
-                    <p>Yanlışlıkla veya fazladan eklenen kriterler buradan kaldırılabilir. Belgeden çıkarılan kriterler silinmez; pasifleştirilir.</p>
-                    <div>
-                      <button type="button" className="danger-button ghost" onClick={() => setConfirmingDelete(true)}>Kriteri sil</button>
-                    </div>
+                </div>
+              ) : (
+                <div className="delete-confirm-row">
+                  <p>Şartnameden çıkarılan analizler listede olduğu gibi durur. Yarışmaya uygulanmasını istemediğiniz bir kriter varsa onu buradan silin.</p>
+                  <div>
+                    <button type="button" className="danger-button ghost" onClick={requestDelete}>Kriteri sil</button>
                   </div>
-                )}
-              </div>
-            ) : null}
+                </div>
+              )}
+            </div>
           </div>
         ) : null}
       </div>
+
+      {approvalError ? (
+        <div className="inline-error publish-error" role="alert">
+          <strong>Kriterler paylaşılamadı.</strong>
+          <span>{approvalError}</span>
+        </div>
+      ) : null}
 
       <div className="approval-bar">
         <button type="button" className="icon-back" onClick={onBack} aria-label="Kaynak belgeye dön · taslak korunur" title="Kaynak belgeye dön · taslak korunur"><span aria-hidden="true">←</span></button>
         <div className="approval-check">
           <label>
             <input type="checkbox" checked={reviewConfirmed} onChange={(event) => setReviewConfirmed(event.target.checked)} />
-            <span>Aktif kriterleri, kaynaklarını ve puan planını inceledim; karar bekleyen bulgu kalmadı.</span>
+            <span>Kriter listesini, kaynaklarını ve puan planını inceledim; istemediğim kriterleri sildim.</span>
           </label>
           {!canApprove ? (
             <small>
               {scoringEnabled && groups.length > 0 && included.length === 0 && "En az bir puan grubunu değerlendirmeye dahil edin. "}
-              {pendingReview.length > 0 && `${pendingReview.length} kanıt bulgusunu onaylayın veya dışarıda bırakın. `}
+              {criteria.length === 0 && "Listede en az bir kriter kalmalı. "}
+              {!setup.competition.trim() && "Yayım hedefi bölümünde yarışma adını girin. "}
               {!reviewConfirmed && "Görevli kontrolünü onaylayın."}
             </small>
           ) : <small className="ready-note">Profil onaya hazır.</small>}
-          {approvalError ? <small className="approval-error" role="alert">{approvalError}</small> : null}
         </div>
-        <button type="button" className="primary-button" disabled={!canApprove} onClick={onApprove}>Kriter profilini yayımla <span>→</span></button>
+        <button type="button" className="primary-button" disabled={!canApprove} onClick={() => setConfirmingPublish(true)}>Başvuruyu onayla <span>→</span></button>
       </div>
+
+      {confirmingPublish ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setConfirmingPublish(false)}>
+          <div
+            className="modal-panel confirm-panel"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="publish-confirm-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="confirm-body">
+              <h2 id="publish-confirm-title">Şartname kriterleri paylaşılsın mı?</h2>
+              <p>
+                Onayladığınızda <strong>{criteria.length} kriter</strong> bu yarışmanın resmî değerlendirme
+                profili olarak yayımlanır; yarışma başvuruya açılır ve hakemler AI analizini bu kriterlerle
+                çalıştırır.
+              </p>
+              <ul className="confirm-facts">
+                <li><span>Yarışma</span><strong>{setup.competition || "Belirtilmemiş"}</strong></li>
+                <li className={publishedActive.length ? "" : "warn"}>
+                  <span>PDF üzerinde denetlenecek kriter</span><strong>{publishedActive.length}</strong>
+                </li>
+                <li><span>Puanlama</span><strong>{scoringEnabled ? `${officialTotal} puanlık resmî ölçek` : "Bu aşamada puanlama kapalı"}</strong></li>
+                {pendingReview.length ? <li className="warn"><span>Kaynağı kesinleşmemiş kriter</span><strong>{pendingReview.length}</strong></li> : null}
+              </ul>
+              {publishedActive.length === 0 ? (
+                <p className="confirm-warning">
+                  Uyarı: bu profilde rapor üzerinde denetlenecek hiçbir kriter kalmıyor. AI analizi yalnızca
+                  sabit ön kontrolleri çalıştırır. Puanlamayı açın ya da rapor kapsamlı kriter bırakın.
+                </p>
+              ) : null}
+              <p className="confirm-question">Kriterleri paylaşmak istediğinizden emin misiniz?</p>
+            </div>
+            <div className="confirm-actions">
+              <button type="button" className="text-button" onClick={() => setConfirmingPublish(false)}>Hayır, geri dön</button>
+              <button type="button" className="primary-button" onClick={() => { setConfirmingPublish(false); onApprove(); }}>Evet, kriterleri paylaş</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -1281,7 +1391,18 @@ export default function CriteriaApp() {
       setProfile(published.profile.profile);
       setStep(3);
     } catch (caught) {
-      setApprovalError(caught instanceof Error ? caught.message : "Profil yayımlanamadı. Bağlantıyı kontrol edip yeniden deneyin.");
+      // Ne olduğu net söylenir: sunucunun gerekçesi, referans kodu ve ağ hatası ayrı ayrı.
+      if (caught instanceof WorkflowApiError) {
+        setApprovalError(caught.reference ? `${caught.message} · Sunucu kaydı: ${caught.reference}` : caught.message);
+      } else if (caught instanceof TypeError) {
+        setApprovalError("Sunucuya ulaşılamadı. İnternet bağlantınızı kontrol edip yeniden deneyin.");
+      } else {
+        setApprovalError(caught instanceof Error && caught.message
+          ? caught.message
+          : "Profil yayımlanamadı; sunucu gerekçe bildirmedi.");
+      }
+      // Kullanıcı hatayı gördüğü yere geri döner.
+      requestAnimationFrame(() => document.querySelector(".publish-error")?.scrollIntoView({ behavior: "smooth", block: "center" }));
     }
   }
 
@@ -1350,6 +1471,7 @@ export default function CriteriaApp() {
         {step === 2 && result && file ? (
           <CriteriaReview
             setup={setup}
+            setSetup={setSetup}
             file={file}
             documentUrl={documentUrl}
             result={result}

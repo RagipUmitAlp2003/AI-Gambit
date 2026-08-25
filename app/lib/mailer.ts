@@ -91,6 +91,59 @@ export function buildRevokeMail(input: { fullName: string; email: string; roleCo
   };
 }
 
+export type ApplicationOutcomeMailInput = {
+  fullName: string;
+  email: string;
+  teamName: string;
+  competitionName: string;
+  outcome: "accepted" | "rejected" | "revision_required";
+  /** Hakemin (gerekirse AI taslağından düzenlediği) gerekçesi. */
+  reason: string;
+  portalUrl: string;
+};
+
+const OUTCOME_HEADLINE: Record<ApplicationOutcomeMailInput["outcome"], string> = {
+  accepted: "Başvurunuz kabul edildi",
+  rejected: "Başvurunuz reddedildi",
+  revision_required: "Başvurunuzda düzeltme isteniyor",
+};
+
+/**
+ * Hakem nihai kararı verdiğinde yarışmacıya giden bildirim.
+ * Ret kararında gerekçe gövdenin ana parçasıdır: yarışmacı neden reddedildiğini
+ * hem bu mesajda hem de portaldaki başvuru kaydında görür.
+ */
+export function buildApplicationOutcomeMail(input: ApplicationOutcomeMailInput): MailEnvelope {
+  const headline = OUTCOME_HEADLINE[input.outcome];
+  const reason = input.reason.trim();
+  const body = ([
+    `Sayın ${input.fullName},`,
+    "",
+    `${input.competitionName} yarışmasına "${input.teamName}" takımıyla yaptığınız başvuru hakem tarafından değerlendirildi.`,
+    "",
+    `Sonuç: ${headline}.`,
+    reason ? "" : null,
+    reason ? (input.outcome === "rejected" ? "Ret gerekçesi:" : "Hakem açıklaması:") : null,
+    reason || null,
+    "",
+    `Başvurunuzun güncel durumunu sistemden de görebilirsiniz: ${input.portalUrl}`,
+    input.outcome === "revision_required"
+      ? "Düzeltilmiş raporunuzu aynı başvuruya yeni sürüm olarak yükleyebilirsiniz; eski sürümünüz silinmez."
+      : null,
+    "",
+    "AI-Gambit · Değerlendirme Sistemi",
+  ] as Array<string | null>)
+    .filter((line): line is string => line !== null)
+    .join("\n");
+
+  return {
+    to: input.email,
+    subject: `${input.competitionName} · ${headline}`,
+    body,
+    storedBody: body,
+  };
+}
+
 export function mailProviderReady(env: Cloudflare.Env): boolean {
   return Boolean(env.RESEND_API_KEY && env.MAIL_FROM);
 }

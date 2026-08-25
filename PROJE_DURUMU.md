@@ -86,6 +86,118 @@ Ekrandaki 1.8 MB'lık Çelikkubbe şartnamesi gerçek `/api/analyze` ucundan iki
 
 ---
 
+## 1b. Bugün yapılan iş — kriter yayımı, başvuru ve hakem kararı akışı
+
+| Değişiklik | Dosya | Ne yapıldı |
+|---|---|---|
+| Kriter listesinden aktif/pasif anahtarı kaldırıldı | `app/components/criteria-app.tsx` | Analiz çıktısı listede olduğu gibi durur. `active` artık elle çevrilen bir anahtar değil, kapsam sınıfından (`applicability`) türeyen deterministik bir alandır. İstenmeyen kriter **silinir**; silme her kriter için açık (eskiden yalnızca elle eklenenler silinebiliyordu). Karar bekleyen bulgular yayımı kilitlemez |
+| Yayım öncesi ikinci doğrulama | `app/components/criteria-app.tsx` | “Başvuruyu onayla” → kriter sayısı, kapsam ve puan ölçeğini özetleyen “emin misiniz?” penceresi → “Evet, kriterleri paylaş” |
+| Dosya boyutu gösterimi | `app/components/participant-portal.tsx` | `toFixed(1)` her küçük dosyayı `0.0 / 0.1 MB` gösteriyordu. 1 MB altı KB, üstü iki ondalıklı MB |
+| “Başvuruyu gönder” sessiz kalıyordu | `app/components/participant-portal.tsx` | Düğme eksik alan varken `disabled` olduğu için tıklama hiçbir şey yapmıyordu. Artık düğme her zaman tıklanabilir; eksik alanlar ad ad yazılır, PDF biçimi/boyutu istemcide de kontrol edilir |
+| Başvuru hakem paneline düşüyor | `app/lib/workflow-db.ts` | Hakem (02) artık kendisine atanmış başvuruların yanında **atanmamış** başvuruları da görür. `markApplicationAnalyzing` `submitted` durumunu kabul eder ve analizi başlatan hakem dosyayı atomik olarak üstlenir (`assigned_judge_id IS NULL` koşuluyla; iki hakem aynı anda başlatırsa yalnızca biri geçer) |
+| AI uygunluk kararı | `app/lib/compliance-verdict.ts` (yeni) | Yayımlanmış profildeki zorunlu koşulları (required · gate · threshold · eleme) rapor bulgularıyla karşılaştırır; `compliant / not_compliant / needs_human` verdiği gibi Hakemin doğrudan kullanabileceği **ret gerekçesi taslağı** üretir. Karar değil, gerekçeli öneridir |
+| Hakem ekranında onay/ret | `app/components/evaluation-app.tsx` | Uygunluk paneli, karşılanmayan zorunlu koşulları kaynak sayfasıyla listeler; “Başvuruyu onayla” / “Başvuruyu reddet · AI gerekçesiyle” düğmeleri sonucu ve gerekçeyi doldurur. Hakem metni serbestçe değiştirebilir. Reddedilen başvuru puanlanmaz; gerekçesiz ret sunucuda 400 ile reddedilir |
+| Ret sebebi yarışmacıya | `app/lib/mailer.ts`, `app/api/applications/[id]/route.ts`, `app/lib/workflow-db.ts` | Karar tamamlanınca yarışmacıya e-posta gönderilir (sağlayıcı yoksa giden kutusu). Ret ve revizyon kararları sonuçlar yayımlanmayı beklemeden “Başvurularım” ekranında gerekçesiyle görünür; **kabul** kararı eskisi gibi yayına kadar kapalıdır. Mail gönderilemezse karar geri alınmaz, Hakeme uyarı düşer |
+
+### Kök neden — "İşlem tamamlanamadı" (kriter yayımı)
+
+`criteria` tablosunda `id` **genel** bir birincil anahtar (`migrations/0005_final_workflow.sql:28`),
+analiz motoru ise her belgede aynı `criterion-1..N` kimliklerini üretiyor. Yayımdan önceki
+`DELETE FROM criteria WHERE profile_id = ?` yalnızca o profilin satırlarını sildiği için
+**ikinci** profil yayımı her seferinde `UNIQUE constraint failed: criteria.id` ile düşüyor,
+`handleError` bunu genel 500 mesajına çeviriyordu.
+
+- **Düzeltme:** satır kimliği artık `${profileId}:${position}:${criterionId}`. Kriterin kendi
+  kimliği `criterion_json` içinde değişmeden korunur; bulgu eşleştirmesi orayı okur ve
+  `criteria` tablosunu hiçbir sorgu okumaz (yalnızca denormalize indeks).
+- **Regresyon testi:** `tools/regression-tests.mjs` — iki farklı profilin 74'er kriteri ve aynı
+  profilde tekrarlanan kimlik için çakışma olmadığını doğrular. Düzeltme geri alınınca test düşüyor.
+- **Hata mesajları:** `handleError` artık her beklenmeyen hataya bir referans kodu üretir
+  (günlükteki satırla eşleşir) ve üretim dışı ortamda nedeni okunur Türkçeye çevirir
+  (benzersizlik / NOT NULL / yabancı anahtar / şema / D1). Üretimde yalnızca referans kodu gider.
+  İstemci tarafında `responseJson` gerekçesiz yanıtı HTTP durumuna göre cümleye çevirir;
+  Kriter Atölyesi yayım hatasını onay çubuğunun üstünde kırmızı bir blokta gösterir.
+
+### Kök neden — "Başvuruyu gönder" sessizce başarısız
+
+Düğme isteği gönderiyordu; sunucu reddediyordu ve reddin gerekçesi **sayfanın en
+üstündeki** şeritte basılıyordu. Uzun formun dibindeki kullanıcı bunu hiç görmüyor,
+"hiçbir şey olmuyor" olarak yaşıyordu. Reddin başlıca sebebi: seçilen yarışma
+başvuruya açık değil (`competitions.status != 'open'` ya da yayımlanmış profil yok) —
+liste 40 yarışmanın tamamını sunduğu için kapalı bir yarışma seçilebiliyordu.
+
+- **Seçim listesi daraltıldı:** `GET /api/applications` artık `openCompetitions`
+  döndürüyor (`listOpenCompetitionNames`); `CompetitionSelect` aldığı `allowed`
+  listesiyle yalnızca başvuruya açık yarışmaları gösteriyor. Hiç açık yarışma yoksa
+  bunu açıkça yazıyor. Sunucudaki `competitionAcceptsApplications` kontrolü yerinde —
+  bu yalnızca kullanıcıyı çıkmaz bir seçimden koruyor.
+- **Hata artık görünür:** gönderme hatası düğmenin hemen altında kırmızı blokta
+  gösteriliyor ve oraya kaydırılıyor; sunucunun gerekçesi, referans kodu ve ağ
+  kopması ayrı ayrı yazılıyor. Sayfa üstündeki şerit yükleme hataları için kaldı.
+- **409 mesajı ayrıştırıldı:** "açık değil VEYA profil yok" ikilemi yerine gerçek
+  sebep yazılıyor (kriter yayımlanmadı / profil yok / yarışma durumu "X").
+- **R2 bağlaması yoksa:** `ReportStorageUnavailableError` artık genel 500'e düşmüyor;
+  503 ve "dosya deposu (R2 REPORTS bağlaması) tanımlı değil" mesajı dönüyor.
+- **Yükleme sağlamlaştırıldı:** `reportBucket().put(key, file.stream())` yerine
+  `File` (Blob) doğrudan veriliyor; ReadableStream'de R2 içerik uzunluğunu bilemediği
+  için yükleme sessizce düşebiliyordu.
+- **Dosya boyutu:** 17 KB gibi küçük dosyalar `0.0 MB` yerine gerçek boyutuyla yazılıyor.
+
+### Kök neden — "yayında" ama yarışmacı yarışmayı seçemiyor
+
+Yayımlanan profilin yarışma adı **şartnameden AI ile çıkarılır** (ör. "TEKNOFEST
+Havacılık, Uzay ve Teknoloji Festivali"). Hem yarışmacının seçim listesi hem de
+`POST /api/applications` doğrulaması ise koddaki **sabit 72 kayıtlık `COMPETITIONS`
+havuzuna** bağlıydı. Çıkarılan ad havuzda yoksa yarışma listede hiç görünmüyor,
+elle yazılsa bile "Listeden geçerli bir yarışma seçin." ile reddediliyordu — yani
+yayımlanan profil hiçbir zaman başvuru alamıyordu.
+
+- **Yetkili kaynak değişti:** yarışma adının otoritesi artık yayımlanmış profildir.
+  `listOpenCompetitions()` başvuruya açık yarışmaları (ad + kategori etiketi) döndürür;
+  `POST` yalnızca `competitionAcceptsApplications` kontrolüne bakar, sabit havuz şartı kalktı.
+- **Seçici genelleştirildi:** `searchCompetitionList(entries, query)` ile arama artık
+  verilen liste üzerinde çalışıyor; `CompetitionSelect` `options` aldığında kayıtlı
+  havuzu değil o listeyi arıyor. Kayıtlı havuzda olmayan bir yarışma da seçilebiliyor.
+- **Yayım hedefi düzenlenebilir oldu:** Kriter Atölyesi'nin inceleme adımına
+  "Bu kriterler hangi yarışma için yayımlanacak?" bölümü eklendi (yarışma adı, yıl,
+  aşama, rapor türü). AI yanlış okuduysa yönetici yayımdan önce düzeltir; yarışma adı
+  boşken profil yayımlanamaz.
+- **Regresyon testi:** kayıtlı havuzda bulunmayan açık bir yarışmanın aramada
+  bulunduğu doğrulanıyor.
+
+Bilinen sınır: yönetici aynı şartnameyi düzeltilmiş bir yarışma adıyla yeniden
+yayımlarsa yeni bir `competition_key` üretilir ve eski kayıt "başvuruya açık" kalır.
+Eski kaydı kapatmak Değerlendirme Yöneticisi'nin aşama yönetimi işidir (`/api/operations`).
+
+### Kök neden — Hakem "AI analizini başlat" dediğinde analiz düşüyor
+
+`/api/analyze` 25 Ağustos'ta çok turlu yeniden deneme motoruna geçirilmişti;
+`/api/evaluate-report` ise **eski ince döngüde** kalmıştı: iki model, her birine bir
+deneme, bekleme yok, soğutma yok. `gemini-3.7-flash` ağır PDF çağrılarında 503
+döndüğünde (bkz. B1) iki deneme de tükeniyor ve kullanıcı içi boş
+"AI rapor analizi tamamlanamadı. Lütfen yeniden deneyin." mesajını alıyordu — 503
+o mesaj listesinde hiç yoktu.
+
+- **Ortak motor:** `app/lib/gemini-generation.ts` (yeni). Model sweep'leri, model
+  soğutma kayıt defteri, yeniden deneme bütçesi ve hata taksonomisi tek yerde.
+  `/api/evaluate-report` bu motora geçti; `/api/analyze` da aynı **paylaşılan** soğutma
+  defterini kullanıyor, böylece bir ucun "bu model şu an 503" bilgisi diğerinde de geçerli.
+- **Hata nedeni söyleniyor:** 503 → "AI modeli şu anda yoğun ve yedek modeller de
+  yanıt vermedi"; tükenmiş bakiye hız sınırından ayrıldı; sınıflandırılamayan hatada
+  sunucunun bildirdiği neden mesaja yazılıyor. İçi boş "tamamlanamadı" cümlesi kalktı.
+- **Hakem çıkmaza düşmüyor:** geçici model yokluğu (429/503/504) artık istemciye 503
+  ile iletiliyor. `report-evaluator` bunu "motor şu an yok" olarak okuyup **deterministik
+  ön kontrollerle** (dosya kapısı, dil, şablon, başlık, benzerlik) sonucu üretiyor ve
+  gerçek nedeni uyarı olarak gösteriyor. Hakem boş ekranla kalmıyor.
+- **Canlı doğrulama:** `runGeneration` gerçek Gemini API'sine 1.8 MB'lık PDF ile
+  çağrıldı — 11.7 sn'de `gemini-3.7-flash` yanıtladı. `npm run check:gemini` de
+  her iki modeli çalışır bildiriyor.
+- **Regresyon testi:** hata taksonomisi (503 → geçici + 503, bakiye ≠ hız sınırı,
+  401 → 502, sınıflandırılamayan hatada nedenin mesaja girmesi) doğrulanıyor.
+
+Ölçüm notu: bu akış tip kontrolü, lint, regresyon testi ve üretim derlemesinden
+geçti. Uçtan uca canlı doğrulama D1 + R2 bağlı bir ortam gerektirir (bkz. E3).
+
 ## 2. Doğrulanmış güncel durum
 
 | Kontrol | Komut | Sonuç |
@@ -121,7 +233,7 @@ Sıra önem derecesine göre. "Dosya" sütunu işe nereden başlanacağını gö
 
 | # | İş | Bugünkü durum | Yapılması gereken |
 |---|---|---|---|
-| **B1** | Birincil model ölü | `gemini-3.7-flash` her ağır çağrıda 503; **bütün gerçek işi yedek model yapıyor** | `.env.local`'de `GEMINI_MODEL` doğrulanmış çalışan bir modele alınmalı. Bugün 200 dönenler: `gemini-3.6-flash`, `gemini-flash-latest`, `gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`. Kalite kararı ekibin |
+| **B1** | Birincil model dalgalı | `gemini-3.7-flash` 26.08 ölçümünde 1.8 MB'lık PDF'i 11.7 sn'de yanıtladı; ağır çağrılarda aralıklı 503 dönmeye devam ediyor. Artık analizi düşürmüyor (çok turlu yeniden deneme + soğutma) | `.env.local`'de `GEMINI_MODEL` doğrulanmış çalışan bir modele alınmalı. Bugün 200 dönenler: `gemini-3.6-flash`, `gemini-flash-latest`, `gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`. Kalite kararı ekibin |
 | **B2** | Faturalama bakiyesi | Ön ödemeli kredi aralıklı tükeniyor | ai.dev/projects üzerinden bakiye ve uyarı eşiği ayarlanmalı. Kod artık bu durumu doğru mesajla bildiriyor ama çözemez |
 | **B3** | Analiz süresi | 185–294 s (25 sayfalık belge) | **Üretim riski:** Cloudflare Workers istek süre sınırı bu değerlerin altında olabilir; dağıtımdan önce ölçülmeli. Çözüm yönü: analizi arka plan işine alıp istemciye iş kimliği döndürmek |
 | **B4** | Çağrı bazında token dökümü | Toplam token, API çağrısı ve belge taşıma sayısı ölçülüyor; birincil tur ile denetim turunun ayrı harcaması **raporlanmıyor** | `AnalysisDiagnostics` içine çağrı bazlı döküm; denetim turunun gerçek maliyetini görmeden `EVIDENCE_VERIFICATION` kararı verilemiyor |
@@ -141,7 +253,7 @@ Sıra önem derecesine göre. "Dosya" sütunu işe nereden başlanacağını gö
 |---|---|---|---|
 | **D1** | Uygulama ikonu | `public/favicon.svg` hâlâ "Kriter Atölyesi" kimliğinde; sol rayda `KA` rozeti | AI-Gambit kimliğine uygun favicon, PNG/apple-touch/manifest |
 | **D2** | Değerlendirme kılavuzu ekranı | Kriter, açıklama, puan, azami, baraj, ceza ve geçiş koşulu ekranda **dağınık** | Tek tabloda, tek bakışta okunabilir bilgi hiyerarşisi |
-| **D3** | Kriter silme | İki adımlı onayla silinebiliyor ama yalnızca müfettiş panelinden | Liste satırına çöp kutusu ikonu |
+| ~~**D3**~~ | ~~Kriter silme~~ | **Tamamlandı (26.08).** Her kriter — AI'nin çıkardıkları dahil — denetçi başlığındaki ve alt bölümdeki iki adımlı onayla silinebiliyor | — |
 | **D4** | Dar ekran | Media query kuralları **gerçek dar ekranda doğrulanmadı** | 360/768/1024 px'de elle kontrol |
 | **D5** | Ölü CSS | `.setup-preview h2` ve `.setup-preview > p` artık var olmayan yapıyı hedefliyor | `app/globals.css:566-567` silinmeli |
 

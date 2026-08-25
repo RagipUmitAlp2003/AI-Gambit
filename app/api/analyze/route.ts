@@ -5,6 +5,14 @@ import { sameCriterionCandidate } from "../../lib/criterion-dedupe";
 import { makePageWindows } from "../../lib/document-analysis-strategy";
 import { ensureScoreGroupCoverage, quarantineUnlinkedScoreRows } from "../../lib/score-coverage";
 import { recordUsage } from "../../lib/usage-metrics";
+import {
+  MODEL_RETRY_BUDGET_MS,
+  MODEL_SWEEPS,
+  isModelCooling,
+  markModelHealthy,
+  markModelUnavailable,
+  usableModels,
+} from "../../lib/gemini-generation";
 import { pdfIntegrityError } from "../../lib/pdf-integrity";
 import { saveCriteriaExtractionRun } from "../../lib/workflow-db";
 import type {
@@ -27,12 +35,6 @@ const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-li
 // Birincil ve yedek modelin aynı anda "high demand" (503) döndüğü dalgalarda
 // analizin tamamen düşmemesi için isteğe bağlı üçüncü kademe.
 const THIRD_MODEL = process.env.GEMINI_THIRD_MODEL || "";
-// Model listesinin kaç kez baştan taranacağı: geçici 503/429 dalgası tek
-// turda bütün kademeleri tüketirse ikinci tur belgeyi kurtarır.
-const MODEL_SWEEPS = Math.min(4, Math.max(1, Number(process.env.GEMINI_MODEL_SWEEPS) || 2));
-// Yeniden denemeler için toplam duvar saati bütçesi: ek tur, isteği
-// süresiz uzatmasın. Bütçe dolduğunda yeni deneme başlatılmaz.
-const MODEL_RETRY_BUDGET_MS = Math.max(60_000, Number(process.env.GEMINI_RETRY_BUDGET_MS) || 300_000);
 
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
 const PROMPT_VERSION = "v18-pdf-integrity-file-uri-map-reduce-verify";
@@ -766,38 +768,8 @@ type CachedExtraction = {
  * Süre dolduğunda model kendiliğinden yeniden denenir: geçici bir kesinti
  * kalıcı olarak modeli dışlamaz.
  */
-const MODEL_COOLDOWN_MS = Number(process.env.MODEL_COOLDOWN_MS) > 0
-  ? Number(process.env.MODEL_COOLDOWN_MS)
-  : 10 * 60 * 1000;
-
-const breakerHost = globalThis as unknown as { __kriterModelCooldown?: Map<string, number> };
-
-function modelCooldown(): Map<string, number> {
-  if (!breakerHost.__kriterModelCooldown) breakerHost.__kriterModelCooldown = new Map();
-  return breakerHost.__kriterModelCooldown;
-}
-
-function isModelCooling(model: string): boolean {
-  const until = modelCooldown().get(model);
-  if (!until) return false;
-  if (Date.now() >= until) { modelCooldown().delete(model); return false; }
-  return true;
-}
-
-function markModelUnavailable(model: string) {
-  modelCooldown().set(model, Date.now() + MODEL_COOLDOWN_MS);
-}
-
-function markModelHealthy(model: string) {
-  modelCooldown().delete(model);
-}
-
-/** Denenecek modeller: soğumada olanlar atlanır, hepsi soğumadaysa liste korunur. */
-function usableModels(models: string[]): { models: string[]; skipped: string[] } {
-  const skipped = models.filter(isModelCooling);
-  const usable = models.filter((model) => !isModelCooling(model));
-  return usable.length ? { models: usable, skipped } : { models, skipped: [] };
-}
+// Uygulaması `app/lib/gemini-generation.ts` içindedir. Kayıt defteri iki uç arasında
+// PAYLAŞILIR: rapor değerlendirme ucunun “bu model şu an 503” bilgisi burada da geçerlidir.
 
 const cacheHost = globalThis as unknown as { __kriterAnalysisCache?: Map<string, CachedExtraction> };
 
