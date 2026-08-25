@@ -8,6 +8,16 @@ export type CompetitionEntry = {
  * listede olmayan bir yarışma serbest metin olarak da girilebilir.
  */
 export const COMPETITIONS: CompetitionEntry[] = [
+  { name: "5G Yapay Zekâ ile Akıllı Yol Güvenliği Yarışması", field: "Yapay Zeka" },
+  { name: "Yapay Zekâ Destekli Havayolu Optimizasyonu Yarışması", field: "Yapay Zeka" },
+  { name: "Makine Öğrenmesi Destekli Lojistik Anahat Optimizasyonu Yarışması", field: "Yapay Zeka" },
+  { name: "İleri Otonom Sistemler Tasarım ve Operasyon Yarışması", field: "Otonom Sistemler" },
+  { name: "Elektronik Harp Yarışması", field: "Savunma" },
+  { name: "Nükleer Enerji Teknolojileri Tasarım Yarışması", field: "Enerji" },
+  { name: "Dikey İnişli Roket Yarışması", field: "Uzay" },
+  { name: "Avcı Dron Yarışması", field: "Havacılık" },
+  { name: "Sürü İHA Yarışması", field: "Havacılık" },
+  { name: "Teknolojide Yararlı Düşünce ve Araştırma Yarışması", field: "Araştırma" },
   { name: "Akıllı Ulaşım Sistemleri Yarışması", field: "Ulaşım" },
   { name: "Çelikkubbe Hava Savunma Sistemleri Yarışması", field: "Savunma" },
   { name: "İnsansız Deniz Aracı Yarışması", field: "Deniz" },

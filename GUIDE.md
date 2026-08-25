@@ -82,15 +82,14 @@ Birkaç önemli nokta:
 - Dosyayı kaydettikten sonra **dev sunucusunu yeniden başlatın** — ortam değişkenleri
   yalnızca açılışta okunur.
 
-### Maliyet kontrolü (isteğe bağlı)
+### Kanıt doğrulama (önerilen)
 
-12 sayfadan uzun belgelerde ikinci bir "eksik kural denetimi" turu çalışır. Kapsamı
-artırır, ancak token maliyetini ve süreyi yaklaşık iki katına çıkarır. Kapatmak veya
-eşiği yükseltmek için `.env.local` içine ekleyin:
+Sistem çıkarılan kriterleri ikinci turda PDF'ye karşı doğrular, atlanan açık
+kuralları işaretler ve puan toplamını yeniden okur. Üretimde açık tutun. Yalnızca
+kontrollü hız/maliyet karşılaştırmasında kapatmak için `.env.local` içine ekleyin:
 
 ```
-COVERAGE_AUDIT=off
-COVERAGE_AUDIT_MIN_PAGES=20
+EVIDENCE_VERIFICATION=off
 ```
 
 ---
@@ -149,8 +148,13 @@ Değerlendirme Atölyesi onaylı bir profil olmadan çalışmaz; bu yüzden sır
 
 ## 7. Veriler nerede duruyor?
 
-Sunucu tarafında kalıcı depolama **yoktur**. Her şey tarayıcıda, kullandığınız
-profile özel olarak tutulur:
+Çok kullanıcılı iş akışının kalıcı kayıtları sunucu tarafında tutulur:
+
+- **Cloudflare D1:** yönetici/yarışmacı hesapları, oturumlar, onaylı kriter profilleri,
+  kriter ayıklama geçmişi, başvurular, takım ve ekip üyesi bilgileri, AI çıktısı ve hakem sonucu
+- **Cloudflare R2 (`REPORTS`):** katılımcıların değiştirilmeyen başvuru PDF'leri
+
+Yalnızca henüz onaylanmamış cihaz taslakları tarayıcıda tutulur:
 
 - **localStorage:** `kriter-atolyesi:draft-v1` (sihirbaz taslağı),
   `kriter-atolyesi:last-profile` (son onaylı profil),
@@ -158,9 +162,9 @@ profile özel olarak tutulur:
 - **IndexedDB:** `kriter-atolyesi` veritabanı (sürüm 3) — `draft-files` (kaynak PDF),
   `library-documents` (görevli belge havuzu), `report-pool` (katılımcı raporları)
 
-Bunun iki sonucu var: farklı bir tarayıcı veya cihaz açtığınızda veriler görünmez,
-ve hakem ile yarışmacının aynı veriyi görmesi şu an mümkün değildir. Çok kullanıcılı
-kullanım için sunucu tarafı depolama gerekir.
+Bu nedenle farklı cihazlardaki yarışmacı, hakem ve yöneticiler aynı kalıcı başvuru
+kaydını görür. Tarayıcı temizlendiğinde yalnızca onaylanmamış yerel taslaklar silinir;
+D1/R2 kayıtları etkilenmez.
 
 **Sıfırlamak için** tarayıcı konsolunda:
 
@@ -210,9 +214,10 @@ Bu sürüm PDF'yi doğrudan modele gönderdiği için 18 MB sınırı vardır. D
 sıkıştırılmış bir PDF kullanın.
 
 **Analiz çok uzun sürüyor.**
-Uzun şartnamelerde iki tur çalışır (İDA'da ~105 saniye). `COVERAGE_AUDIT=off` ile
-ikinci turu kapatabilirsiniz. Aynı belge aynı bağlamla tekrar analiz edilirse sunucu
-içi önbellek sayesinde model hiç çağrılmaz.
+Uzun belgeler kapsam için paralel sayfa aralıklarına ayrılır ve ardından kanıt
+doğrulaması yapılır. Süre ayrıca API kotası ve yedek modele düşülmesinden
+etkilenebilir; arayüzdeki tanı bilgisini kontrol edin. Aynı belge aynı analiz
+sürümüyle tekrar çalıştırılırsa sunucu içi önbellek sayesinde model çağrılmaz.
 
 **"Tarayıcı deposu güncellenemedi" uyarısı.**
 Uygulamanın açık olduğu başka sekmeler veritabanı yükseltmesini engelliyor. Diğer
@@ -254,11 +259,10 @@ tools/                        Kalite ve karşılaştırma betikleri
 
 ## 11. Dağıtım hakkında
 
-Şu an yapılandırılmış bir dağıtım **yoktur**: depoda CI/CD (`.github/`),
-`wrangler.toml` veya `vercel.json` bulunmaz ve `.openai/hosting.json` içindeki
-D1/R2 alanları boştur. Uygulama yalnızca yerel makinede çalışır.
+`.openai/hosting.json` içinde D1 `DB` ve R2 `REPORTS` bağlamaları tanımlıdır.
+Dağıtım öncesinde `migrations/0001_admin.sql`, `0002_competition_workflow.sql`
+ve `0003_application_teams_and_history.sql` sırasıyla uygulanmalı; `GEMINI_API_KEY`,
+`MODERATOR_SECRET` ve üretim e-posta değişkenleri sunucu sırrı olarak tanımlanmalıdır.
 
-Proje Cloudflare Workers'a dağıtılabilecek bir iskeletle geldi
-(`npx @vinext/cloudflare deploy`), ancak bunun için hosting kaynaklarının
-tanımlanması ve API anahtarının sunucu tarafı gizli değişken olarak ayarlanması
-gerekir. Ortak bir adres gerekiyorsa bu ayrı bir kurulum işidir.
+Proje Cloudflare Workers/Sites çalışma modeline hazırdır; gerçek ortamda D1/R2
+kaynaklarının oluşturulması, bağlanması ve göçlerin uygulanması dağıtım adımıdır.

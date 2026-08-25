@@ -59,6 +59,7 @@ export function ensureScoreGroupCoverage(
       confidence: "high",
       active: true,
       origin: "document",
+      reviewStatus: "ready",
       effect: "score",
       scope: group.scope,
       groupId: group.id ?? null,
@@ -98,4 +99,51 @@ export function ensureScoreGroupCoverage(
   }
 
   return completed;
+}
+
+/**
+ * Resmî puan grupları toplam ölçeği zaten bütünüyle açıklıyorsa hiçbir gruba
+ * bağlanmamış puan satırlarının ikinci kez toplanmasını engeller. Bu satırlar
+ * silinmez; görevlinin kaynağı görüp doğru gruba bağlayabilmesi için inceleme
+ * bekleyen, puansız açıklama olarak korunur.
+ */
+export function quarantineUnlinkedScoreRows(
+  criteria: Criterion[],
+  scorePlan: ScorePlan,
+): Criterion[] {
+  if (!scorePlan.groups.length) return criteria;
+  const groupTotal = scorePlan.groups.reduce((sum, group) => sum + group.maxScore, 0);
+  const officialScaleComplete = scorePlan.declaredTotalScore !== null
+    && Math.abs(groupTotal - scorePlan.declaredTotalScore) <= EPSILON;
+
+  return criteria.map((criterion) => {
+    const isUnlinkedScore = criterion.active
+      && effectOfCriterion(criterion) === "score"
+      && !criterion.groupId
+      && (criterion.maxScore ?? 0) > 0;
+    if (!isUnlinkedScore) return criterion;
+
+    return {
+      ...criterion,
+      maxScore: officialScaleComplete ? null : criterion.maxScore,
+      weight: officialScaleComplete ? null : criterion.weight,
+      effect: officialScaleComplete ? "advisory" : criterion.effect,
+      active: false,
+      reviewStatus: "needs_review",
+      issue: officialScaleComplete
+        ? "Bu puan satırı resmî bir puan grubuna bağlanmadı ve grup toplamları PDF toplamını zaten tamamlıyor. Çift sayımı önlemek için puana dahil edilmedi; kaynağı doğrulayıp gerekirse doğru gruba bağlayın."
+        : "Bu puan satırı resmî bir puan grubuna bağlanmadı. Puan planı da henüz doğrulanmadığı için görevli onayı olmadan toplam puana dahil edilmedi.",
+    };
+  });
+}
+
+function effectOfCriterion(criterion: Criterion) {
+  return criterion.effect
+    ?? (criterion.type === "qualitative_score"
+      ? "score"
+      : criterion.type === "formula"
+        ? "threshold"
+        : ["technical_upload", "format_rule", "mandatory_content", "elimination_review"].includes(criterion.type)
+          ? "gate"
+          : "advisory");
 }

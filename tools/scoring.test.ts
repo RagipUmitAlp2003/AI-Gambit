@@ -13,7 +13,7 @@ import {
   normalizeScoreDetailed,
   scopeCriteriaToGroups,
 } from "../app/lib/evaluation-summary.ts";
-import { ensureScoreGroupCoverage } from "../app/lib/score-coverage.ts";
+import { ensureScoreGroupCoverage, quarantineUnlinkedScoreRows } from "../app/lib/score-coverage.ts";
 import type { Criterion, ScoreGroup, ScorePlan } from "../app/lib/types.ts";
 
 function criterion(patch: Partial<Criterion> & { id: string }): Criterion {
@@ -180,6 +180,46 @@ test("puan kapsamı: üretilen bütüncül kriter kimliği mevcut kimlikle çak�
   assert.equal(result.length, 2);
   assert.equal(new Set(result.map((item) => item.id)).size, 2);
   assert.equal(result[1].id, "score-group-1-2");
+});
+
+test("puan kapsamı: resmî 390 puan tamamken bağlantısız 200 puan ikinci kez sayılmaz", () => {
+  const groups = [
+    group({ id: "group-1", name: "Rapor", maxScore: 100 }),
+    group({ id: "group-2", name: "Saha", maxScore: 290 }),
+  ];
+  const scorePlan: ScorePlan = {
+    declaredTotalScore: 390,
+    groups,
+    auditStatus: "matched",
+    auditMessage: "Toplam doğrulandı.",
+  };
+  const completed = ensureScoreGroupCoverage([
+    criterion({ id: "orphan", name: "Tekrarlı üst satır", maxScore: 200, groupId: null }),
+  ], groups);
+  const safe = quarantineUnlinkedScoreRows(completed, scorePlan);
+  const orphan = safe.find((item) => item.id === "orphan")!;
+
+  assert.equal(maxRawScoreOf(safe), 390);
+  assert.equal(orphan.active, false);
+  assert.equal(orphan.effect, "advisory");
+  assert.equal(orphan.reviewStatus, "needs_review");
+});
+
+test("puan kapsamı: resmî plan eşleşmiyorsa bağlantısız puan silinmez ama onay bekler", () => {
+  const groups = [group({ id: "group-1", maxScore: 100 })];
+  const scorePlan: ScorePlan = {
+    declaredTotalScore: 150,
+    groups,
+    auditStatus: "mismatch",
+    auditMessage: "Toplam eşleşmiyor.",
+  };
+  const safe = quarantineUnlinkedScoreRows([
+    criterion({ id: "orphan", maxScore: 50, groupId: null }),
+  ], scorePlan);
+
+  assert.equal(safe[0].maxScore, 50, "olası eksik grup puanı geri getirilebilmelidir");
+  assert.equal(safe[0].active, false);
+  assert.equal(safe[0].reviewStatus, "needs_review");
 });
 
 /* --------------------------------------------------------------------- *

@@ -27,6 +27,16 @@ export type EvaluationMethod = "deterministic" | "ai" | "human" | "hybrid";
 export type Confidence = "high" | "medium" | "low";
 export type CriterionOrigin = "document" | "manager";
 export type CriterionEffect = "gate" | "score" | "penalty" | "threshold" | "advisory";
+export type CriterionReviewStatus = "ready" | "needs_review" | "confirmed" | "excluded";
+export type EvidenceStatus = "verified" | "partial" | "not_found" | "contradicted" | "not_run";
+
+export type DocumentSection = {
+  title: string;
+  startPage: number;
+  endPage: number;
+  kind: "rules" | "scoring" | "submission" | "definitions" | "schedule" | "reference" | "mixed";
+  ruleDensity: "high" | "medium" | "low";
+};
 
 export type ScoreGroup = {
   /**
@@ -76,6 +86,13 @@ export type Criterion = {
    */
   groupId?: string | null;
   issue?: string;
+  /** Bağımsız denetimde bulunan belirsiz maddelerin görevli kararını izler. */
+  reviewStatus?: CriterionReviewStatus;
+  /** İkinci, kaynak odaklı turda kuralın PDF dayanağının doğrulanma durumu. */
+  evidence?: {
+    status: EvidenceStatus;
+    reason: string;
+  };
 };
 
 /** Analiz çağrısının süre ve token gözlem verileri (maliyet takibi için). */
@@ -96,6 +113,10 @@ export type AnalysisDiagnostics = {
   documentDelivery?: "file_uri" | "inline";
   /** Denetim turunun fiilen kullandığı model; yedeğe düşüldüyse birincilden farklıdır. */
   auditModel?: string;
+  /** Belgeyi kapsamak için paralel çalıştırılan sayfa aralığı sayısı. */
+  extractionPasses?: number;
+  /** Kaynak doğrulamasından geçirilen kriter adedi. */
+  verifiedCriteria?: number;
 };
 
 export type AnalysisResult = {
@@ -109,6 +130,15 @@ export type AnalysisResult = {
   model?: string;
   analyzedAt: string;
   scorePlan?: ScorePlan;
+  /** PDF yapısının sayfa aralıklarıyla çıkarılmış kısa haritası. */
+  documentMap?: DocumentSection[];
+  /** İkinci, kısa denetim turunun puan planı karşılaştırması. */
+  scoreAudit?: {
+    declaredTotalScore: number | null;
+    groupTotal: number;
+    agrees: boolean;
+    model?: string;
+  };
   analysisWarnings?: string[];
   diagnostics?: AnalysisDiagnostics;
 };
@@ -271,6 +301,10 @@ export type JudgeDecision = {
 /** Hakem incelemesinin bütünü. */
 export type JudgeReview = {
   status: "in_progress" | "completed";
+  /** Başvurunun hakem tarafından kesinleştirilen genel sonucu. */
+  outcome: "pending" | "accepted" | "rejected" | "revision_required";
+  /** Sonucun yarışmacıya gösterilebilen kısa açıklaması. */
+  outcomeNote: string;
   decisions: JudgeDecision[];
   overallNote: string;
   /** Hakemin düzenlediği, yarışmacıya açılacak geri bildirim. */

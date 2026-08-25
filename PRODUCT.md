@@ -20,7 +20,7 @@ Sabit bir puanlama şablonu sunmaz. Belgedeki biçim kurallarını, zorunlu içe
 
 ## Operating Context
 
-İlk modül üç adımdan oluşur: resmî kriter PDF'sinin yüklenmesi, belgeden çıkarılan profil ve kriterlerin dinamik inceleme/düzeltmesi, profil onayı. İkinci modül (Değerlendirme Atölyesi, `/degerlendirme`) onaylı profili katılımcı raporlarına uygular: rapor havuzu ve kesin ön kontroller (dosya kapısı, dil, şablon/başlık, benzerlik), AI bulguları, hakem inceleme ekranı ve hakem onaylı yarışmacı geri bildirimi.
+İlk modül üç adımdan oluşur: resmî kriter PDF'sinin yüklenmesi, belgeden çıkarılan profil ve kriterlerin dinamik inceleme/düzeltmesi, profil onayı. Yarışmacı portalı yarışma seçimi, PDF başvurusu ve sonuç takibini yürütür. PDF yüklenince analiz başlamaz; kayıt hakem havuzuna düşer. Değerlendirme Atölyesi onaylı profili katılımcı raporuna yalnızca hakem “AI ile değerlendir” dediğinde uygular: kesin ön kontroller, AI bulguları, hakem incelemesi ve hakem onaylı yarışmacı geri bildirimi aynı kalıcı başvuru kaydına yazılır. Değerlendirme Yöneticisi bu akışı salt okunur olarak izler.
 
 ## Capabilities and Constraints
 
@@ -43,6 +43,8 @@ Sabit bir puanlama şablonu sunmaz. Belgedeki biçim kurallarını, zorunlu içe
 - Belge söylemiyorsa sistem varsaymaz.
 - Her çıkarım kaynağıyla birlikte gösterilir.
 - Yapay zekâ önerir, yetkili kesinleştirir.
+- Yarışmacı yüklemesi analiz başlatmaz; başlangıç yetkisi hakemdedir.
+- Başvuru, PDF, profil, AI bulgusu ve hakem kararı aynı izlenebilir zincirde saklanır.
 - Kesin kontrol, anlamsal değerlendirme ve insan kararı birbirinden ayrılır.
 - Sonradan yapılan her değişiklik görünür ve geri izlenebilir olmalıdır.
 

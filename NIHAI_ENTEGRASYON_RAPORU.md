@@ -1,6 +1,6 @@
 # Nihai Entegrasyon Raporu
 
-**Tarih:** 2026-08-24  
+**Tarih:** 2026-08-25
 **Dal:** `Deneme`  
 **Ekip arkadaşının korunan son temeli:** `72de157`  
 **Durum:** Değişiklikler çalışma alanında hazırdır; commit ve push yapılmamıştır.
@@ -69,7 +69,7 @@ Bu belge, ekip arkadaşının `DEGISIKLIK_RAPORU.md` içinde anlattığı çalı
 | ESLint | Başarılı |
 | Depo / API anahtarı güvenlik kontrolü | Başarılı |
 | Regresyon testleri | Başarılı |
-| Puanlama ve kapsam testleri | 17/17 başarılı |
+| Puanlama, kapsam ve iş akışı testleri | 33/33 başarılı |
 | Üretim derlemesi | Başarılı |
 | Bağımlılık güvenlik taraması | 0 açık |
 
@@ -78,22 +78,31 @@ Kayıtlı eski AI çıktılarıyla yapılan iki ek kalite kontrolü özellikle b
 1. Eski İDA çıktısı iki ceza kriterini aynı kriter içinde doğru biçimde taşımamaktadır.
 2. Eski Çelikkubbe çıktısı `0 puan` koşulunu eleme türünde sınıflandırmıştır ve kablo yalıtımı maddesinde insan/hybrid denetimini eksik bırakmıştır.
 
-Bu sonuç kod hatası olarak gizlenmemiştir. Yeni analiz talimatının gerçekten düzeltme üretip üretmediği, geçerli bir yerel `GEMINI_API_KEY` ile resmî PDF yeniden analiz edilerek ölçülmelidir. Repoda yerel API anahtarı bulunmadığı için bu entegrasyon sırasında ücretli/canlı AI çağrısı yapılmamıştır.
+Bu sonuç kod hatası olarak gizlenmemiştir. Yeni analiz talimatının gerçek belge çıktısı ayrıca geçerli, Git dışında tutulan yerel `GEMINI_API_KEY` ile benchmark üzerinden ölçülmelidir. Bu tamamlama turunda ikinci AI algoritmasının doğruluğunu değiştiren canlı çağrı yapılmamıştır.
 
-## 4. Bilerek bu çalışmanın dışında bırakılanlar
+## 4. Tamamlanan çok kullanıcılı iş akışı
 
-- Baş yönetici, yetki atama, yönetici hesabı ve katılımcı hesabı akışları ekip arkadaşının çalışma alanıdır.
-- Katılımcının yarışmaya başvurması, eski başvurularını görmesi ve yönetici başvuru onayı bu entegrasyonda değiştirilmemiştir.
-- Katılımcı raporunu onaylı profile göre gerçekten değerlendirecek `/api/evaluate-report` AI motoru henüz bağlı değildir; uç nokta güvenli sözleşme iskeleti olarak `501` döndürür.
-- Belge havuzu hâlâ tarayıcıdaki IndexedDB'dedir; ortak sunucu depolaması/auth entegrasyonundan sonra bağlanmalıdır.
+- Baş yönetici yönetici hesaplarını oluşturabilir, rolleri değiştirebilir ve bütün yetkili çalışma alanlarına erişebilir. Katılımcı PDF'ini değiştiren bir uç nokta yoktur.
+- Yarışma yöneticisinin her başarılı kriter ayıklaması D1'e kaydedilir; geçmiş ayıklamalar ile onayladığı projeler ayrı sekmelerde görünür.
+- Yarışmacı başvurusunda başvuru sahibi, takım adı ve ekip üyeleri saklanır. Başvuru metadatası D1'e, PDF özel R2 deposuna yazılır.
+- Hakem havuzu yarışma adlarıyla gruplanır; bekleyen ve tamamlanan takımlar ayrılır, takım/üye araması yapılabilir. AI analizi yalnızca hakem eylemiyle başlar.
+- Hakem kabul, ret veya düzeltme sonucunu ve yarışmacıya gösterilecek kısa açıklamayı kesinleştirir. Yarışmacı ekranı yalnızca “Gönderildi” ve “İnceleme sonucu” aşamalarını gösterir.
+- Değerlendirme yöneticisi yarışma/takım sonuçlarını, toplamları, onaylı kaynak PDF'leri ve kriterleri salt okunur görür; katılımcı PDF'ine, e-postasına, üye bilgilerine ve proje içeriğine sunucu tarafından erişemez.
+- D1 şeması `migrations/0001_admin.sql`, `0002_competition_workflow.sql` ve `0003_application_teams_and_history.sql` ile sürümlenmiştir. R2 bağlamı `REPORTS`, D1 bağlamı `DB` olarak tanımlıdır.
 
-## 5. Commit için önerilen özet
+## 5. Bilerek bu çalışmanın dışında bırakılanlar
 
-`feat: ekip geliştirmelerini dinamik kriter ve resmi puan sistemiyle birleştir`
+- Katılımcı PDF'ini kriterlere göre tarayan ikinci AI algoritmasının doğruluk geliştirmesi bu aşamada yapılmamıştır. Hazır arayüz ve veri sözleşmesi korunmuş; başlangıç yetkisi hakeme bağlanmıştır.
+- Gerçek Cloudflare ortamında D1/R2 kaynaklarının oluşturulması, üç göçün uygulanması ve sunucu sırlarının tanımlanması dağıtım işidir.
+
+## 6. Commit için önerilen özet
+
+`feat: rol bazlı başvuru ve değerlendirme iş akışını tamamla`
 
 Commit açıklamasına şu kısa not eklenebilir:
 
 - Ekip arkadaşının arama, belge havuzu ve performans geliştirmeleri korundu.
 - Resmî puan ölçeği, 0-puan/eleme ayrımı ve insan onayı kuralları düzeltildi.
 - Analiz isteği korumaları, güvenli önbellek, geçici dosya temizliği ve sıkı benchmark eklendi.
-- Test, lint, tip kontrolü, üretim derlemesi ve bağımlılık taraması tamamlandı.
+- D1/R2 başvuru zinciri, takım bilgileri, hakem sonucu ve yönetici geçmiş ekranları tamamlandı.
+- Test, lint, tip kontrolü, üretim derlemesi ve depo güvenlik taraması tamamlandı.

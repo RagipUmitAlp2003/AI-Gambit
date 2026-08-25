@@ -10,6 +10,9 @@ import { loadLastApprovedProfile, readProfileFile, saveActiveProfile } from "../
 import { createReportId, deleteReport, listReports, saveReport, type StoredReport } from "../lib/report-pool";
 import { buildFileGateChecks, gateBlocksUpload, type SimilarityPeer } from "../lib/report-prechecks";
 import { evaluateReport } from "../lib/report-evaluator";
+import { workflowApi } from "../lib/workflow-client";
+import { fold } from "../lib/competitions";
+import type { CompetitionApplication } from "../lib/workflow-types";
 import type {
   CheckStatus,
   FindingStatus,
@@ -35,6 +38,14 @@ const REPORT_STATUS_LABELS: Record<ReportStatus, string> = {
   analyzing: "Analiz ediliyor",
   analyzed: "Analiz edildi · hakem bekliyor",
   reviewed: "Değerlendirme tamamlandı",
+};
+
+const APPLICATION_STATUS_LABELS: Record<CompetitionApplication["status"], string> = {
+  submitted: "AI analizi bekliyor",
+  analyzing: "AI analizi yapılıyor",
+  awaiting_judge: "Hakem kararı bekliyor",
+  completed: "Değerlendirme tamamlandı",
+  analysis_failed: "Analiz yeniden denenmeli",
 };
 
 const CHECK_STATUS_LABELS: Record<CheckStatus, string> = {
@@ -93,6 +104,8 @@ function normalizeFeedback(feedback: ParticipantFeedback): ParticipantFeedback {
 function buildInitialReview(evaluation: ReportEvaluation): JudgeReview {
   return {
     status: "in_progress",
+    outcome: "pending",
+    outcomeNote: "",
     decisions: evaluation.findings.map((finding) => ({
       criterionId: finding.criterionId,
       verdict: "pending",
@@ -216,7 +229,7 @@ function EvalRail({ view, counts, onNavigate }: {
           <p>Sistem eleme veya nihai puan kararı vermez; her sonuç hakem onayından geçer.</p>
         </div>
       </div>
-      <Link className="eval-rail-link" href="/">← Kriter Atölyesi’ne dön</Link>
+      <Link className="eval-rail-link" href="/">← Çalışma alanıma dön</Link>
     </nav>
   );
 }
@@ -255,7 +268,7 @@ function ProfilePanel({ profile, error, onProfileFile }: {
           </p>
         </div>
         <div className="eval-profile-actions">
-          <Link className="secondary-button" href="/">Kriter Atölyesi’nde profil oluştur</Link>
+          <Link className="secondary-button" href="/kriter-atolyesi">Kriter Atölyesi’nde profil oluştur</Link>
           <button type="button" className="secondary-button" onClick={() => inputRef.current?.click()}>
             Profil JSON’u yükle
           </button>
@@ -297,7 +310,7 @@ function ProfilePanel({ profile, error, onProfileFile }: {
   );
 }
 
-function PoolView({ profile, profileError, onProfileFile, records, uploadError, analyzingId, onUpload, onAnalyze, onDelete, onOpenReview }: {
+function PoolView({ profile, profileError, onProfileFile, records, uploadError, analyzingId, onUpload, onAnalyze, onDelete, onOpenReview, applications, onOpenApplication }: {
   profile: ProfileExport | null;
   profileError: string;
   onProfileFile: (file: File) => void;
@@ -308,12 +321,34 @@ function PoolView({ profile, profileError, onProfileFile, records, uploadError, 
   onAnalyze: (record: StoredReport) => void;
   onDelete: (id: string) => void;
   onOpenReview: (id: string) => void;
+  applications: CompetitionApplication[];
+  onOpenApplication: (application: CompetitionApplication, analyze: boolean) => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [participant, setParticipant] = useState("");
   const [dragging, setDragging] = useState(false);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [selectedCompetition, setSelectedCompetition] = useState("");
+  const [teamQuery, setTeamQuery] = useState("");
+  const [queueFilter, setQueueFilter] = useState<"pending" | "completed">("pending");
+
+  const competitionGroups = useMemo(() => {
+    const groups = new Map<string, CompetitionApplication[]>();
+    for (const application of applications) {
+      groups.set(application.competitionName, [...(groups.get(application.competitionName) ?? []), application]);
+    }
+    return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right, "tr"));
+  }, [applications]);
+  const effectiveCompetition = selectedCompetition && competitionGroups.some(([name]) => name === selectedCompetition)
+    ? selectedCompetition
+    : competitionGroups[0]?.[0] ?? "";
+  const visibleApplications = useMemo(() => {
+    const search = fold(teamQuery.trim());
+    return applications.filter((application) => application.competitionName === effectiveCompetition)
+      .filter((application) => queueFilter === "completed" ? application.status === "completed" : application.status !== "completed")
+      .filter((application) => !search || fold(`${application.teamName} ${application.applicantFullName} ${application.teamMembers.map((member) => member.fullName).join(" ")}`).includes(search));
+  }, [applications, effectiveCompetition, queueFilter, teamQuery]);
 
   async function accept(file?: File) {
     if (!file) return;
@@ -321,6 +356,47 @@ function PoolView({ profile, profileError, onProfileFile, records, uploadError, 
     // Başvuru adı yalnızca dosya gerçekten havuza alındığında temizlenir.
     const accepted = await onUpload(file, participant.trim());
     if (accepted) setParticipant("");
+  }
+
+  if (applications) {
+    return (
+      <section className="workspace eval-pool-workspace" aria-labelledby="pool-title">
+        <div className="workspace-heading">
+          <div><span className="section-kicker">Katılımcı başvuruları</span><h1 id="pool-title">Başvuru havuzu</h1><p>PDF&apos;ler yarışmacı gönderdiğinde burada görünür. AI analizi yalnızca hakem başlattığında çalışır.</p></div>
+          <span className="step-fraction">1 / 3</span>
+        </div>
+        {uploadError ? <div className="inline-error eval-panel-margin" role="alert"><strong>İşlem tamamlanamadı.</strong><span>{uploadError}</span></div> : null}
+        <section className="eval-pool-list eval-panel-margin" aria-label="Katılımcı başvuruları">
+          <div className="sample-library-heading"><div><h2>Projeler ve başvurular</h2><p>Önce yarışmayı seçin; ardından o yarışmaya başvuran takımları inceleyin.</p></div><span>{applications.length} başvuru</span></div>
+          {competitionGroups.length ? <div className="judge-project-layout">
+            <nav className="judge-project-list" aria-label="Başvuru bulunan yarışmalar">
+              {competitionGroups.map(([name, items]) => (
+                <button key={name} type="button" className={effectiveCompetition === name ? "active" : ""} onClick={() => { setSelectedCompetition(name); setTeamQuery(""); }}>
+                  <strong>{name}</strong><span>{items.filter((item) => item.status !== "completed").length} bekleyen · {items.length} toplam</span>
+                </button>
+              ))}
+            </nav>
+            <div className="judge-project-applications">
+              <div className="judge-project-toolbar"><div><strong>{effectiveCompetition}</strong><span>{visibleApplications.length} takım gösteriliyor</span></div><label className="search-box"><span aria-hidden="true">⌕</span><input value={teamQuery} onChange={(event) => setTeamQuery(event.target.value)} placeholder="Takım veya üye ara" /></label></div>
+              <div className="judge-queue-tabs" role="group" aria-label="Başvuru durumu filtresi"><button type="button" className={queueFilter === "pending" ? "active" : ""} onClick={() => setQueueFilter("pending")}>İncelenmeyi bekleyenler</button><button type="button" className={queueFilter === "completed" ? "active" : ""} onClick={() => setQueueFilter("completed")}>Tamamlananlar</button></div>
+              <div className="sample-document-list">
+            {visibleApplications.map((application) => <article key={application.id}>
+              <FileBadge fileName={application.fileName ?? "basvuru.pdf"} mimeType={application.mimeType ?? "application/pdf"} size="sm" />
+              <div className="sample-copy"><span>{APPLICATION_STATUS_LABELS[application.status]}</span><h3>{application.teamName}</h3><p>{application.applicantFullName} · {application.fileName ?? "Başvuru PDF'i"} · {formatBytes(application.sizeBytes ?? 0)}</p><small>{application.teamMembers.length ? `${application.teamMembers.length} ekip üyesi` : "Bireysel başvuru"}</small></div>
+              <div className="sample-actions eval-pool-actions">
+                <a className="text-button" href={`/api/applications/${application.id}/file`} target="_blank" rel="noreferrer">PDF&apos;i aç</a>
+                {application.status === "submitted" || application.status === "analysis_failed" ? <button type="button" className="primary-button" disabled={analyzingId !== null} onClick={() => onOpenApplication(application, true)}>{analyzingId === `server-${application.id}` ? "Analiz ediliyor…" : "AI ile değerlendir"}</button>
+                  : application.status === "analyzing" ? <span className="eval-analyzing-note">Analiz ediliyor…</span>
+                    : <button type="button" className="secondary-button" disabled={analyzingId !== null} onClick={() => onOpenApplication(application, false)}>{application.status === "completed" ? "Tamamlanan incelemeyi aç" : "Hakem incelemesini aç"}</button>}
+              </div>
+            </article>)}
+              {!visibleApplications.length ? <p className="library-empty">Bu aramayla eşleşen takım bulunamadı.</p> : null}
+              </div>
+            </div>
+          </div> : <p className="library-empty">Henüz katılımcı başvurusu yok.</p>}
+        </section>
+      </section>
+    );
   }
 
   return (
@@ -489,7 +565,12 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
   const effectiveId = selectedId || pinnedId;
   const record = reviewable.find((item) => item.id === effectiveId) ?? reviewable[0];
   const evaluation = record?.evaluation ?? null;
-  const review = record?.review ?? (evaluation ? buildInitialReview(evaluation) : null);
+  const storedReview = record?.review ?? (evaluation ? buildInitialReview(evaluation) : null);
+  const review = storedReview ? {
+    ...storedReview,
+    outcome: storedReview.outcome ?? "pending",
+    outcomeNote: storedReview.outcomeNote ?? "",
+  } : null;
   const [renderedRecordId, setRenderedRecordId] = useState(record?.id ?? "");
 
   if (record && record.id !== effectiveId) setPinnedId(record.id);
@@ -623,7 +704,8 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
   const canComplete =
     reviewConfirmed &&
     decidedScores.length === scoreFindings.length &&
-    decisionPending.length === 0;
+    decisionPending.length === 0 &&
+    review.outcome !== "pending";
 
   function patchDecision(criterionId: string, patch: Partial<JudgeDecision>) {
     if (!record || !review) return;
@@ -942,6 +1024,19 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
           />
           <span>Geri bildirim yarışmacıya gösterilsin.</span>
         </label>
+        <div className="form-grid two-col eval-outcome-fields">
+          <Field label="Başvuru sonucu" hint="Bu sonuç yarışmacının Başvurularım ekranında gösterilir.">
+            <select value={review.outcome} onChange={(event) => patchReview({ outcome: event.target.value as JudgeReview["outcome"] })}>
+              <option value="pending">Sonuç seçin</option>
+              <option value="accepted">Kabul edildi</option>
+              <option value="rejected">Reddedildi</option>
+              <option value="revision_required">Hatalar düzeltilmeli</option>
+            </select>
+          </Field>
+          <Field label="Yarışmacıya sonuç açıklaması" hint="Kısa, açık ve uygulanabilir bir açıklama yazın.">
+            <textarea maxLength={1000} value={review.outcomeNote} onChange={(event) => patchReview({ outcomeNote: event.target.value })} placeholder="Sonucun kısa gerekçesi veya beklenen düzeltme" />
+          </Field>
+        </div>
         <Field label="Genel değerlendirme notu" hint="İç kayıt; yarışmacıya gösterilmez.">
           <textarea
             value={review.overallNote}
@@ -961,6 +1056,7 @@ function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onC
             <small>
               {decidedScores.length !== scoreFindings.length && `${scoreFindings.length - decidedScores.length} puan kriteri kararsız. `}
               {decisionPending.length > 0 && `${decisionPending.length} görevli kararı bekliyor. `}
+              {review.outcome === "pending" && "Başvuru sonucunu seçin. "}
               {!reviewConfirmed && "Hakem kontrolünü onaylayın."}
             </small>
           ) : <small className="ready-note">İnceleme tamamlanmaya hazır.</small>}
@@ -1148,6 +1244,8 @@ export default function EvaluationApp() {
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState("");
   const [persistError, setPersistError] = useState("");
+  const [applications, setApplications] = useState<CompetitionApplication[]>([]);
+  const remoteReviewTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   // Analiz sürerken silinen kayıtlar; tamamlanan analiz bunları depoya geri yazmamalı.
   const deletedIds = useRef(new Set<string>());
 
@@ -1163,26 +1261,28 @@ export default function EvaluationApp() {
   useEffect(() => {
     let active = true;
     async function restore() {
-      try {
-        const stored = await listReports();
-        if (!active) return;
-        setRecords(stored);
-        setPersistError("");
-      } catch {
-        if (active) reportPersistFailure();
-      } finally {
-        if (active) setProfile(loadLastApprovedProfile());
-      }
+      const [stored, remote] = await Promise.allSettled([listReports(), workflowApi.applications()]);
+      if (!active) return;
+      if (stored.status === "fulfilled") { setRecords(stored.value); setPersistError(""); }
+      else reportPersistFailure();
+      if (remote.status === "fulfilled") setApplications(remote.value.applications);
+      else setUploadError(remote.reason instanceof Error ? remote.reason.message : "Başvuru havuzu yüklenemedi.");
+      setProfile(loadLastApprovedProfile());
     }
     restore();
     return () => { active = false; };
   }, []);
 
+  useEffect(() => () => {
+    for (const timer of remoteReviewTimers.current.values()) clearTimeout(timer);
+    remoteReviewTimers.current.clear();
+  }, []);
+
   const counts = useMemo(() => ({
-    pool: records.length,
-    analyzed: records.filter((record) => record.evaluation).length,
-    completed: records.filter((record) => record.review?.status === "completed").length,
-  }), [records]);
+    pool: applications.length,
+    analyzed: applications.filter((item) => item.status === "awaiting_judge" || item.status === "completed").length,
+    completed: applications.filter((item) => item.status === "completed").length,
+  }), [applications]);
 
   async function handleProfileFile(file: File) {
     const { profile: parsed, error } = await readProfileFile(file);
@@ -1229,18 +1329,20 @@ export default function EvaluationApp() {
     return true;
   }
 
-  async function handleAnalyze(record: StoredReport) {
-    if (!profile || analyzingId) return;
+  async function analyzeRecord(record: StoredReport, activeProfile: ProfileExport, remoteAlreadyStarted = false) {
     setAnalyzingId(record.id);
     setUploadError("");
     setRecords((current) => current.map((item) => item.id === record.id ? { ...item, status: "analyzing" } : item));
     try {
+      if (record.sourceApplicationId && !remoteAlreadyStarted) {
+        await workflowApi.updateApplication(record.sourceApplicationId, "start_analysis");
+      }
       const extracted = await extractPdfText(record.file);
       const peers: SimilarityPeer[] = records
         .filter((item) => item.id !== record.id && item.pagesText?.length)
         .map((item) => ({ label: item.participant, text: (item.pagesText ?? []).join(" ") }));
       const evaluation = await evaluateReport({
-        profile,
+        profile: activeProfile,
         file: record.file,
         pages: extracted.pages,
         pageCount: extracted.pageCount,
@@ -1257,13 +1359,74 @@ export default function EvaluationApp() {
         evaluation,
         review: null,
       };
-      await persist(saveReport(updated));
+      if (record.sourceApplicationId) {
+        const saved = await workflowApi.updateApplication(record.sourceApplicationId, "save_evaluation", { evaluation });
+        setApplications((current) => current.map((item) => item.id === saved.application.id ? saved.application : item));
+      } else await persist(saveReport(updated));
       setRecords((current) => current.map((item) => item.id === record.id ? updated : item));
+      if (record.sourceApplicationId) { setSelectedId(record.id); setView(2); }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Bilinmeyen bir hata oluştu.";
       setUploadError(`"${record.fileName}" analiz edilemedi: ${message}`);
       setRecords((current) => current.map((item) => item.id === record.id ? { ...item, status: "received" } : item));
+      if (record.sourceApplicationId) {
+        workflowApi.updateApplication(record.sourceApplicationId, "analysis_failed")
+          .then((saved) => setApplications((current) => current.map((item) => item.id === saved.application.id ? saved.application : item)))
+          .catch(() => undefined);
+      }
     } finally {
+      setAnalyzingId(null);
+    }
+  }
+
+  async function handleAnalyze(record: StoredReport) {
+    if (!profile || analyzingId) return;
+    await analyzeRecord(record, profile);
+  }
+
+  async function openApplication(application: CompetitionApplication, analyze: boolean) {
+    if (analyzingId) return;
+    setUploadError("");
+    setAnalyzingId(`server-${application.id}`);
+    let analysisStarted = false;
+    try {
+      const current = analyze
+        ? (await workflowApi.updateApplication(application.id, "start_analysis")).application
+        : application;
+      analysisStarted = analyze;
+      if (!current.profileId) throw new Error("Bu yarışma için onaylı kriter profili bulunamadı.");
+      const [profileResult, file] = await Promise.all([
+        workflowApi.profile(current.profileId),
+        workflowApi.applicationFile(current.id, current.fileName ?? "basvuru.pdf"),
+      ]);
+      const activeProfile = profileResult.profile.profile;
+      setProfile(activeProfile);
+      const report: StoredReport = {
+        id: `server-${current.id}`,
+        sourceApplicationId: current.id,
+        participant: current.teamName || current.participantName,
+        fileName: current.fileName ?? "basvuru.pdf",
+        mimeType: current.mimeType ?? "application/pdf",
+        sizeBytes: current.sizeBytes ?? 0,
+        pages: current.evaluation?.report.pages ?? null,
+        uploadedAt: current.submittedAt,
+        status: current.status === "completed" ? "reviewed" : current.evaluation ? "analyzed" : "received",
+        gateChecks: buildFileGateChecks(file, activeProfile.setup, 0),
+        evaluation: current.evaluation,
+        review: current.review,
+        file,
+      };
+      setRecords((items) => [report, ...items.filter((item) => item.id !== report.id)]);
+      setApplications((items) => items.map((item) => item.id === current.id ? current : item));
+      if (analyze) await analyzeRecord(report, activeProfile, true);
+      else { setSelectedId(report.id); setView(2); setAnalyzingId(null); }
+    } catch (caught) {
+      setUploadError(caught instanceof Error ? caught.message : "Başvuru açılamadı.");
+      if (analysisStarted) {
+        workflowApi.updateApplication(application.id, "analysis_failed")
+          .then((saved) => setApplications((current) => current.map((item) => item.id === saved.application.id ? saved.application : item)))
+          .catch(() => undefined);
+      }
       setAnalyzingId(null);
     }
   }
@@ -1280,7 +1443,19 @@ export default function EvaluationApp() {
     const updated: StoredReport = { ...target, review, status };
     setRecords((current) => current.map((item) => item.id === recordId ? updated : item));
     // Yan etki güncelleyicinin dışında: StrictMode'da çift çalışmaz.
-    persist(saveReport(updated));
+    if (target.sourceApplicationId) {
+      const applicationId = target.sourceApplicationId;
+      const existingTimer = remoteReviewTimers.current.get(applicationId);
+      if (existingTimer) clearTimeout(existingTimer);
+      const saveRemote = () => {
+        remoteReviewTimers.current.delete(applicationId);
+        workflowApi.updateApplication(applicationId, "save_review", { review })
+          .then((saved) => setApplications((current) => current.map((item) => item.id === saved.application.id ? saved.application : item)))
+          .catch(reportPersistFailure);
+      };
+      if (status === "reviewed") saveRemote();
+      else remoteReviewTimers.current.set(applicationId, setTimeout(saveRemote, 600));
+    } else persist(saveReport(updated));
   }
 
   return (
@@ -1308,6 +1483,8 @@ export default function EvaluationApp() {
             onAnalyze={handleAnalyze}
             onDelete={handleDelete}
             onOpenReview={(id) => { setSelectedId(id); setView(2); }}
+            applications={applications}
+            onOpenApplication={openApplication}
           />
         ) : null}
         {view === 2 ? (

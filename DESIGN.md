@@ -13,14 +13,14 @@ colors:
   success-green: "#18764d"
 typography:
   headline:
-    fontFamily: "Arial, Segoe UI, system-ui, sans-serif"
+    fontFamily: "Segoe UI Variable Text, Segoe UI, Arial, system-ui, sans-serif"
     fontSize: "clamp(27px, 3vw, 42px)"
     fontWeight: 700
     lineHeight: 1.08
     letterSpacing: "-0.035em"
   body:
-    fontFamily: "Arial, Segoe UI, system-ui, sans-serif"
-    fontSize: "14px"
+    fontFamily: "Segoe UI Variable Text, Segoe UI, Arial, system-ui, sans-serif"
+    fontSize: "15px"
     fontWeight: 400
     lineHeight: 1.6
 rounded:
@@ -66,6 +66,8 @@ Arayüz, Türkçe karakterleri güçlü ve küçük boyutta okunaklı gösteren 
 ## Layout
 
 Masaüstünde sabit bir üst şerit, solda üç adımlı süreç izi ve ortada tek ana görev yüzeyi bulunur. İlk ekranda tek ana eylem resmî PDF yüklemektir. İnceleme aşamasında önce belgenin puan yapısı ve puan dışı sonuç kuralları açıklanır; ardından kriter listesi ile ayrıntı/kanıt paneli çalışır. Küçük ekranlarda süreç izi yatay özet hâline gelir ve paneller tek sütuna iner.
+
+Giriş yüzeyi iki parçalıdır: koyu lacivert ürün anlatısı ve açık renkli, rol odaklı giriş alanı. Yönetim panelinde aynı görsel dil korunur; soldaki dar gezinme alanı yalnızca kullanıcının yetkili olduğu bölümleri, ana yüzey ise rolün karar sınırını ve erişebildiği çalışma alanlarını gösterir. Yarışmacı portalı aynı tipografi ve renklerle daha kısa, iki sekmeli bir akış kullanır: yarışma seçip PDF gönderme ve başvuru/sonuç takibi. Süreç izleme yüzeyi tablo yoğunluğunu korur ancak tüm kontroller salt okunurdur.
 
 ## Elevation & Depth
 

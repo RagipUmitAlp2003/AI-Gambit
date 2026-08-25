@@ -7,6 +7,7 @@ import TemplatePreview from "./template-preview";
 import { analyzeWithGemini } from "../lib/gemini-analyzer";
 import { criterionEffectOf as criterionEffect, deriveDecisionRules, maxRawScoreOf, scopeCriteriaToGroups } from "../lib/evaluation-summary";
 import { getPdfPageCount } from "../lib/pdf-reader";
+import { workflowApi } from "../lib/workflow-client";
 import { SAMPLE_DOCUMENTS } from "../lib/sample-documents";
 import {
   clearDraftSnapshot,
@@ -21,8 +22,8 @@ import type {
   Criterion,
   CriterionEffect,
   CriterionType,
-  EvaluationMethod,
   ProfileExport,
+  ScorePlan,
   SetupData,
   Step,
 } from "../lib/types";
@@ -55,19 +56,12 @@ const TYPE_LABELS: Record<CriterionType, string> = {
   human_only: "Yalnızca jüri",
 };
 
-const METHOD_LABELS: Record<EvaluationMethod, string> = {
-  deterministic: "Kesin otomatik kontrol",
-  ai: "AI önerisi",
-  human: "Hakem / jüri kararı",
-  hybrid: "AI önerisi + görevli onayı",
-};
-
 const EFFECT_LABELS: Record<CriterionEffect, string> = {
-  gate: "Sağlanması gereken uygunluk koşulu",
-  score: "Puan kazandırır",
-  penalty: "Toplamdan puan düşüren kural",
-  threshold: "Devam etmek için gereken en düşük sonuç",
-  advisory: "Bilgi ve öneri",
+  gate: "Zorunlu uygunluk koşulu",
+  score: "Puanlama kriteri",
+  penalty: "Toplam puandan kesinti",
+  threshold: "Asgari puan veya sonuç şartı",
+  advisory: "Bilgi notu — sonucu doğrudan değiştirmez",
 };
 
 const CONFIDENCE_LABELS: Record<Confidence, string> = {
@@ -76,17 +70,23 @@ const CONFIDENCE_LABELS: Record<Confidence, string> = {
   low: "Düşük güven",
 };
 
+const EVIDENCE_LABELS = {
+  verified: "Kaynak ve anlam doğrulandı",
+  partial: "Kaynak kısmen doğrulandı",
+  not_found: "Kaynak metin bulunamadı",
+  contradicted: "Belgeyle çelişiyor",
+  not_run: "Kaynak doğrulaması tamamlanmadı",
+} as const;
+
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function applyDecisionSafetyPolicy(item: Criterion): Criterion {
-  const text = `${item.name} ${item.scope || ""} ${item.sourceText}`;
-  const requiresHuman = /hakem|jüri|güvenlik|acil durdur|yalıtım|açık kablo|keskin nokta|patlayıcı|fiziksel boyut|sistem maksimum boyut|yasak bölge|mülakat|dışarıdan (?:yardım|yönlendirme)/i.test(text);
-  return requiresHuman && item.evaluationMethod === "deterministic"
-    ? { ...item, evaluationMethod: "human" }
-    : item;
+  const reviewStatus = item.reviewStatus
+    ?? (!item.active && item.issue ? "needs_review" : item.active ? "ready" : "excluded");
+  return { ...item, reviewStatus };
 }
 
 function Field({
@@ -175,6 +175,7 @@ function UploadStep({
   onFile,
   onSample,
   onAnalyze,
+  analysisReady,
   loading,
   loadingMessage,
   error,
@@ -183,6 +184,7 @@ function UploadStep({
   onFile: (file: File) => void;
   onSample: (file: File) => void;
   onAnalyze: () => void;
+  analysisReady: boolean;
   loading: boolean;
   loadingMessage: string;
   error: string;
@@ -290,7 +292,7 @@ function UploadStep({
       <div className="workspace-actions">
         <span className="source-limit-note">Kaynak PDF analiz motoru için teknik yükleme sınırı: 18 MB.</span>
         <button type="button" className="primary-button" disabled={!file || loading} onClick={onAnalyze}>
-          Belgeyi analiz et <span aria-hidden="true">→</span>
+          {analysisReady ? "Mevcut analize dön" : "Belgeyi analiz et"} <span aria-hidden="true">→</span>
         </button>
       </div>
     </section>
@@ -306,6 +308,7 @@ function CriteriaReview({
   setCriteria,
   includedGroupIds,
   setIncludedGroupIds,
+  onScorePlanChange,
   onBack,
   onApprove,
   approvalError,
@@ -318,6 +321,7 @@ function CriteriaReview({
   setCriteria: (criteria: Criterion[]) => void;
   includedGroupIds: string[];
   setIncludedGroupIds: (groupIds: string[]) => void;
+  onScorePlanChange: (scorePlan: ScorePlan) => void;
   onBack: () => void;
   onApprove: () => void;
   approvalError: string;
@@ -325,14 +329,18 @@ function CriteriaReview({
   const [selectedId, setSelectedId] = useState(criteria[0]?.id ?? "");
   const [query, setQuery] = useState("");
   const [scopeFilter, setScopeFilter] = useState("all");
+  const [reviewFilter, setReviewFilter] = useState<"all" | "needs_review">("all");
   const [reviewConfirmed, setReviewConfirmed] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const selected = criteria.find((item) => item.id === selectedId) ?? criteria[0];
   const scopes = [...new Set(criteria.map((item) => item.scope || "Genel"))];
+  const pendingReview = criteria.filter((item) => item.reviewStatus === "needs_review");
   const filtered = criteria.filter((item) => {
     const queryMatch = item.name.toLocaleLowerCase("tr-TR").includes(query.toLocaleLowerCase("tr-TR"));
-    return queryMatch && (scopeFilter === "all" || (item.scope || "Genel") === scopeFilter);
+    const scopeMatch = scopeFilter === "all" || (item.scope || "Genel") === scopeFilter;
+    const reviewMatch = reviewFilter === "all" || item.reviewStatus === "needs_review";
+    return queryMatch && scopeMatch && reviewMatch;
   });
   const active = criteria.filter((item) => item.active);
   const scorePlan = result.scorePlan;
@@ -340,7 +348,6 @@ function CriteriaReview({
   const scoreGroupCount = scorePlan?.groups.length ?? active.filter((item) => criterionEffect(item) === "score").length;
   const humanReviewCount = active.filter((item) => ["human", "hybrid"].includes(item.evaluationMethod)).length;
   const deterministicCount = active.filter((item) => item.evaluationMethod === "deterministic").length;
-  const decisionRules = deriveDecisionRules(criteria, scorePlan);
   const groups = scorePlan?.groups ?? [];
   // Kapsam kararı yalnızca kimlik üzerinden verilir; aynı isimli iki grup karışmaz.
   // Eski analizlerde grup kimliği yoktur: kapsam daraltması uygulanamaz, tüm
@@ -366,7 +373,7 @@ function CriteriaReview({
     : null;
   // Şartname birden çok aşamayı topluyorsa yalnızca kapsama alınan gruplar puanlanır.
   const scopeNarrowed = groups.length > 1 && included.length > 0 && included.length < groups.length;
-  const canApprove = reviewConfirmed && active.length > 0
+  const canApprove = reviewConfirmed && pendingReview.length === 0 && active.length > 0
     && (groups.length === 0 || included.length > 0);
 
   function toggleGroup(groupId: string, on: boolean) {
@@ -378,31 +385,70 @@ function CriteriaReview({
     setCriteria(criteria.map((item) => item.id === selected.id ? { ...item, ...patch } : item));
   }
 
+  function updateDeclaredTotal(value: number | null) {
+    if (!scorePlan) return;
+    const groupTotal = scorePlan.groups.reduce((sum, group) => sum + group.maxScore, 0);
+    const matched = value !== null && Math.abs(groupTotal - value) < 0.01;
+    onScorePlanChange({
+      ...scorePlan,
+      declaredTotalScore: value,
+      auditStatus: value === null ? "not_declared" : matched ? "matched" : "mismatch",
+      auditMessage: value === null
+        ? "Belgede genel toplam açıkça belirtilmemiş olarak işaretlendi."
+        : matched
+          ? `Görevlinin doğruladığı PDF toplamı ile puan grupları eşleşiyor (${value} puan).`
+          : `Görevlinin girdiği PDF toplamı ${value}; mevcut üst düzey puan grupları ${groupTotal} puan ediyor. Grup değerlerini de kaynak tabloyla karşılaştırın.`,
+    });
+    setReviewConfirmed(false);
+  }
+
+  function resolvePendingCriterion(decision: "confirm" | "exclude") {
+    if (!selected) return;
+    update({
+      active: decision === "confirm",
+      reviewStatus: decision === "confirm" ? "confirmed" : "excluded",
+      confidence: decision === "confirm" ? "high" : selected.confidence,
+      evidence: selected.evidence ? {
+        status: decision === "confirm" ? "verified" : selected.evidence.status,
+        reason: decision === "confirm"
+          ? "Görevli PDF sayfasını ve alıntıyı doğrudan kontrol ederek doğruladı."
+          : "Görevli bu bulgunun uygulanabilir bir değerlendirme kriteri olmadığına karar verdi.",
+      } : undefined,
+      issue: decision === "confirm"
+        ? "Görevli kaynak sayfayı kontrol ederek bu kriteri onayladı."
+        : "Görevli bu bulgunun değerlendirme kriteri olmadığına karar verdi.",
+    });
+    setReviewConfirmed(false);
+  }
+
   function addCriterion() {
     const added: Criterion = {
       id: `manual-${Date.now()}`,
-      name: "Yeni yönetici kriteri",
+      name: "Yeni kriter",
       type: "qualitative_score",
-      maxScore: 0,
-      weight: 0,
+      maxScore: null,
+      weight: null,
       required: false,
-      violationOutcome: "Jüri değerlendirmesine bilgi ver",
+      violationOutcome: "Belirtiniz",
       evaluationMethod: "human",
       sourcePage: null,
-      sourceText: "Bu kriter yönetici tarafından eklendi; kaynak belgeye dayanmıyor.",
-      aiInterpretation: "Yönetici eklemesi",
+      sourceText: "Kaynak metni buraya yazın.",
+      aiInterpretation: "Kriterin nasıl uygulanacağını açıklayın.",
       confidence: "high",
       active: true,
       origin: "manager",
+      reviewStatus: "confirmed",
       effect: "advisory",
       scope: setup.stage || "Genel",
     };
     setCriteria([...criteria, added]);
     setSelectedId(added.id);
     setScopeFilter("all");
+    setReviewFilter("all");
     setQuery("");
     setReviewConfirmed(false);
     setConfirmingDelete(false);
+    requestAnimationFrame(() => document.getElementById("criterion-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
 
   function removeSelectedCriterion() {
@@ -449,6 +495,30 @@ function CriteriaReview({
             {scorePlan?.auditStatus === "matched" ? "Toplam doğrulandı" : scorePlan?.auditStatus === "mismatch" ? "Toplam yeniden kontrol edilmeli" : "Genel toplam belirtilmemiş"}
           </span>
         </div>
+        {scorePlan ? (
+          <div className="score-total-review">
+            <div>
+              <strong>PDF’de yazan resmî toplam puan</strong>
+              <p>AI bu sayıyı yanlış okuduysa yalnızca PDF’de gördüğünüz toplamı yazın. Sistem puan gruplarını yeniden karşılaştırır.</p>
+            </div>
+            <label>
+              <span>Toplam puan</span>
+              <input
+                type="number"
+                min={0}
+                value={scorePlan.declaredTotalScore ?? ""}
+                placeholder="Belirtilmemiş"
+                onChange={(event) => updateDeclaredTotal(event.target.value === "" ? null : Number(event.target.value))}
+              />
+            </label>
+          </div>
+        ) : null}
+        {result.scoreAudit && !result.scoreAudit.agrees ? (
+          <p className="score-audit-note warning">
+            İkinci, bağımsız tarama genel toplamı <strong>{result.scoreAudit.declaredTotalScore ?? "belirtilmemiş"}</strong>,
+            grup toplamını <strong>{result.scoreAudit.groupTotal}</strong> olarak okudu. İki tarama aynı sonuca ulaşmadığı için kaynak tabloyu görevlinin doğrulaması gerekir.
+          </p>
+        ) : null}
         {scorePlan?.groups.length ? (
           <div className="score-group-list">
             {scorePlan.groups.map((group) => (
@@ -517,40 +587,6 @@ function CriteriaReview({
         </p>
       </section>
 
-      <section className="decision-rules" aria-labelledby="decision-rules-title">
-        <div className="score-plan-heading decision-heading">
-          <div>
-            <h2 id="decision-rules-title">Puan dışında sonucu etkileyen kurallar</h2>
-            <p>Bu kurallar puan satırı değildir. Sistem koşulu kontrol eder, kanıtı gösterir; insan kararı gereken yerde son sözü görevli verir.</p>
-          </div>
-        </div>
-        <div className="decision-rule-grid">
-          {([
-            { key: "gates", title: "Sağlanması gereken uygunluk koşulları", items: decisionRules.gates },
-            { key: "thresholds", title: "Devam için gereken en düşük sonuçlar", items: decisionRules.thresholds },
-            { key: "penalties", title: "Toplam puandan yapılacak kesintiler", items: decisionRules.penalties },
-            { key: "eliminations", title: "Eleme veya diskalifiye incelemeleri", items: decisionRules.eliminations },
-          ] as const).map((column) => (
-            <details key={column.key} className={`decision-column ${column.key}`}>
-              <summary><strong>{column.items.length}</strong><span>{column.title}</span></summary>
-              {column.items.length ? (
-                <ul>
-                  {column.items.slice(0, 8).map((rule, index) => (
-                    <li key={`${rule.name}-${index}`}>
-                      <strong>{rule.name}</strong>
-                      <span>{rule.detail}{rule.sourcePage ? ` · s. ${rule.sourcePage}` : ""}</span>
-                    </li>
-                  ))}
-                  {column.items.length > 8 ? <li className="more">+ {column.items.length - 8} madde daha</li> : null}
-                </ul>
-              ) : (
-                <p>Bu belgede tanımlı madde bulunmadı.</p>
-              )}
-            </details>
-          ))}
-        </div>
-      </section>
-
       <details className="analysis-notes">
         <summary>AI’nin kriter dışında bıraktığı notları göster</summary>
         <div>
@@ -565,9 +601,34 @@ function CriteriaReview({
       <div className="review-grid">
         <div className="criteria-ledger" id="criteria-list">
           <div className="criteria-section-heading">
-            <div><h2>Kriter listesi</h2><p>Düzenlemek istediğiniz kriteri seçin.</p></div>
-            <button type="button" className="secondary-button" onClick={addCriterion}>+ Kriter ekle</button>
+            <div><h2>Kriter listesi</h2><p>AI çıkarımlarını doğrulayın veya belgede bulunan eksik bir kriteri kendiniz oluşturun.</p></div>
+            <button type="button" className="secondary-button add-criterion-button" onClick={addCriterion}>
+              <span aria-hidden="true">＋</span>
+              <span><strong>Yeni kriter oluştur</strong><small>Tüm alanları elle doldur</small></span>
+            </button>
           </div>
+          {pendingReview.length ? (
+            <div className="review-queue" role="status">
+              <div>
+                <strong>{pendingReview.length} bulgu görevli kararı bekliyor</strong>
+                <p>Bu maddelerde eksik kanıt, anlam farkı, çelişki veya tamamlanmamış doğrulama var. Profili onaylamadan önce kaynak sayfayı kontrol edin.</p>
+              </div>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => {
+                  setReviewFilter(reviewFilter === "needs_review" ? "all" : "needs_review");
+                  if (reviewFilter !== "needs_review") setSelectedId(pendingReview[0].id);
+                }}
+              >
+                {reviewFilter === "needs_review" ? "Tüm kriterleri göster" : "Karar bekleyenleri incele"}
+              </button>
+            </div>
+          ) : (
+            <div className="review-queue complete" role="status">
+              <div><strong>Karar bekleyen bulgu yok</strong><p>Belirsiz çıkarımların tamamı görevli tarafından sonuçlandırıldı.</p></div>
+            </div>
+          )}
           <div className="ledger-tools">
             <label className="search-box">
               <span aria-hidden="true">⌕</span>
@@ -595,20 +656,20 @@ function CriteriaReview({
                 <span className={`type-mark ${item.type}`} aria-hidden="true" />
                 <span className="criterion-main">
                   <strong>{item.name}</strong>
-                  <small>{item.scope || "Genel"} · {EFFECT_LABELS[criterionEffect(item)]} · {item.sourcePage ? `Sayfa ${item.sourcePage}` : "Yönetici eklemesi"}</small>
+                  <small>{item.scope || "Genel"} · {EFFECT_LABELS[criterionEffect(item)]} · {item.sourcePage ? `Sayfa ${item.sourcePage}` : "Kaynak sayfa yok"}{item.evidence ? ` · ${EVIDENCE_LABELS[item.evidence.status]}` : ""}</small>
                 </span>
                 <span className={`criterion-value ${criterionEffect(item)}`}>
                   {criterionEffect(item) === "score" && item.maxScore !== null
-                    ? `${item.maxScore}p`
+                    ? `${item.maxScore} puan`
                     : criterionEffect(item) === "score"
-                      ? "Puan"
+                      ? "Puanlama"
                     : criterionEffect(item) === "penalty"
-                      ? "Ceza"
+                      ? item.maxScore !== null ? `-${Math.abs(item.maxScore)} puan` : "Puan kesintisi"
                       : criterionEffect(item) === "threshold"
-                        ? "Baraj"
+                        ? "Asgari sonuç"
                         : criterionEffect(item) === "gate"
-                          ? "Geçiş"
-                          : "Öneri"}
+                          ? "Uygunluk şartı"
+                          : "Bilgi notu"}
                 </span>
               </button>
             ))}
@@ -626,9 +687,22 @@ function CriteriaReview({
               <div>
                 <span className={`confidence ${selected.confidence}`}>{CONFIDENCE_LABELS[selected.confidence]}</span>
                 <span className="origin-label">{selected.origin === "document" ? "AI tarafından belgeden çıkarıldı" : "Yönetici tarafından eklendi"}</span>
+                {selected.evidence ? <span className="origin-label">{EVIDENCE_LABELS[selected.evidence.status]}</span> : null}
               </div>
               <label className="active-toggle">
-                <input type="checkbox" checked={selected.active} onChange={(event) => { update({ active: event.target.checked }); setReviewConfirmed(false); }} />
+                <input
+                  type="checkbox"
+                  checked={selected.active}
+                  onChange={(event) => {
+                    update({
+                      active: event.target.checked,
+                      reviewStatus: event.target.checked
+                        ? "confirmed"
+                        : selected.reviewStatus === "needs_review" ? "needs_review" : "excluded",
+                    });
+                    setReviewConfirmed(false);
+                  }}
+                />
                 <span />
                 {selected.active ? "Aktif" : "Pasif"}
               </label>
@@ -636,8 +710,21 @@ function CriteriaReview({
 
             {selected.issue ? (
               <div className="audit-note" role="note">
-                <strong>Ek denetim notu</strong>
+                <strong>Kaynak doğrulama notu</strong>
                 <p>{selected.issue}</p>
+              </div>
+            ) : null}
+
+            {selected.reviewStatus === "needs_review" ? (
+              <div className="pending-decision" role="group" aria-label="Belirsiz kriter kararı">
+                <div>
+                  <strong>Bu maddenin kaynak kanıtı kesinleşmedi</strong>
+                  <p>PDF sayfasında koşulu, varsa sayısal değeri ve ihlal sonucunu birlikte kontrol edin. Tamamı destekleniyorsa kriteri etkinleştirin.</p>
+                </div>
+                <div>
+                  <button type="button" className="primary-button" onClick={() => resolvePendingCriterion("confirm")}>Kaynağı doğruladım, kriteri etkinleştir</button>
+                  <button type="button" className="secondary-button" onClick={() => resolvePendingCriterion("exclude")}>Kriter değil, dışarıda bırak</button>
+                </div>
               </div>
             ) : null}
 
@@ -655,11 +742,6 @@ function CriteriaReview({
                 <Field label="Etkisi">
                   <select value={criterionEffect(selected)} onChange={(event) => { update({ effect: event.target.value as CriterionEffect }); setReviewConfirmed(false); }}>
                     {(Object.keys(EFFECT_LABELS) as CriterionEffect[]).map((effect) => <option key={effect} value={effect}>{EFFECT_LABELS[effect]}</option>)}
-                  </select>
-                </Field>
-                <Field label="Değerlendirme yöntemi">
-                  <select value={selected.evaluationMethod} onChange={(event) => { update({ evaluationMethod: event.target.value as EvaluationMethod }); setReviewConfirmed(false); }}>
-                    {(Object.keys(METHOD_LABELS) as EvaluationMethod[]).map((method) => <option key={method} value={method}>{METHOD_LABELS[method]}</option>)}
                   </select>
                 </Field>
                 <Field label="Kapsam / aşama">
@@ -699,7 +781,29 @@ function CriteriaReview({
                   <a href={`${documentUrl}#page=${selected.sourcePage}`} target="_blank" rel="noreferrer">Kaynak sayfayı aç · s. {selected.sourcePage} ↗</a>
                 ) : <span>Kaynak sayfa yok</span>}
               </div>
-              <blockquote>{selected.sourceText}</blockquote>
+              {selected.origin === "manager" ? (
+                <div className="manual-evidence-grid">
+                  <Field label="Kaynak PDF sayfası" hint="Kriter PDF’de bulunuyorsa sayfa numarasını yazın; yeni yönetim kuralıysa boş bırakın.">
+                    <input
+                      type="number"
+                      min={1}
+                      max={result.pageCount}
+                      value={selected.sourcePage ?? ""}
+                      placeholder="Örn. 12"
+                      onChange={(event) => {
+                        update({ sourcePage: event.target.value === "" ? null : Number(event.target.value) });
+                        setReviewConfirmed(false);
+                      }}
+                    />
+                  </Field>
+                  <Field label="İlgili metin" hint="Kriteri destekleyen cümleyi veya yönetici kararının dayanağını yazın.">
+                    <textarea
+                      value={selected.sourceText}
+                      onChange={(event) => { update({ sourceText: event.target.value }); setReviewConfirmed(false); }}
+                    />
+                  </Field>
+                </div>
+              ) : <blockquote>{selected.sourceText}</blockquote>}
             </div>
 
             <div className="inspector-section ai-section">
@@ -749,11 +853,12 @@ function CriteriaReview({
         <div className="approval-check">
           <label>
             <input type="checkbox" checked={reviewConfirmed} onChange={(event) => setReviewConfirmed(event.target.checked)} />
-            <span>Aktif kriterleri, kaynaklarını, puan planını ve görevli onayı gerektiren kontrolleri inceledim.</span>
+            <span>Aktif kriterleri, kaynaklarını ve puan planını inceledim; karar bekleyen bulgu kalmadı.</span>
           </label>
           {!canApprove ? (
             <small>
               {groups.length > 0 && included.length === 0 && "En az bir puan grubunu değerlendirmeye dahil edin. "}
+              {pendingReview.length > 0 && `${pendingReview.length} kanıt bulgusunu onaylayın veya dışarıda bırakın. `}
               {!reviewConfirmed && "Görevli kontrolünü onaylayın."}
             </small>
           ) : <small className="ready-note">Profil onaya hazır.</small>}
@@ -964,6 +1069,10 @@ export default function CriteriaApp() {
 
   async function analyze() {
     if (!file) return;
+    if (result && criteria.length) {
+      setStep(2);
+      return;
+    }
     setLoading(true);
     setError("");
     try {
@@ -989,7 +1098,7 @@ export default function CriteriaApp() {
     }
   }
 
-  function approve() {
+  async function approve() {
     if (!file || !result) return;
     setApprovalError("");
     const declaredTotal = result.scorePlan?.declaredTotalScore ?? null;
@@ -1032,11 +1141,12 @@ export default function CriteriaApp() {
       decisionRules: deriveDecisionRules(scopedCriteria, result.scorePlan),
     };
     try {
-      localStorage.setItem("kriter-atolyesi:last-profile", JSON.stringify(nextProfile));
-      setProfile(nextProfile);
+      const published = await workflowApi.publishProfile(nextProfile);
+      localStorage.setItem("kriter-atolyesi:last-profile", JSON.stringify(published.profile.profile));
+      setProfile(published.profile.profile);
       setStep(3);
-    } catch {
-      setApprovalError("Profil tarayıcıya kaydedilemedi. Gizli modu kapatın veya tarayıcı depolamasında yer açıp yeniden deneyin.");
+    } catch (caught) {
+      setApprovalError(caught instanceof Error ? caught.message : "Profil yayınlanamadı. Bağlantıyı kontrol edip yeniden deneyin.");
     }
   }
 
@@ -1091,6 +1201,7 @@ export default function CriteriaApp() {
             onFile={chooseFile}
             onSample={(sampleFile) => chooseFile(sampleFile)}
             onAnalyze={analyze}
+            analysisReady={Boolean(result && criteria.length)}
             loading={loading}
             loadingMessage={loadingMessage}
             error={error}
@@ -1106,6 +1217,7 @@ export default function CriteriaApp() {
             setCriteria={setCriteria}
             includedGroupIds={includedGroupIds}
             setIncludedGroupIds={setIncludedGroupIds}
+            onScorePlanChange={(scorePlan) => setResult((current) => current ? { ...current, scorePlan } : current)}
             onBack={() => setStep(1)}
             onApprove={approve}
             approvalError={approvalError}

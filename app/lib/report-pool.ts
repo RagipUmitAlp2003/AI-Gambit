@@ -8,6 +8,8 @@ import type { ReportRecord } from "./types";
  */
 export type StoredReport = ReportRecord & {
   file: File;
+  /** D1/R2 başvuru havuzundan geldiyse sunucu kaydının kimliği. */
+  sourceApplicationId?: string;
   /** Analiz sırasında çıkarılan sayfa metinleri; havuz içi benzerlik kontrolünde kullanılır. */
   pagesText?: string[];
 };

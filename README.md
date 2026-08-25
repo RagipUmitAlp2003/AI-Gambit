@@ -2,27 +2,39 @@
 
 TEKNOFEST benzeri yarışmalarda organizatörün yüklediği değerlendirme PDF'sini; kaynakları gösterilen, düzenlenebilir ve onaylanabilir bir kriter profiline dönüştüren ilk modül prototipidir.
 
+## Rol bazlı yönetici girişi
+
+Uygulama `http://localhost:3000` adresinde yönetici giriş ekranıyla açılır. Yönetici hesapları ve oturumları Cloudflare D1 içinde saklanır; gerçek giriş e-posta ve PBKDF2 ile özetlenmiş parola üzerinden yapılır. Yerel geliştirmede `ALLOW_DEV_LOGIN=on` olduğunda dört şifresiz rol kısayolu görünür; bu kısayollar `APP_ENV=production` ortamında sunucu tarafından kapatılır.
+
+- **00 · Baş Yönetici:** yönetici hesaplarını, rolleri ve işlem geçmişini yönetir; iki çalışma alanını da denetler.
+- **01 · Yarışma Yöneticisi:** `/kriter-atolyesi` üzerinden resmî PDF'yi analiz eder ve değerlendirme profilini kesinleştirir.
+- **02 · Hakem / Değerlendirici:** `/degerlendirme` üzerinden AI bulgularını inceler ve nihai uzman kararını verir.
+- **03 · Yarışmacı:** hesap oluşturur, yarışmayı seçer, PDF raporunu gönderir ve yalnızca hakem onaylı sonucunu görür.
+- **04 · Değerlendirme Yöneticisi:** başvuruları, yayınlı profilleri ve değerlendirme durumlarını salt okunur izler; hakem kararını değiştiremez.
+
+Problem 4'teki **03 · Yarışmacı** yönetici rolü değildir ve yönetici hesap ekranından atanmaz. Yarışmacı giriş ekranından kendi hesabını oluşturur. Hem sayfalar hem de ücretli analiz uçları sunucu oturumuna ve role göre korunur.
+
 ## Bu sürümde çalışan akış
 
 1. Görevli organizatörün kriter/şartname PDF'sini yükler; ayrı bir temel ayar formu doldurmaz.
 2. PDF, tablo ve sayfa yapısı korunarak sunucu üzerinden Gemini'ye gönderilir. Yarışma, kategori, aşama, rapor türü ve katılımcı teslim sınırları da yalnızca bu belgeden çıkarılır. Uzun şartnamelerde ilk çıkarımdan sonra bağımsız bir eksik-kural denetimi daha çalışır.
 3. PDF'de bulunmayan format, boyut, dosya adedi veya ihlal sonucu için sistem varsayım üretmez.
 4. İlan edilen puan toplamı ve birbirini örtmeyen puan grupları ayrıca çıkarılır; grup toplamı ile PDF toplamı otomatik karşılaştırılır.
-5. Kriter adı, kapsam/aşama, etki türü, puanı, zorunluluğu, ihlal sonucu, değerlendirme yöntemi, kaynak sayfası, ilgili metin ve sistem önerisi yöneticiye gösterilir.
+5. Kriter adı, kapsam/aşama, etki türü, puanı, zorunluluğu, ihlal sonucu, kaynak sayfası, ilgili metin ve sistem önerisi yöneticiye gösterilir. Değerlendirme yöntemi AI tarafından belirlenen teknik bir alan olarak saklanır; yarışma yöneticisine gereksiz bir seçim olarak gösterilmez.
 6. Fiziksel güvenlik ve hakem uygunluğu maddelerinde sistem nihai karar vermez; bulgu üretir ve insan onayı ister.
-7. Yönetici kriterleri düzenleyebilir, pasifleştirebilir, yenisini ekleyebilir veya manuel eklediği kriteri onaylı bir silme akışıyla kaldırabilir. Uygunluk koşulları, devam için gereken en düşük sonuçlar, puan kesintileri ve eleme incelemeleri "Puan dışında sonucu etkileyen kurallar" bölümünde açık adlarla gösterilir. Sonuçlar, PDF'de ilan edilen resmî puan ölçeğiyle gösterilir; sistem kendiliğinden 100'lük ölçeğe dönüştürmez.
+7. Yönetici kriterleri düzenleyebilir, pasifleştirebilir, yenisini ekleyebilir veya manuel eklediği kriteri onaylı bir silme akışıyla kaldırabilir. Ayrı karar kuralı özeti kaldırılmıştır; bütün kurallar tek kriter listesinde kaynaklarıyla incelenir. Sonuçlar, PDF'de ilan edilen resmî puan ölçeğiyle gösterilir; sistem kendiliğinden 100'lük ölçeğe dönüştürmez.
 8. Çok aşamalı şartnamelerde (rapor + saha görevleri aynı belgede) yönetici, hangi puan gruplarının bu profilde değerlendirileceğini seçer. Örneğin İnsansız Deniz Aracı şartnamesi 315 puan ilan eder, ancak yalnızca "Rapor Puanlaması" kapsama alınırsa değerlendirme resmî 15 puanlık grup üzerinden yapılır. Belgede ilan edilen genel toplam profilde ayrıca korunur.
-9. Yönetici kaynakları ve AI yorumlarını doğruladıktan sonra profil onaylanır ve JSON olarak indirilebilir. Eksik veya tekrar sayılan puan satırları, PDF'deki resmî grup azamisi korunacak biçimde güvenli bir hakem kriteriyle dengelenir. Ayrı aşamalara ait puanlar bulunan şartnamelerde toplamın 100 olması zorunlu tutulmaz.
+9. Yönetici kaynakları ve AI yorumlarını doğruladıktan sonra profil onaylanır, D1'de yayınlanır ve JSON olarak indirilebilir. Eksik veya tekrar sayılan puan satırları, PDF'deki resmî grup azamisi korunacak biçimde güvenli bir hakem kriteriyle dengelenir. Ayrı aşamalara ait puanlar bulunan şartnamelerde toplamın 100 olması zorunlu tutulmaz.
 
-Seçilen PDF, analiz taslağı ve kriter düzenlemeleri bu prototipte yalnızca tarayıcıda yerel olarak saklanır. Yönetici önceki adımlara dönebilir veya sayfayı yenileyebilir; yalnızca yeni bir belge seçmesi ya da “Taslağı sıfırla” işlemi mevcut analizi temizler. Bu kayıtlar başka cihaz veya görevliyle paylaşılmaz; hesap/yetki modülü birleştirilirken kalıcı kayıtlar D1'e, PDF dosyaları R2'ye taşınmalıdır.
+Seçilen kaynak PDF, analiz taslağı ve henüz onaylanmamış kriter düzenlemeleri görevlinin tarayıcısında saklanır. Yönetici önceki adımlara dönebilir veya sayfayı yenileyebilir; yalnızca yeni bir belge seçmesi ya da “Taslağı sıfırla” işlemi taslağı temizler. Onaylanan profil D1'e yayınlanır. Yarışmacı başvuruları D1'de, PDF dosyaları özel R2 deposunda saklanır ve roller arasında aynı kayıt üzerinden taşınır.
 
 ## Değerlendirme Atölyesi (`/degerlendirme`)
 
 Onaylı profil, ikinci modülde katılımcı raporlarına uygulanır:
 
-1. **Rapor havuzu:** Profildeki dosya kapısı kuralları (format, boyut, ihlal davranışı) yükleme anında çalışır. Kabul edilen raporlar cihaz içi havuza alınır; dil tespiti, sayfa sınırı/şablon kontrolü, zorunlu başlık taraması ve havuz içi benzerlik analizi kesin kontroller olarak çalıştırılır.
-2. **Hakem incelemesi:** Her aktif kriter için üretilen bulgu, kanıtı ve şartnamedeki dayanağıyla birlikte gösterilir. Hakem puanı verir veya öneriyi düzeltir; insan kararı gerektiren maddeler karara bağlanmadan inceleme tamamlanamaz. Geri bildirim taslağı hakem tarafından düzenlenir ve onaylanır.
-3. **Yarışmacı görünümü:** Yalnızca hakemin tamamladığı değerlendirmeler görünür; güçlü yönler, gelişim alanları ve öneriler hakem onayı olmadan yayımlanmaz.
+1. **Başvuru havuzu:** Yarışmacı başvuru sahibi adı, takım adı ve ekip üyeleriyle birlikte yarışmayı seçip PDF'yi gönderir. Bu işlem analiz başlatmaz. Başvuru D1'e, değiştirilmeyen PDF özel R2 deposuna kaydedilir ve hakem havuzuna otomatik düşer.
+2. **Hakem incelemesi:** Hakem önce yarışmayı, sonra bekleyen takımı seçer. AI analizi yalnızca hakemin “AI ile değerlendir” eylemiyle başlar. Her aktif kriter için üretilen bulgu, kanıtı ve şartnamedeki dayanağıyla birlikte gösterilir. Hakem puanı ve başvuru sonucunu kesinleştirir; insan kararı gerektiren maddeler karara bağlanmadan inceleme tamamlanamaz.
+3. **Yarışmacı sonucu:** Başvurular yarışmacıya “Gönderildi” veya “İnceleme sonucu” aşamasında gösterilir. Tamamlanan kayıtta kabul, ret ya da düzeltme gerektiren sonuç ile hakem açıklaması görünür; güçlü yönler, gelişim alanları ve öneriler hakem onayı olmadan yayımlanmaz.
 
 Anlamsal kriter analizi (AI puan önerisi, kategori uygunluğu) `app/api/evaluate-report/route.ts` üzerinden çalışır; veri sözleşmesi `docs/RAPOR_DEGERLENDIRME_SOZLESMESI.md` dosyasındadır. API anahtarı kullanılamazsa sistem kesin kontrollerle çevrimdışı sonuca düşer ve anlamsal kriterleri açıkça "insan kararı bekliyor" olarak işaretler; puan uydurmaz.
 
@@ -32,7 +44,7 @@ Gerçek sağlayıcı sunucu tarafındaki `app/api/analyze/route.ts` uç noktası
 
 Yerel ortam değişkenleri `.env.example` örneğine göre tanımlanır. Organizatör kaynak PDF'si için teknik analiz sınırı 18 MB, katılımcı raporu için 50 MB'dir. Bu değerler yarışma kuralı değildir; katılımcı teslim sınırı yalnızca organizatör PDF'sinden gelir. `app/lib/demo-analyzer.ts` çevrimdışı geliştirme ve karşılaştırma için korunmuştur; normal arayüz akışında kullanılmaz.
 
-Maliyet kontrolü: 12 sayfadan uzun belgelerde ikinci bir "eksik kural denetimi" turu çalışır ve kapsamı artırır, ancak token maliyetini ve süreyi yaklaşık iki katına çıkarır (İDA şartnamesinde 105 sn / 56 bin token). Bu tur `COVERAGE_AUDIT=off` ile kapatılabilir, `COVERAGE_AUDIT_MIN_PAGES` ile eşiği yükseltilebilir; ayar önbellek anahtarına dahildir.
+Analiz tek bir örnek PDF'ye bağlı değildir. Kısa belgeler bütünsel, uzun belgeler 2–4 paralel sayfa aralığında işlenir; bölüm haritası, tipli kriterler ve puan planı çıkarılır. Ardından her kriterin koşulu, sayısı, kapsamı, sonucu ve birebir alıntısı PDF'ye karşı ikinci kez doğrulanır; ilk geçişte atlanan açık kurallar ayrıca işaretlenir. Ayrıntılı mimari `docs/GENEL_BELGE_ANALIZ_MIMARISI.md` dosyasındadır. Kanıt turu üretimde açık tutulmalıdır; yalnızca kontrollü karşılaştırma için `EVIDENCE_VERIFICATION=off` kullanılabilir.
 
 Aynı belge, aynı analiz talimatı ve sayfa bağlamıyla yeniden analiz edilirse sunucu içi önbellek (SHA-256 hash) sayesinde model tekrar çağrılmaz. Analiz ucunda geçici istek ve eşzamanlılık sınırı vardır; hesap modülü bağlandığında bunun kullanıcı/kurum kotasıyla tamamlanması gerekir. Her analiz için süre ve token kullanımı `diagnostics` alanında döner. Yerel geliştirmede oturum toplamları `GET /api/metrics` ucundan okunabilir; üretimde bu uç varsayılan olarak kapalıdır. Resmî kota takibi Google AI Studio üzerinden yapılır. Kullanıcı arayüzünde model/sağlayıcı adı gösterilmez.
 
@@ -44,8 +56,8 @@ cp .env.example .env.local   # GEMINI_API_KEY satırını kendi anahtarınızla 
 npm run dev
 ```
 
-Uygulama varsayılan olarak `http://localhost:3000` adresinde açılır; Değerlendirme
-Atölyesi `http://localhost:3000/degerlendirme` adresindedir.
+Uygulama varsayılan olarak `http://localhost:3000` adresindeki giriş panelinde açılır. Kriter
+Atölyesi `/kriter-atolyesi`, Değerlendirme Atölyesi `/degerlendirme` adresindedir.
 
 `--legacy-peer-deps` React sürümü uyumluluğu için zorunludur ve `.env.local` git'e girmediği
 için her makinede ayrıca oluşturulmalıdır. Ayrıntılı kurulum, ilk deneme akışı,
@@ -64,6 +76,13 @@ Belgelerin tümü uygulamadaki “Hazır test belgeleri” bölümünden seçile
 
 - `app/components/criteria-app.tsx`: üç adımlı, PDF merkezli yönetici akışı
 - `app/components/evaluation-app.tsx`: Değerlendirme Atölyesi (rapor havuzu, hakem incelemesi, yarışmacı görünümü)
+- `app/components/participant-portal.tsx`: yarışma arama, PDF başvurusu ve yarışmacı sonuç takibi
+- `app/components/manager-profile-history.tsx`: geçmiş kriter ayıklamaları ve onaylanan projeler
+- `app/components/operations-panel.tsx`: 00/04 için salt okunur süreç izleme
+- `app/lib/workflow-db.ts`: yayınlı profiller ve başvurular için D1/R2 veri katmanı
+- `app/api/applications/*`: başvuru, dosya erişimi ve hakem durum güncellemeleri
+- `app/api/profiles/route.ts`: onaylı kriter profillerini yayınlama ve okuma
+- `app/api/extractions/route.ts`: kriter ayıklama geçmişini yetkiye göre okuma
 - `app/lib/report-prechecks.ts`: dosya kapısı, dil, şablon/başlık ve benzerlik kesin kontrolleri
 - `app/lib/report-pool.ts`: cihaz içi rapor havuzu deposu
 - `app/lib/report-evaluator.ts` + `app/lib/demo-report-evaluator.ts`: analiz motoru istemcisi ve çevrimdışı yedek
@@ -81,6 +100,7 @@ Belgelerin tümü uygulamadaki “Hazır test belgeleri” bölümünden seçile
 - `app/lib/draft-store.ts`: adımlar arası ve sayfa yenileme sonrası taslak kalıcılığı
 - `app/lib/demo-analyzer.ts`: çevrimdışı karşılaştırma sağlayıcısı
 - `app/lib/types.ts`: kriter ve profil veri modeli
+- `migrations/0001_admin.sql`, `0002_competition_workflow.sql`, `0003_application_teams_and_history.sql`: D1 şema geçmişi
 - `tools/create_sample_pdf.py`: sentetik PDF üreticisi
 - `DESIGN.md`: arayüz tasarım sistemi
 - `PRODUCT.md`: ürün kapsamı ve değişmez ilkeler

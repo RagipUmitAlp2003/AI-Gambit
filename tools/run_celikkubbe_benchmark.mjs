@@ -20,6 +20,20 @@ const outputPath = path.join(root, "output", "benchmarks", "celikkubbe-latest.js
 const endpoint = process.argv.find((argument) => argument.startsWith("http")) || "http://127.0.0.1:3000/api/analyze";
 const reuseLatest = process.argv.includes("--reuse");
 
+async function developmentSessionCookie(target) {
+  const targetUrl = new URL(target);
+  if (targetUrl.protocol !== "http:" || !["localhost", "127.0.0.1", "::1"].includes(targetUrl.hostname)) {
+    throw new Error("Otomatik benchmark oturumu yalnızca yerel HTTP sunucusunda kullanılabilir.");
+  }
+  const response = await fetch(new URL("/api/admin/dev-session", targetUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ roleCode: "01" }),
+  });
+  if (!response.ok) throw new Error("Benchmark için yerel Yarışma Yöneticisi oturumu açılamadı.");
+  return (response.headers.get("set-cookie") || "").split(";")[0];
+}
+
 const expected = JSON.parse(await readFile(expectedPath, "utf8"));
 const setup = {
   competition: "Çelikkubbe Hava Savunma Sistemleri Yarışması",
@@ -43,7 +57,11 @@ if (reuseLatest) {
   form.append("file", new Blob([pdf], { type: "application/pdf" }), expected.document);
   form.append("setup", JSON.stringify(setup));
   form.append("pageCount", "25");
-  const response = await fetch(endpoint, { method: "POST", body: form });
+  const response = await fetch(endpoint, {
+    method: "POST",
+    body: form,
+    headers: { cookie: await developmentSessionCookie(endpoint) },
+  });
   analysis = await response.json();
   if (!response.ok) throw new Error(analysis.error || `HTTP ${response.status}`);
 }

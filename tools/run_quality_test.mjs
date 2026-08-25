@@ -9,6 +9,20 @@ import { idaExpectation, syntheticExpectation } from "./quality-expectations.mjs
 const root = process.cwd();
 const endpoint = process.argv.find((argument) => argument.startsWith("http")) || "http://localhost:3000/api/analyze";
 
+async function developmentSessionCookie(target) {
+  const targetUrl = new URL(target);
+  if (targetUrl.protocol !== "http:" || !["localhost", "127.0.0.1", "::1"].includes(targetUrl.hostname)) {
+    throw new Error("Otomatik kalite testi oturumu yalnızca yerel HTTP sunucusunda kullanılabilir.");
+  }
+  const response = await fetch(new URL("/api/admin/dev-session", targetUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ roleCode: "01" }),
+  });
+  if (!response.ok) throw new Error("Kalite testi için yerel Yarışma Yöneticisi oturumu açılamadı.");
+  return (response.headers.get("set-cookie") || "").split(";")[0];
+}
+
 const jobs = [
   {
     pdf: path.join(root, "output", "pdf", "Ornek_Akilli_Ulasim_OTR_Degerlendirme_Kilavuzu.pdf"),
@@ -53,7 +67,11 @@ for (const job of jobs) {
   form.append("file", new Blob([pdf], { type: "application/pdf" }), path.basename(job.pdf));
   form.append("setup", JSON.stringify(job.setup));
   form.append("pageCount", job.pageCount);
-  const response = await fetch(endpoint, { method: "POST", body: form });
+  const response = await fetch(endpoint, {
+    method: "POST",
+    body: form,
+    headers: { cookie: await developmentSessionCookie(endpoint) },
+  });
   const analysis = await response.json();
   if (!response.ok) throw new Error(`${path.basename(job.out)}: ${analysis.error || response.status}`);
   requireQuality(analysis, job.expected, path.basename(job.out));
