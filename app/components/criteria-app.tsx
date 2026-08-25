@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import DocumentLibraryModal from "./document-library-modal";
 import FileBadge from "./file-badge";
 import TemplatePreview from "./template-preview";
+import TopbarSession from "./topbar-session";
 import { analyzeWithGemini } from "../lib/gemini-analyzer";
 import { criterionEffectOf as criterionEffect, deriveDecisionRules, maxRawScoreOf, scopeCriteriaToGroups } from "../lib/evaluation-summary";
 import { getPdfPageCount } from "../lib/pdf-reader";
@@ -154,18 +155,20 @@ function StepRail({ step, completedSteps, onNavigate }: {
   );
 }
 
-function Topbar({ step }: { step: Step }) {
+function Topbar({ step, onBack }: { step: Step; onBack: () => void }) {
   const current = STEPS.find((item) => item.id === step)!;
   return (
     <header className="topbar">
-      <div>
-        <span className="topbar-context">P4 · Değerlendirme karar destek sistemi</span>
-        <strong>{current.title}</strong>
+      <div className="topbar-lead">
+        <button type="button" className="topbar-back" onClick={onBack} aria-label="Geri dön" title="Geri dön">
+          <span aria-hidden="true">←</span>
+        </button>
+        <div>
+          <span className="topbar-context">P4 · Değerlendirme karar destek sistemi</span>
+          <strong>{current.title}</strong>
+        </div>
       </div>
-      <div className="topbar-status">
-        <span className="status-chip neutral">Yerel prototip</span>
-        <span className="operator-avatar" aria-label="Proje yöneticisi">PY</span>
-      </div>
+      <TopbarSession />
     </header>
   );
 }
@@ -849,7 +852,7 @@ function CriteriaReview({
       </div>
 
       <div className="approval-bar">
-        <button type="button" className="back-button" onClick={onBack}>← Kaynak belgeye dön <small>Taslak korunur</small></button>
+        <button type="button" className="icon-back" onClick={onBack} aria-label="Kaynak belgeye dön · taslak korunur" title="Kaynak belgeye dön · taslak korunur"><span aria-hidden="true">←</span></button>
         <div className="approval-check">
           <label>
             <input type="checkbox" checked={reviewConfirmed} onChange={(event) => setReviewConfirmed(event.target.checked)} />
@@ -1193,7 +1196,7 @@ export default function CriteriaApp() {
       */}
       <StepRail step={step} completedSteps={completedSteps} onNavigate={navigate} />
       <div className="app-main">
-        <Topbar step={step} />
+        <Topbar step={step} onBack={() => { if (step > 1) setStep((step - 1) as Step); else window.location.href = "/"; }} />
         <div className="context-line" aria-hidden="true">{backgroundLabel}</div>
         {step === 1 ? (
           <UploadStep

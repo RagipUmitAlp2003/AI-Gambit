@@ -489,10 +489,18 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .app-main { min-width: 0; }
 .topbar { min-height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px clamp(24px,4vw,56px); border-bottom: 1px solid var(--line); background: rgba(255,255,255,.88); backdrop-filter: blur(14px); }
-.topbar > div:first-child { display: grid; gap: 3px; }
+.topbar > div:first-child:not(.topbar-lead) { display: grid; gap: 3px; }
 .topbar-context { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
 .topbar strong { font-size: 16px; }
 .topbar-status { display: flex; align-items: center; gap: 12px; }
+.topbar > .topbar-lead { display: flex; align-items: center; gap: 16px; }
+.topbar-lead > div { display: grid; gap: 3px; }
+.topbar-back, .icon-back { flex: 0 0 auto; align-self: center; padding: 6px 2px; border: 0; background: transparent; color: var(--ink-soft); font-size: 17px; line-height: 1; font-weight: 700; text-decoration: none; cursor: pointer; transition: color .15s ease; }
+.topbar-back:hover, .icon-back:hover { color: var(--teal-deep); }
+.topbar-back { margin-left: -35px; }
+.icon-back { display: inline-flex; align-items: center; justify-self: start; }
+.topbar-user { color: var(--muted); font-size: 11px; }
+.topbar-status .text-button:disabled { opacity: .6; cursor: progress; }
 .operator-avatar { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--ink); color: #fff; font-size: 11px; font-weight: 800; }
 .status-chip { display: inline-flex; align-items: center; min-height: 26px; padding: 4px 9px; border-radius: 999px; font-size: 10px; font-weight: 700; white-space: nowrap; }
 .status-chip.neutral { color: var(--ink-soft); background: #e9eff1; }
@@ -1012,6 +1020,7 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 
 @media (max-width: 620px) {
   .topbar-context, .topbar-status .status-chip, .context-line { display: none; }
+  .topbar-back span { margin: 0; }
   .topbar { padding: 11px 16px; }
   .step-rail ol { grid-template-columns: repeat(3,28px); justify-content: space-between; }
   .rail-step > button { display: block; }

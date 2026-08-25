@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import FileBadge from "./file-badge";
 import DocumentLibraryModal from "./document-library-modal";
+import TopbarSession from "./topbar-session";
 import { applyPenalties, criterionEffectOf, criterionEliminates, normalizeScoreDetailed } from "../lib/evaluation-summary";
 import { extractPdfText } from "../lib/pdf-reader";
 import { loadLastApprovedProfile, readProfileFile, saveActiveProfile } from "../lib/profile-loader";
@@ -229,24 +230,25 @@ function EvalRail({ view, counts, onNavigate }: {
           <p>Sistem eleme veya nihai puan kararı vermez; her sonuç hakem onayından geçer.</p>
         </div>
       </div>
-      <Link className="eval-rail-link" href="/">← Çalışma alanıma dön</Link>
+      <Link className="eval-rail-link icon-back" href="/" aria-label="Çalışma alanıma dön" title="Çalışma alanıma dön"><span aria-hidden="true">←</span></Link>
     </nav>
   );
 }
 
-function EvalTopbar({ view }: { view: EvalView }) {
+function EvalTopbar({ view, onBack }: { view: EvalView; onBack: () => void }) {
   const current = VIEWS.find((item) => item.id === view)!;
-  const role = view === 1 ? { mark: "PY", label: "Proje yöneticisi" } : view === 2 ? { mark: "HK", label: "Hakem / değerlendirici" } : { mark: "YR", label: "Yarışmacı görünümü" };
   return (
     <header className="topbar">
-      <div>
-        <span className="topbar-context">P4 · Değerlendirme karar destek sistemi</span>
-        <strong>{current.title}</strong>
+      <div className="topbar-lead">
+        <button type="button" className="topbar-back" onClick={onBack} aria-label="Geri dön" title="Geri dön">
+          <span aria-hidden="true">←</span>
+        </button>
+        <div>
+          <span className="topbar-context">P4 · Değerlendirme karar destek sistemi</span>
+          <strong>{current.title}</strong>
+        </div>
       </div>
-      <div className="topbar-status">
-        <span className="status-chip neutral">Yerel prototip</span>
-        <span className="operator-avatar" aria-label={role.label}>{role.mark}</span>
-      </div>
+      <TopbarSession />
     </header>
   );
 }
@@ -1462,7 +1464,7 @@ export default function EvaluationApp() {
     <main className="app-shell">
       <EvalRail view={view} counts={counts} onNavigate={setView} />
       <div className="app-main">
-        <EvalTopbar view={view} />
+        <EvalTopbar view={view} onBack={() => { if (view > 1) setView((view - 1) as EvalView); else window.location.href = "/"; }} />
         <div className="context-line" aria-hidden="true">
           {profile ? `${profile.setup.competition} · ${profile.setup.reportType}` : "Onaylı profil bekleniyor"}
         </div>
