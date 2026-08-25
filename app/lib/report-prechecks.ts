@@ -1,9 +1,31 @@
-import type { CheckStatus, Criterion, PreCheck, ProfileExport, SetupData } from "./types";
+import {
+  CHECK_STAGE_IDS,
+  RULE_VERDICT_LABELS,
+  checkStageOf,
+  type CheckStage,
+  type CheckStatus,
+  type Criterion,
+  type CriterionFinding,
+  type HeadingCheck,
+  type ParticipantFeedback,
+  type PreCheck,
+  type ProfileExport,
+  type RuleVerdict,
+  type SetupData,
+  type SimilarityResult,
+  type StageResult,
+  type VerdictSummary,
+} from "./types";
 
 /**
  * Katılımcı raporu üzerinde makine tarafından kesin olarak çalıştırılabilen
- * ön kontroller: dosya kapısı, dil tespiti, başlık/şablon eşleştirmesi ve
- * havuz içi benzerlik. AI gerektiren kontroller burada üretilmez; onlar
+ * ön kontroller: dosya kapısı, dil tespiti, sayfa sınırı, başlık eşleştirmesi ve
+ * havuz içi benzerlik. Ayrıca dört aşamalı sonucun sunucu (AI motoru) ve
+ * çevrimdışı yedek tarafından ortak kullanılan birleştirme yardımcıları burada
+ * tanımlanır: aşama sonucu türetme, sayaçlar ve geri bildirim taslağı.
+ *
+ * Bu modül tarayıcı ve sunucu (Cloudflare) ortamında çalışır; DOM veya dosya
+ * sistemi bağımlılığı taşımaz. AI gerektiren kontroller burada üretilmez; onlar
  * analiz motorunun sözleşmesindedir (docs/RAPOR_DEGERLENDIRME_SOZLESMESI.md).
  */
 
@@ -125,13 +147,15 @@ export function gateBlocksUpload(checks: PreCheck[]): boolean {
 const TURKISH_STOPWORDS = ["ve", "bir", "bu", "için", "ile", "olarak", "olan", "gibi", "daha", "sistem"];
 const ENGLISH_STOPWORDS = ["the", "and", "of", "to", "in", "is", "for", "with", "this", "system"];
 
+export type LanguageCode = "tr" | "en" | "unknown";
+
 /**
  * Sayfa metinlerinden rapor dilini kestirir; kısa metinlerde "unknown" döner.
  * İngilizce sinyalleri kök yerelde küçültülmüş kopyadan sayılır: tr-TR
  * küçültmesi büyük "I" harfini noktasız "ı"ya çevirdiği için hem İngilizce
  * durak sözcüklerini bozar hem de Türkçe harf sayımını şişirir.
  */
-export function detectLanguage(pages: string[]): "tr" | "en" | "unknown" {
+export function detectLanguage(pages: string[]): LanguageCode {
   const raw = pages.join(" ");
   const turkishText = lower(raw);
   const englishText = raw.toLowerCase();
@@ -149,21 +173,49 @@ export function detectLanguage(pages: string[]): "tr" | "en" | "unknown" {
   return "unknown";
 }
 
-export function buildLanguageCheck(pages: string[]): PreCheck {
-  const language = detectLanguage(pages);
-  const status: CheckStatus = language === "tr" ? "passed" : language === "en" ? "flagged" : "warning";
+/** Dil kodunun ekranda gösterilen adı; tespit edilemediyse null. */
+export function languageLabel(code: LanguageCode): string | null {
+  if (code === "tr") return "Türkçe";
+  if (code === "en") return "İngilizce";
+  return null;
+}
+
+/**
+ * Şartnamenin beklediği dil metnini ("Türkçe", "Turkish", "İngilizce",
+ * "English") karşılaştırılabilir koda çevirir; tanınmayan dilde null döner ve
+ * karşılaştırma yapılmaz.
+ */
+export function expectedLanguageCode(expected: string | null | undefined): Exclude<LanguageCode, "unknown"> | null {
+  if (!expected) return null;
+  const key = lower(expected);
+  if (/türk|turk/.test(key)) return "tr";
+  if (/ingiliz|english/.test(key)) return "en";
+  return null;
+}
+
+/** Tespit edilen dil, beklenen dilden kesin olarak farklıysa true. */
+export function languageMismatch(detected: LanguageCode, expected: string | null | undefined): boolean {
+  const expectedCode = expectedLanguageCode(expected);
+  return expectedCode !== null && detected !== "unknown" && detected !== expectedCode;
+}
+
+export function buildLanguageCheck(pages: string[], expectedLanguage?: string | null): PreCheck {
+  const detected = detectLanguage(pages);
+  const mismatch = languageMismatch(detected, expectedLanguage);
+  const status: CheckStatus = detected === "unknown" ? "warning" : mismatch ? "flagged" : "passed";
+  const detectedLabel = languageLabel(detected);
+  const expectedNote = expectedLanguage ? ` Şartnamenin beklediği dil: ${expectedLanguage}.` : " Şartname rapor dilini açıkça belirtmiyor.";
   return {
     id: "precheck-language",
     kind: "language",
     name: "Rapor dili",
     status,
     method: "deterministic",
-    detail:
-      language === "tr"
-        ? "Rapor dili Türkçe olarak tespit edildi."
-        : language === "en"
-          ? "Rapor dili İngilizce görünüyor. Şartname Türkçe rapor bekliyorsa görevli incelemesi gerekir."
-          : "Rapor dili güvenilir biçimde tespit edilemedi; metin çok kısa veya taranmış görüntü olabilir.",
+    detail: detected === "unknown"
+      ? `Rapor dili güvenilir biçimde tespit edilemedi; metin çok kısa veya taranmış görüntü olabilir.${expectedNote}`
+      : mismatch
+        ? `Rapor dili ${detectedLabel} olarak tespit edildi; şartname ${expectedLanguage} bekliyor. Dil uyuşmazlığı hakem incelemesi için işaretlendi.`
+        : `Rapor dili ${detectedLabel} olarak tespit edildi.${expectedNote}`,
     evidence: [],
   };
 }
@@ -180,16 +232,38 @@ export function parsePageLimit(text: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
+/**
+ * Kriterin taşıdığı sayfa üst sınırı. Özgün alıntı ve ad önce okunur; belge
+ * yabancı dilde ise Türkçe açıklamadaki sınır yedek olarak kullanılır.
+ */
+export function pageLimitOf(criterion: Criterion): number | null {
+  return parsePageLimit(`${criterion.name} ${criterion.sourceText}`) ?? parsePageLimit(criterion.description);
+}
+
+export type PageLimitRule = { rule: Criterion; limit: number };
+
+/** Aktif 1. aşama (dil/şablon) kriterlerinden sayısal sayfa sınırı taşıyanlar. */
+export function pageLimitRules(profile: ProfileExport): PageLimitRule[] {
+  return profile.criteria
+    .filter((item) => item.active && item.stage === "language_template")
+    .map((rule) => {
+      const limit = pageLimitOf(rule);
+      return limit === null ? null : { rule, limit };
+    })
+    .filter((entry): entry is PageLimitRule => entry !== null);
+}
+
 /* ---------------------- Başlık ve şablon eşleştirmesi ---------------------- */
 
 const KEYWORD_STOPWORDS = new Set([
   "raporu", "rapor", "kontrol", "kontrolü", "kuralı", "şartı", "zorunlu",
   "olması", "olmalı", "bulunması", "gereken", "ilgili", "genel", "asgari", "azami",
+  "başlığı", "başlık", "bölümü", "bölüm",
 ]);
 
-/** Kriter adından arama anahtarları çıkarır; kısa ve genel kelimeleri eler. */
-export function keywordsOf(criterion: Criterion): string[] {
-  return wordsOf(criterion.name).filter((word) => word.length >= 4 && !KEYWORD_STOPWORDS.has(word));
+/** Kriter veya başlık adından arama anahtarları çıkarır; kısa ve genel kelimeleri eler. */
+export function keywordsOf(name: string): string[] {
+  return wordsOf(name).filter((word) => word.length >= 4 && !KEYWORD_STOPWORDS.has(word));
 }
 
 /**
@@ -205,21 +279,28 @@ function wordsMatch(keyword: string, pageWord: string): boolean {
 
 export type CriterionMatch = {
   found: boolean;
-  /** Kriter adından arama yapılabilir anahtar çıkmadıysa false; "bulunamadı" denemez. */
+  /** Addan arama yapılabilir anahtar çıkmadıysa false; "bulunamadı" denemez. */
   searchable: boolean;
   page: number | null;
   snippet: string;
   matchedKeywords: number;
   totalKeywords: number;
+  /** Eşleşen noktadan sayfa sonuna kadar kalan karakter sayısı; içerik doluluğu kestirimi. */
+  contentLength: number;
 };
 
+/** Eşleşmenin altında en az bu kadar metin varsa başlık içeriği dolu sayılır. */
+const FILLED_CONTENT_CHARS = 200;
+
 /**
- * Kriter adındaki anahtar kelimeleri sayfa metinlerinde arar. Anahtarların en az
- * yarısı aynı sayfada geçiyorsa kriter "bulundu" sayılır ve kanıt alıntısı döner.
+ * Kriter (veya başlık) adındaki anahtar kelimeleri sayfa metinlerinde arar.
+ * Anahtarların en az yarısı aynı sayfada geçiyorsa "bulundu" sayılır ve kanıt
+ * alıntısı döner. Sunucu tarafında model başlık listesi vermediğinde 2. aşama
+ * başlık tablosunun yedeği olarak da kullanılır.
  */
-export function matchCriterionInPages(criterion: Criterion, pages: string[]): CriterionMatch {
-  const keywords = keywordsOf(criterion);
-  const empty: CriterionMatch = { found: false, searchable: false, page: null, snippet: "", matchedKeywords: 0, totalKeywords: 0 };
+export function matchCriterionInPages(criterion: Pick<Criterion, "name">, pages: string[]): CriterionMatch {
+  const keywords = keywordsOf(criterion.name);
+  const empty: CriterionMatch = { found: false, searchable: false, page: null, snippet: "", matchedKeywords: 0, totalKeywords: 0, contentLength: 0 };
   if (!keywords.length) return empty;
 
   let best: CriterionMatch = { ...empty, searchable: true, totalKeywords: keywords.length };
@@ -242,15 +323,57 @@ export function matchCriterionInPages(criterion: Criterion, pages: string[]): Cr
         snippet: start >= 0 ? `…${pageText.slice(start, start + 180).trim()}…` : "",
         matchedKeywords: hits.length,
         totalKeywords: keywords.length,
+        contentLength: anchor >= 0 ? pageText.length - anchor : 0,
       };
     }
   });
   return best;
 }
 
-/** Zorunlu içerik kriterlerinin kaçının raporda bulunduğunu özetleyen ön kontrol. */
+/** Aktif 2. aşama kriterleri + şablon başlıkları; aynı başlık bir kez listelenir. */
+export function requiredHeadingsOf(profile: ProfileExport): string[] {
+  const seen = new Set<string>();
+  const headings: string[] = [];
+  const push = (heading: string) => {
+    const key = wordsOf(heading).join(" ");
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    headings.push(heading.trim());
+  };
+  for (const item of profile.criteria) if (item.active && item.stage === "headings_content") push(item.name);
+  for (const heading of profile.templateProfile?.requiredHeadings ?? []) push(heading);
+  return headings;
+}
+
+/**
+ * Zorunlu başlıkların raporda varlığı ve altındaki içeriğin doluluğu için
+ * kelime eşleşmesine dayalı tahmin. Model başlık tablosu üretemediğinde ve
+ * çevrimdışı yedekte kullanılır; notu bunun bir tahmin olduğunu söyler.
+ */
+export function buildHeadingChecks(profile: ProfileExport, pages: string[]): HeadingCheck[] {
+  return requiredHeadingsOf(profile).map((heading) => {
+    const match = matchCriterionInPages({ name: heading }, pages);
+    if (!match.searchable) {
+      return { heading, present: false, contentFilled: false, page: null, note: "Başlık adından arama anahtarı çıkmadı; hakem kontrol etmeli." };
+    }
+    const contentFilled = match.found && match.contentLength >= FILLED_CONTENT_CHARS;
+    return {
+      heading,
+      present: match.found,
+      contentFilled,
+      page: match.found ? match.page : null,
+      note: match.found
+        ? contentFilled
+          ? `Kelime eşleşmesiyle ${match.page}. sayfada bulundu (${match.matchedKeywords}/${match.totalKeywords} anahtar); altında içerik var.`
+          : `Kelime eşleşmesiyle ${match.page}. sayfada bulundu; altındaki içerik kısa görünüyor, hakem doğrulamalı.`
+        : "Başlıkla eşleşen bölüm kelime aramasıyla bulunamadı; hakem doğrulamalı.",
+    };
+  });
+}
+
+/** Aktif 2. aşama kriterlerinin kaçının raporda bulunduğunu özetleyen ön kontrol. */
 export function buildHeadingsCheck(profile: ProfileExport, pages: string[]): PreCheck {
-  const mandatory = profile.criteria.filter((item) => item.active && item.type === "mandatory_content");
+  const mandatory = profile.criteria.filter((item) => item.active && item.stage === "headings_content");
   if (!mandatory.length) {
     return {
       id: "precheck-headings",
@@ -258,7 +381,7 @@ export function buildHeadingsCheck(profile: ProfileExport, pages: string[]): Pre
       name: "Zorunlu başlık ve içerik",
       status: "skipped",
       method: "deterministic",
-      detail: "Profilde zorunlu içerik kriteri tanımlı değil; başlık kontrolü çalıştırılmadı.",
+      detail: "Profilde başlık/içerik (2. aşama) kriteri tanımlı değil; başlık kontrolü çalıştırılmadı.",
       evidence: [],
     };
   }
@@ -278,7 +401,7 @@ export function buildHeadingsCheck(profile: ProfileExport, pages: string[]): Pre
       name: "Zorunlu başlık ve içerik",
       status: "warning",
       method: "deterministic",
-      detail: `Zorunlu içerik kriterlerinin hiçbiri kelime araması ile denetlenemedi.${unsearchableNote}`,
+      detail: `Başlık kriterlerinin hiçbiri kelime araması ile denetlenemedi.${unsearchableNote}`,
       evidence: [],
     };
   }
@@ -293,21 +416,16 @@ export function buildHeadingsCheck(profile: ProfileExport, pages: string[]): Pre
     status,
     method: "deterministic",
     detail: (missing.length === 0
-      ? `Denetlenebilen ${searchableCount} zorunlu içerik başlığının tamamı raporda bulundu.`
-      : `Denetlenebilen ${searchableCount} zorunlu başlıktan ${missing.length} tanesi bulunamadı: ${missing.map((entry) => entry.item.name).join(", ")}. Kelime eşleşmesine dayalı bu sonucu hakem doğrulamalıdır.`) + unsearchableNote,
+      ? `Denetlenebilen ${searchableCount} başlığın tamamı raporda bulundu.`
+      : `Denetlenebilen ${searchableCount} başlıktan ${missing.length} tanesi bulunamadı: ${missing.map((entry) => entry.item.name).join(", ")}. Kelime eşleşmesine dayalı bu sonucu hakem doğrulamalıdır.`) + unsearchableNote,
     evidence: [],
   };
 }
 
-/** Biçim kurallarındaki açık sayfa sınırlarını gerçek sayfa sayısıyla karşılaştırır. */
+/** 1. aşama kriterlerindeki açık sayfa sınırlarını gerçek sayfa sayısıyla karşılaştırır. */
 export function buildTemplateCheck(profile: ProfileExport, pageCount: number): PreCheck {
-  const formatRules = profile.criteria.filter((item) => item.active && item.type === "format_rule");
-  const pageRules = formatRules
-    .map((item) => {
-      const limit = parsePageLimit(`${item.name} ${item.sourceText}`);
-      return limit === null ? null : { rule: item, limit };
-    })
-    .filter((entry): entry is { rule: Criterion; limit: number } => entry !== null);
+  const formatRules = profile.criteria.filter((item) => item.active && item.stage === "language_template");
+  const pageRules = pageLimitRules(profile);
   if (!pageRules.length) {
     return {
       id: "precheck-template",
@@ -316,8 +434,8 @@ export function buildTemplateCheck(profile: ProfileExport, pageCount: number): P
       status: formatRules.length ? "warning" : "skipped",
       method: "deterministic",
       detail: formatRules.length
-        ? `Profilde ${formatRules.length} biçim kuralı var ancak sayısal sayfa sınırı içermiyor; şablon uyumu hakem tarafından kontrol edilmelidir.`
-        : "Profilde biçim kuralı tanımlı değil; şablon kontrolü çalıştırılmadı.",
+        ? `Profilde ${formatRules.length} dil/şablon kuralı var ancak sayısal sayfa sınırı içermiyor; şablon uyumu hakem tarafından kontrol edilmelidir.`
+        : "Profilde dil/şablon kuralı tanımlı değil; şablon kontrolü çalıştırılmadı.",
       evidence: [],
     };
   }
@@ -331,7 +449,8 @@ export function buildTemplateCheck(profile: ProfileExport, pageCount: number): P
     detail: violated.length
       ? `Rapor ${pageCount} sayfa; ${violated.map((entry) => `"${entry.rule.name}" en fazla ${entry.limit} sayfaya izin veriyor`).join(", ")}.`
       : `Rapor ${pageCount} sayfa; belgedeki sayfa sınırlarına uygun (${pageRules.map((entry) => entry.limit).join(", ")} sayfa).`,
-    evidence: violated.map((entry) => ({ page: entry.rule.sourcePage, text: entry.rule.sourceText })),
+    // Kanıt ölçümün kendisidir; alıntı şartnamedeki kural metnidir.
+    evidence: violated.map((entry) => ({ page: entry.rule.sourcePage, paragraph: null, section: "Şartname", text: entry.rule.sourceText })),
   };
 }
 
@@ -389,10 +508,127 @@ export function buildSimilarityCheck(reportText: string, peers: SimilarityPeer[]
     name: "Başvurular arası benzerlik",
     status,
     method: "deterministic",
-    detail:
-      status === "passed"
-        ? `Analiz anında havuzdaki ${peers.length} raporla anlamlı metin örtüşmesi bulunmadı (en yüksek %${percent}).`
-        : `"${topPeer.label}" ile %${percent} metin örtüşmesi tespit edildi. Sistem intihal kararı vermez; inceleme için işaretlendi.`,
+    detail: `${peers.length} raporla karşılaştırıldı. En yakın eşleşme: ${topPeer.label} (%${percent}). `
+      + (status === "passed"
+        ? "Anlamlı metin örtüşmesi bulunmadı."
+        : "Sistem intihal kararı vermez; inceleme için işaretlendi."),
     evidence: [],
   };
+}
+
+/**
+ * Benzerlik ön kontrolünü 3. aşama sonucuna çevirir. Yüzde ve en yakın takım
+ * kontrol metninden okunur (istemci ve sunucu havuzu aynı kalıbı yazar).
+ * Benzerlik hiçbir zaman tek başına KRİTİK_HATA doğurmaz.
+ */
+export function similarityResultOf(check: PreCheck | null | undefined): SimilarityResult | null {
+  if (!check || check.kind !== "similarity") return null;
+  const percentMatch = check.detail.match(/%\s?(\d{1,3})/);
+  const teamMatch = check.detail.match(/En yakın eşleşme:\s*(.+?)\s*\(%/) ?? check.detail.match(/"(.+?)"\s+ile\s+%/);
+  return {
+    status: check.status,
+    percent: percentMatch && check.status !== "skipped" ? Math.min(100, Number(percentMatch[1])) : null,
+    closestTeam: teamMatch ? teamMatch[1].trim() : null,
+    detail: check.detail,
+  };
+}
+
+/* ------------------------ Dört aşamalı sonuç birleştirme ------------------------ */
+
+const VERDICT_RANK: Record<RuleVerdict, number> = { BASARILI: 0, REVIZYON: 1, KRITIK_HATA: 2 };
+
+/** Listedeki en kötü durum; boş listede BAŞARILI. */
+export function worstVerdict(verdicts: readonly RuleVerdict[]): RuleVerdict {
+  let worst: RuleVerdict = "BASARILI";
+  for (const verdict of verdicts) if (VERDICT_RANK[verdict] > VERDICT_RANK[worst]) worst = verdict;
+  return worst;
+}
+
+/** Sayaçlar bulgulardan; genel durum bulgular ve aşama sonuçlarının en kötüsünden. */
+export function summarizeFindings(findings: CriterionFinding[], stages: StageResult[] = []): VerdictSummary {
+  return {
+    total: findings.length,
+    basarili: findings.filter((item) => item.verdict === "BASARILI").length,
+    revizyon: findings.filter((item) => item.verdict === "REVIZYON").length,
+    kritikHata: findings.filter((item) => item.verdict === "KRITIK_HATA").length,
+    overall: worstVerdict([...findings.map((item) => item.verdict), ...stages.map((item) => item.verdict)]),
+  };
+}
+
+/** Bir aşamanın bulgularından kısa, sayısal özet cümlesi. */
+export function stageSummaryOf(stage: CheckStage, findings: CriterionFinding[]): string {
+  const own = findings.filter((item) => item.stage === stage);
+  if (!own.length) return `${checkStageOf(stage).title}: bu aşamaya bağlı aktif kriter yok.`;
+  const counts = summarizeFindings(own);
+  return `${own.length} kural kontrol edildi: ${counts.basarili} ${RULE_VERDICT_LABELS.BASARILI}, ${counts.revizyon} ${RULE_VERDICT_LABELS.REVIZYON}, ${counts.kritikHata} ${RULE_VERDICT_LABELS.KRITIK_HATA}.`;
+}
+
+/**
+ * Aşama sonucunu yalnızca bulgulardan türetir (model o aşamayı döndürmediğinde
+ * veya AI hiç yokken). Zorunlu kriteri olmayan aşama KRİTİK_HATA olamaz.
+ */
+export function deriveStageResult(stage: CheckStage, findings: CriterionFinding[]): StageResult {
+  const own = findings.filter((item) => item.stage === stage);
+  return {
+    stage,
+    verdict: capStageVerdict(stage, worstVerdict(own.map((item) => item.verdict)), findings),
+    summary: stageSummaryOf(stage, findings),
+    evidence: [],
+    ...(stage === "category_similarity" ? { categoryScore: null, similarity: null } : {}),
+  };
+}
+
+/** Aşamada zorunlu kural yoksa aşama en fazla REVİZYON olur ("diğer" kurallar kritik hata doğurmaz). */
+export function capStageVerdict(stage: CheckStage, verdict: RuleVerdict, findings: CriterionFinding[]): RuleVerdict {
+  const hasRequired = findings.some((item) => item.stage === stage && item.required);
+  return verdict === "KRITIK_HATA" && !hasRequired ? "REVIZYON" : verdict;
+}
+
+/**
+ * Verilen aşama sonuçlarını her zaman dört kayıt olacak şekilde aşama sırasına
+ * dizer; eksik aşama bulgulardan türetilir. 3. aşamada benzerlik alanı
+ * korunur (istemci doldurur), yoksa null kalır.
+ */
+export function orderStages(provided: StageResult[], findings: CriterionFinding[]): StageResult[] {
+  return CHECK_STAGE_IDS.map((stage) => {
+    const existing = provided.find((item) => item.stage === stage);
+    if (!existing) return deriveStageResult(stage, findings);
+    const result: StageResult = { ...existing, verdict: capStageVerdict(stage, existing.verdict, findings) };
+    if (stage === "category_similarity") {
+      result.categoryScore = existing.categoryScore ?? null;
+      result.similarity = existing.similarity ?? null;
+    }
+    return result;
+  });
+}
+
+/** Benzerlik ön kontrolünü hem preChecks listesine hem 3. aşama sonucuna yazar. */
+export function applySimilarity<T extends { preChecks: PreCheck[]; stages: StageResult[] }>(evaluation: T, check: PreCheck): T {
+  const preChecks = [...evaluation.preChecks.filter((item) => item.kind !== "similarity"), check];
+  const stages = evaluation.stages.map((stage) => stage.stage === "category_similarity"
+    ? { ...stage, similarity: similarityResultOf(check) }
+    : stage);
+  return { ...evaluation, preChecks, stages };
+}
+
+/**
+ * Yarışmacı geri bildirim taslağı yalnızca doğrulanmış bulgulardan türetilir;
+ * bulgu dışı iddia sızmaz. Hakem onayından geçmeden yarışmacıya gösterilmez.
+ */
+export function feedbackOf(findings: CriterionFinding[]): ParticipantFeedback {
+  const strengths = findings
+    .filter((item) => item.verdict === "BASARILI")
+    .slice(0, 6)
+    .map((item) => `${item.criterionName}: ${item.rationale}`);
+  const improvements = findings
+    .filter((item) => item.verdict !== "BASARILI")
+    .slice(0, 8)
+    .map((item) => `${item.criterionName} (${RULE_VERDICT_LABELS[item.verdict]}): ${item.rationale}`);
+  const suggestions = findings
+    .filter((item) => item.verdict !== "BASARILI")
+    .slice(0, 6)
+    .map((item) => item.verdict === "KRITIK_HATA"
+      ? `“${item.criterionName}” zorunlu kuralı için şartnamedeki koşulu karşılayan, kanıtlanabilir bir bölüm ekleyin.`
+      : `“${item.criterionName}” bölümündeki eksik kanıtları ölçüm, tablo veya doğrulama sonucu ile tamamlayın.`);
+  return { strengths, improvements, suggestions };
 }

@@ -1,6 +1,9 @@
 import type { AnalysisResult, Criterion, ProfileExport, SetupData, Step } from "./types";
 
-const SNAPSHOT_KEY = "kriter-atolyesi:draft-v1";
+// v2: dört aşamalı, puansız kriter modeli. Eski v1 taslakları okunmaz;
+// kaynak PDF IndexedDB'de korunur ve belge yeni prensiple yeniden analiz edilir.
+const SNAPSHOT_KEY = "kriter-atolyesi:draft-v2";
+const LEGACY_SNAPSHOT_KEYS = ["kriter-atolyesi:draft-v1"];
 const DB_NAME = "kriter-atolyesi";
 const DB_VERSION = 3;
 const STORE_NAME = "draft-files";
@@ -15,17 +18,18 @@ export type DraftSnapshot = {
   result: AnalysisResult | null;
   criteria: Criterion[];
   profile: ProfileExport | null;
-  /** Değerlendirmeye dahil edilen puan gruplarının kimlikleri; eski taslaklarda bulunmaz. */
-  includedGroupIds?: string[];
-  scoringEnabled?: boolean;
-  /** @deprecated İsim tabanlı kapsam; eski taslakları okuyup kimliğe göç ettirmek için. */
-  includedGroups?: string[];
 };
 
 export function loadDraftSnapshot(): DraftSnapshot | null {
   try {
+    for (const key of LEGACY_SNAPSHOT_KEYS) localStorage.removeItem(key);
     const stored = localStorage.getItem(SNAPSHOT_KEY);
-    return stored ? JSON.parse(stored) as DraftSnapshot : null;
+    if (!stored) return null;
+    const snapshot = JSON.parse(stored) as DraftSnapshot;
+    // Yalnızca dört aşamalı modelde üretilmiş kriterler geri yüklenir.
+    const valid = Array.isArray(snapshot.criteria)
+      && snapshot.criteria.every((item) => typeof item?.stage === "string" && typeof item?.required === "boolean");
+    return valid ? snapshot : null;
   } catch {
     return null;
   }

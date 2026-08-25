@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Buffer } from "node:buffer";
-import { pdfIntegrityError } from "../app/lib/pdf-integrity";
+import { pdfIntegrityError } from "../app/lib/pdf-integrity.ts";
 
 function bytesOf(value: string): ArrayBuffer {
   const bytes = Buffer.from(value, "latin1");

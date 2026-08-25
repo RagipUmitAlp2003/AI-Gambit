@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import './evaluation.css';
 
 export const metadata: Metadata = {
   title: 'Kriter Atölyesi | Yönetim Sistemi',

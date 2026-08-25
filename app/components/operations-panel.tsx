@@ -22,8 +22,8 @@ import {
  * Aşama E · Değerlendirme Yöneticisi panosu (Rol 04).
  *
  * Bu rol akışta belgeyi sırayla teslim alan kişi değildir; süreci üstten izler.
- * Kriter, puan veya nihai karar değiştirilemez; operasyonel tıkanıklıklar,
- * atama, hatırlatma, hata kuyruğu ve sonuç yayın aşaması yönetilebilir.
+ * Kriter veya nihai karar değiştirilemez; ilk hakem ataması, yeniden atama,
+ * hatırlatma, hata kuyruğu ve sonuç yayın aşaması yönetilebilir.
  * Yarışmacı PDF'i ve kanıt metinleri bu role hiç gönderilmez (bkz. workflow-db
  * içindeki `redactEvaluation`).
  */
@@ -235,7 +235,7 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
                 {item.assignedJudgeId ? <button type="button" className="text-button" disabled={busyId === item.id} onClick={() => applicationAction(item, "remind_judge")}>Hatırlat</button> : null}
                 {item.status === "analysis_failed" ? <button type="button" className="text-button" disabled={busyId === item.id} onClick={() => applicationAction(item, "requeue_analysis")}>Analizi yeniden başlat</button> : null}
                 {item.status === "analysis_failed" ? <button type="button" className="text-button" disabled={busyId === item.id} onClick={() => applicationAction(item, "request_document")}>Yeni PDF iste</button> : null}
-                {!item.assignedJudgeId && !canInitialAssign ? <small>İlk atamayı Admin yapar.</small> : null}
+                {!item.assignedJudgeId && !canInitialAssign ? <small>İlk atamayı Değerlendirme Yöneticisi yapar.</small> : null}
               </span>
             </div>
           );

@@ -1,0 +1,178 @@
+/*
+ * Değerlendirme Atölyesi · Problem 4 akışı (giriş → yarışma → başvuru kutuları →
+ * Yapay Zeka Analizi → ✓/✗ kriter sonuçları → ONAY/RED şablonu).
+ * globals.css'teki ortak bileşenleri (step-rail, topbar, workspace, status-chip,
+ * primary/secondary-button, inline-error) tamamlar; puan/güven sınıfı yoktur.
+ */
+
+/* ------------------------------ Kural durumu ------------------------------ */
+.eval-verdict { display: inline-flex; align-items: center; min-height: 24px; padding: 3px 9px; border: 1px solid transparent; border-radius: 999px; font-size: 10px; font-weight: 800; letter-spacing: .03em; white-space: nowrap; }
+.eval-verdict.BASARILI { color: var(--success); background: var(--success-soft); border-color: #a9d3bd; }
+.eval-verdict.REVIZYON { color: #7a4900; background: var(--amber-soft); border-color: #e0bb72; }
+.eval-verdict.KRITIK_HATA { color: var(--danger); background: var(--danger-soft); border-color: #d6a6a1; }
+.eval-mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; color: #fff; font-size: 15px; font-weight: 900; }
+.eval-mark.BASARILI { background: var(--success); }
+.eval-mark.REVIZYON { background: var(--amber); }
+.eval-mark.KRITIK_HATA { background: var(--danger); }
+
+.primary-button.success { background: var(--success); border-color: var(--success); }
+.primary-button.danger { background: var(--danger); border-color: var(--danger); }
+.eval-notice { margin: 16px 38px 0; }
+.eval-panel-margin { margin: 0 38px; }
+.eval-persist-error { margin: 16px 38px 0; }
+
+/* --------------------------------- Giriş --------------------------------- */
+.eval-home-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; padding: 8px 38px 38px; }
+.eval-home-choice { position: relative; display: grid; gap: 8px; padding: 26px 26px 24px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: #fbfdfd; color: var(--ink); text-align: left; cursor: pointer; transition: border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease; }
+.eval-home-choice:hover { border-color: var(--teal); transform: translateY(-2px); box-shadow: 0 14px 32px rgba(16,42,67,.08); }
+.eval-home-choice.primary { background: #eef9f7; border-color: #b7d9d5; }
+.eval-home-choice strong { font-size: 19px; letter-spacing: -.02em; }
+.eval-home-choice p { margin: 0; color: var(--ink-soft); font-size: 12.5px; line-height: 1.55; max-width: 48ch; }
+.eval-home-choice b { position: absolute; right: 22px; top: 22px; color: var(--teal-deep); font-size: 18px; }
+.eval-home-badge { display: inline-grid; place-items: center; min-width: 40px; height: 40px; padding: 0 10px; border-radius: 12px; background: var(--ink); color: #fff; font-size: 15px; font-weight: 800; }
+
+/* ------------------------------ Atölye düzeni ------------------------------ */
+.eval-workshop-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 28px; padding: 8px 38px 38px; }
+.eval-competition-list { display: grid; align-content: start; gap: 8px; }
+.eval-competition-list button { display: grid; gap: 4px; padding: 13px 14px; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; color: var(--ink); text-align: left; cursor: pointer; }
+.eval-competition-list button:hover { border-color: var(--teal); }
+.eval-competition-list button.active { border-color: var(--teal); background: #eef9f7; }
+.eval-competition-list strong { font-size: 13px; line-height: 1.35; }
+.eval-competition-list span { color: var(--muted); font-size: 11px; }
+.eval-workshop-main { min-width: 0; display: grid; align-content: start; gap: 18px; }
+.eval-back-to-grid { justify-self: start; }
+
+/* ------------------------------ Başvuru kutuları ------------------------------ */
+.eval-application-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+.eval-application-card { position: relative; display: grid; gap: 5px; padding: 16px 16px 14px; border: 1px solid var(--line); border-top-width: 4px; border-radius: var(--radius-md); background: #fff; color: var(--ink); text-align: left; cursor: pointer; transition: border-color 150ms ease, box-shadow 150ms ease; }
+.eval-application-card:hover { border-color: var(--teal); box-shadow: 0 10px 24px rgba(16,42,67,.08); }
+.eval-application-card.selected { border-color: var(--teal); background: #f1faf8; }
+.eval-application-card.outcome-accepted { border-top-color: var(--success); }
+.eval-application-card.outcome-rejected { border-top-color: var(--danger); }
+.eval-application-card strong { font-size: 15px; line-height: 1.3; letter-spacing: -.01em; }
+.eval-application-card small { color: var(--muted); font-size: 11px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.eval-application-card time { margin-top: 6px; color: var(--muted); font-size: 10px; }
+.eval-card-status { color: var(--teal-deep); font-size: 9.5px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.eval-card-counts { display: flex; gap: 6px; margin-top: 6px; }
+.eval-card-counts em { padding: 3px 8px; border-radius: 999px; font-size: 10px; font-style: normal; font-weight: 800; background: #e8eef0; color: var(--ink-soft); }
+.eval-card-counts em.BASARILI { color: var(--success); background: var(--success-soft); }
+.eval-card-counts em.REVIZYON { color: #7a4900; background: var(--amber-soft); }
+.eval-card-counts em.KRITIK_HATA { color: var(--danger); background: var(--danger-soft); }
+.eval-card-counts.muted { color: var(--muted); font-size: 10.5px; }
+
+/* ------------------------------ Başvuru ayrıntısı ------------------------------ */
+.eval-detail { display: grid; gap: 18px; padding: 22px 24px 26px; border: 1px solid var(--line); border-radius: var(--radius-lg); background: #fff; }
+.eval-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.eval-detail-head h2 { margin: 4px 0 6px; font-size: 24px; letter-spacing: -.025em; }
+.eval-detail-head p { margin: 0; color: var(--muted); font-size: 12px; }
+.eval-detail-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; }
+
+.eval-analyze-block { display: grid; justify-items: center; gap: 16px; padding: 34px 24px; border: 1px dashed #8faab2; border-radius: var(--radius-lg); background: #f8fbfb; text-align: center; }
+.eval-analyze-block strong { display: block; font-size: 16px; }
+.eval-analyze-block p { max-width: 62ch; margin: 6px 0 0; color: var(--ink-soft); font-size: 12.5px; line-height: 1.6; }
+.eval-analyze-block small { color: var(--muted); font-size: 11px; }
+.eval-analyze-button { min-height: 52px; padding: 0 26px; font-size: 14px; }
+.eval-analyze-block .analysis-progress { width: min(560px, 100%); }
+
+/* Dört aşama şeridi */
+.eval-stage-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.eval-stage-chip { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; padding: 11px 12px; border: 1px solid var(--line); border-left-width: 4px; border-radius: var(--radius-sm); background: #fbfdfd; }
+.eval-stage-chip.BASARILI { border-left-color: var(--success); }
+.eval-stage-chip.REVIZYON { border-left-color: var(--amber); }
+.eval-stage-chip.KRITIK_HATA { border-left-color: var(--danger); }
+.eval-stage-chip.none { border-left-color: var(--line-strong); }
+.eval-stage-chip > span { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--ink); color: #fff; font-size: 10px; font-weight: 800; }
+.eval-stage-chip div { min-width: 0; display: grid; gap: 3px; }
+.eval-stage-chip strong { font-size: 11.5px; line-height: 1.3; }
+.eval-stage-chip small { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.eval-stage-chip .eval-verdict { grid-column: 2; justify-self: start; margin-top: 4px; }
+.eval-warnings summary { color: #7a4900; font-size: 11.5px; font-weight: 700; cursor: pointer; }
+.eval-warnings ul { margin: 8px 0 0; padding: 10px 14px 10px 30px; border-radius: 8px; background: var(--amber-soft); color: #5f4610; font-size: 11.5px; line-height: 1.5; }
+
+/* Kriter sonuç listesi */
+.eval-result-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 26px; padding: 14px 18px; border-radius: var(--radius-md); background: #f3f7f8; }
+.eval-result-summary > div { display: flex; align-items: baseline; gap: 7px; }
+.eval-result-summary strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+.eval-result-summary span { color: var(--muted); font-size: 11.5px; }
+.eval-result-summary .BASARILI strong { color: var(--success); }
+.eval-result-summary .REVIZYON strong { color: var(--amber); }
+.eval-result-summary .KRITIK_HATA strong { color: var(--danger); }
+.eval-result-summary .text-button { margin-left: auto; }
+.eval-result-group h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; font-size: 15px; letter-spacing: -.01em; }
+.eval-result-group h3 span { color: var(--muted); font-size: 12px; font-weight: 700; }
+.eval-result-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.eval-result-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; align-items: start; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; }
+.eval-result-row.KRITIK_HATA { border-color: #e4b9b5; background: #fff8f7; }
+.eval-result-row.REVIZYON { border-color: #e0bb72; background: #fffaf0; }
+.eval-result-list.compact .eval-result-row { padding: 9px 14px; }
+.eval-result-body { min-width: 0; display: grid; gap: 6px; }
+.eval-result-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.eval-result-title strong { font-size: 13.5px; }
+.eval-result-meta { color: var(--muted); font-size: 10.5px; }
+.eval-result-reason { margin: 0; color: var(--ink); font-size: 12.5px; line-height: 1.6; }
+.eval-result-quote { display: block; padding: 8px 11px; border-radius: 8px; background: #f0f5f6; color: var(--ink-soft); font-size: 11.5px; line-height: 1.55; quotes: "“" "”"; }
+.eval-result-note { color: #744500; font-size: 10.5px; }
+.eval-result-actions { display: grid; justify-items: end; gap: 6px; }
+.eval-result-actions small { color: var(--muted); font-size: 9.5px; text-align: right; }
+.eval-source-button { min-height: 36px; padding: 8px 12px; font-size: 10.5px; white-space: nowrap; }
+.eval-result-empty { margin: 0; padding: 14px 16px; border: 1px dashed var(--line-strong); border-radius: var(--radius-md); color: var(--muted); font-size: 12px; }
+
+/* Karar çubuğu */
+.eval-decision-bar { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 20px; border-radius: var(--radius-md); background: #f8fafb; border: 1px solid var(--line); }
+.eval-decision-bar strong { font-size: 13.5px; }
+.eval-decision-bar p { max-width: 70ch; margin: 4px 0 0; color: var(--ink-soft); font-size: 12px; line-height: 1.5; }
+.eval-decision-buttons { display: flex; flex: 0 0 auto; gap: 10px; }
+.eval-decision-buttons .primary-button { min-width: 120px; }
+
+/* Karar şablonu */
+.eval-template { display: grid; gap: 18px; padding: 20px 22px 22px; border: 1px solid var(--line); border-left-width: 5px; border-radius: var(--radius-lg); background: #fbfdfd; }
+.eval-template.outcome-accepted { border-left-color: var(--success); }
+.eval-template.outcome-rejected { border-left-color: var(--danger); }
+.eval-template-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.eval-template-head h2 { margin: 4px 0 6px; font-size: 22px; letter-spacing: -.02em; }
+.eval-template-head p { max-width: 70ch; margin: 0; color: var(--ink-soft); font-size: 12px; line-height: 1.55; }
+.eval-template-switch { display: inline-flex; flex: 0 0 auto; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: #fff; }
+.eval-template-switch button { min-height: 32px; padding: 0 16px; border: 0; border-radius: 999px; background: transparent; color: var(--ink-soft); font-size: 11px; font-weight: 800; cursor: pointer; }
+.eval-template-switch button.active { background: var(--ink); color: #fff; }
+.eval-template-summary { display: flex; flex-wrap: wrap; gap: 8px; }
+.eval-template-summary span { padding: 5px 10px; border-radius: 999px; font-size: 10.5px; font-weight: 800; background: #e8eef0; color: var(--ink-soft); }
+.eval-template-summary span.BASARILI { color: var(--success); background: var(--success-soft); }
+.eval-template-summary span.REVIZYON { color: #7a4900; background: var(--amber-soft); }
+.eval-template-summary span.KRITIK_HATA { color: var(--danger); background: var(--danger-soft); }
+.eval-template-note textarea { min-height: 72px; }
+.eval-template-section h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; font-size: 14px; }
+.eval-template-section h3 span { color: var(--muted); font-size: 11.5px; font-weight: 700; }
+.eval-template-rows { display: grid; gap: 10px; margin: 0; padding: 0 0 0 20px; }
+.eval-template-rows li { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; }
+.eval-template-row-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.eval-template-row-head strong { font-size: 13px; }
+.eval-template-row-head select { width: auto; min-width: 150px; min-height: 34px; padding: 5px 9px; font-size: 11px; }
+.eval-template-rows textarea { min-height: 64px; font-size: 12px; }
+.eval-template-rows small { color: var(--muted); font-size: 10.5px; }
+.eval-template-rows small a { color: var(--teal-deep); font-weight: 700; text-decoration: none; }
+.eval-template-passed { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.eval-template-passed li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 12px; border-radius: 8px; background: var(--success-soft); color: var(--success); font-size: 12px; font-weight: 700; }
+.eval-template-passed .text-button { color: var(--danger); }
+.eval-template-preview summary { color: var(--ink-soft); font-size: 12px; font-weight: 700; cursor: pointer; }
+.eval-template-preview > div { display: grid; gap: 12px; margin-top: 10px; padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; }
+.eval-template-preview-note { margin: 0; color: var(--ink); font-size: 13px; line-height: 1.6; }
+.eval-template-preview section strong { display: block; margin-bottom: 6px; font-size: 12px; }
+.eval-template-preview ul { margin: 0; padding-left: 18px; color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
+.eval-template-actions { display: flex; align-items: center; justify-content: flex-end; gap: 14px; }
+
+@media (max-width: 1120px) {
+  .eval-stage-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .eval-workshop-layout { grid-template-columns: 1fr; padding-left: 18px; padding-right: 18px; }
+  .eval-competition-list { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+  .eval-home-choices { padding-left: 18px; padding-right: 18px; }
+  .eval-notice, .eval-persist-error { margin-left: 18px; margin-right: 18px; }
+  .eval-panel-margin { margin-left: 18px; margin-right: 18px; }
+}
+
+@media (max-width: 720px) {
+  .eval-home-choices, .eval-stage-strip { grid-template-columns: 1fr; }
+  .eval-detail-head, .eval-template-head, .eval-decision-bar { flex-direction: column; align-items: flex-start; }
+  .eval-result-row { grid-template-columns: auto minmax(0, 1fr); }
+  .eval-result-actions { grid-column: 2; justify-items: start; }
+  .eval-result-actions small { text-align: left; }
+}

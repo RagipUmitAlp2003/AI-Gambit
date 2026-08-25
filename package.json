@@ -11,11 +11,11 @@
     "build": "vinext build",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "test": "npm run check:repo-safety && npm run test:regressions && npm run test:scoring",
+    "test": "npm run check:repo-safety && npm run test:regressions && npm run test:unit",
     "check:repo-safety": "node tools/check_repo_safety.mjs",
     "check:gemini": "node tools/check_gemini_access.mjs",
     "test:regressions": "node --experimental-strip-types tools/regression-tests.mjs",
-    "test:scoring": "node --test tools/*.test.ts",
+    "test:unit": "node --experimental-strip-types --import ./tools/ts-resolve-hook.mjs --test tools/*.test.ts",
     "test:quality:saved": "node tools/verify_saved_quality.mjs",
     "test:benchmark:celikkubbe": "node tools/run_celikkubbe_benchmark.mjs --reuse"
   },

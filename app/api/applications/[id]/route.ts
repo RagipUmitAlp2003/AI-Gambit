@@ -1,10 +1,14 @@
 import { handleError, json, jsonError, readJson, requirePermission } from "../../../lib/admin-guard";
 import { assignApplication, coordinateApplication, findApplication, markApplicationAnalyzing, saveApplicationEvaluation, saveApplicationReview } from "../../../lib/workflow-db";
-import type { JudgeReview, ReportEvaluation } from "../../../lib/types";
+import { isRuleVerdict, type JudgeReview, type ReportEvaluation } from "../../../lib/types";
 import { findAccountById, recordAudit } from "../../../lib/admin-db";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
+/**
+ * Hakem kararı puan taşımaz: her kriter için nihai kural durumu
+ * (BAŞARILI / REVİZYON / KRİTİK_HATA) ya da karar bekliyorken null bulunur.
+ */
 function validReview(review: JudgeReview): boolean {
   if (!["in_progress", "completed"].includes(review.status) || !Array.isArray(review.decisions)) return false;
   if (typeof review.overallNote !== "string" || review.overallNote.length > 5_000) return false;
@@ -14,9 +18,22 @@ function validReview(review: JudgeReview): boolean {
   return review.decisions.every((decision) => decision && typeof decision.criterionId === "string"
     && decision.criterionId.length > 0 && decision.criterionId.length <= 240
     && ["pending", "accepted", "adjusted"].includes(decision.verdict)
-    && (decision.finalScore === null || (typeof decision.finalScore === "number" && Number.isFinite(decision.finalScore)))
-    && (decision.penaltyPoints === undefined || decision.penaltyPoints === null || (typeof decision.penaltyPoints === "number" && Number.isFinite(decision.penaltyPoints)))
+    && (decision.finalVerdict === null || isRuleVerdict(decision.finalVerdict))
+    && (decision.verdict === "pending" || decision.finalVerdict !== null)
     && typeof decision.note === "string" && decision.note.length <= 2_000);
+}
+
+/** Sunucuya yazılmadan önce dört aşamalı sözleşmenin asgari şekli doğrulanır. */
+function validEvaluation(evaluation: ReportEvaluation | undefined): evaluation is ReportEvaluation {
+  if (!evaluation || evaluation.version !== "2.0") return false;
+  if (!Array.isArray(evaluation.findings) || !Array.isArray(evaluation.stages) || !Array.isArray(evaluation.preChecks)) return false;
+  const summary = evaluation.summary;
+  if (!summary || typeof summary !== "object" || !isRuleVerdict(summary.overall)) return false;
+  if ([summary.total, summary.basarili, summary.revizyon, summary.kritikHata].some((value) => !Number.isInteger(value) || value < 0)) return false;
+  const feedback = evaluation.feedbackDraft;
+  if (!feedback || typeof feedback !== "object" || [feedback.strengths, feedback.improvements, feedback.suggestions].some((list) => !Array.isArray(list))) return false;
+  return evaluation.findings.every((finding) => finding && typeof finding.criterionId === "string" && isRuleVerdict(finding.verdict) && Array.isArray(finding.evidence))
+    && evaluation.stages.every((stage) => stage && typeof stage.stage === "string" && isRuleVerdict(stage.verdict));
 }
 
 export async function GET(request: Request, context: RouteContext): Promise<Response> {
@@ -29,11 +46,12 @@ export async function GET(request: Request, context: RouteContext): Promise<Resp
 }
 
 /**
- * Başvuru üzerindeki işlemler iki ayrı yetkiye bölünür:
- *   AI ön değerlendirmesi  (start_analysis / save_evaluation / analysis_failed) → 00, 02
- *   Nihai uzman kararı     (save_review)                                        → 02; Admin süper yetkiyle erişebilir
+ * Başvuru üzerindeki işlemler üç ayrı yetkiye bölünür (bkz. authorization.ts):
+ *   AI ön değerlendirmesi  (start_analysis / save_evaluation / analysis_failed) → run_ai_prescreen (02)
+ *   Nihai uzman kararı     (save_review)                                        → final_judgement (02)
+ *   Atama ve koordinasyon  (assign_judge / remind / requeue / request_document) → coordinate_evaluation (04)
  *
- * Normal iş akışında nihai karar Hakeme aittir; Admin acil durum ve denetim için süper yetkilidir.
+ * Admin (00) başvuru akışına erişmez; yalnızca yönetici ataması yapar.
  */
 export async function PATCH(request: Request, context: RouteContext): Promise<Response> {
   try {
@@ -53,7 +71,7 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
       const judge = judgeId ? await findAccountById(judgeId) : null;
       if (!judge || judge.status !== "active" || judge.roleCode !== "02") return jsonError(400, "Aktif bir Hakem seçin.");
       const assigned = await assignApplication(id, judge, auth.account, typeof body.note === "string" ? body.note : "");
-      if (assigned === "initial_requires_admin") return jsonError(403, "İlk hakem atamasını yalnızca Admin yapabilir.");
+      if (assigned === "initial_forbidden") return jsonError(403, "İlk hakem atamasını yalnızca Değerlendirme Yöneticisi yapabilir.");
       if (assigned === "already_assigned") return jsonError(409, "Bu başvuru zaten seçilen Hakeme atanmış.");
       if (assigned === "completed") return jsonError(409, "Tamamlanmış başvuru yeniden atanamaz.");
       if (assigned === "not_found") return jsonError(404, "Başvuru bulunamadı.");
@@ -72,7 +90,7 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
       if (start === "conflict") return jsonError(409, "Bu başvuru başka bir işlemde veya zaten analiz edilmiş.");
     } else if (body.action === "save_evaluation") {
       const evaluation = body.evaluation as ReportEvaluation | undefined;
-      if (!evaluation || evaluation.version !== "1.0" || !Array.isArray(evaluation.findings)) return jsonError(400, "AI değerlendirme çıktısı geçerli değil.");
+      if (!validEvaluation(evaluation)) return jsonError(400, "AI değerlendirme çıktısı geçerli değil.");
       await saveApplicationEvaluation(id, auth.account, evaluation);
     } else if (body.action === "analysis_failed") {
       await saveApplicationEvaluation(id, auth.account, null, true);

@@ -1,153 +1,64 @@
-import { criterionEffectOf, criterionEliminates, maxRawScoreOf } from "./evaluation-summary";
 import {
   buildFileGateChecks,
+  buildHeadingChecks,
   buildHeadingsCheck,
   buildLanguageCheck,
   buildSimilarityCheck,
   buildTemplateCheck,
-  matchCriterionInPages,
-  parsePageLimit,
+  detectLanguage,
+  feedbackOf,
+  languageLabel,
+  languageMismatch,
+  orderStages,
+  pageLimitRules,
+  similarityResultOf,
+  stageSummaryOf,
+  summarizeFindings,
+  worstVerdict,
+  type PageLimitRule,
   type SimilarityPeer,
 } from "./report-prechecks";
-import type {
-  Criterion,
-  CriterionFinding,
-  ParticipantFeedback,
-  PreCheck,
-  ProfileExport,
-  ReportEvaluation,
-} from "./types";
+import type { Criterion, CriterionFinding, PreCheck, ProfileExport, ReportEvaluation, StageResult } from "./types";
 
 /**
- * Çevrimdışı rapor değerlendirici: yalnızca kesin (deterministik) kontrolleri
- * çalıştırır. Anlamsal kriterlerde puan uydurmaz; bu kriterleri açık biçimde
- * "insan kararı bekliyor" olarak işaretler. AI analiz motoru bağlandığında aynı
- * sözleşmeyi (ReportEvaluation) provider: "api" ile doldurur.
+ * Çevrimdışı rapor değerlendirici: AI motoru olmadan yalnızca deterministik
+ * kontrolleri çalıştırır (dosya kapısı, dil tespiti, sayfa sınırı, başlık
+ * eşleşmesi, havuz benzerliği). Anlamsal kural bulgusu üretmez; her aktif
+ * kriter REVİZYON + "kanıt yok" olarak hakeme bırakılır. Sayfa sınırı kuralları
+ * ölçüme dayandığı için kesin sonuçla doldurulur. Aynı sözleşmeyi
+ * (ReportEvaluation 2.0) provider: "demo" ile üretir.
  */
 
-/**
- * İnsan yetkisi gerektiren kriterler: yöntemi insan/hibrit olanlar, yalnızca
- * jüriye ait olanlar ve eleme sonucu doğuranlar (sözleşme kuralı 3).
- */
-function requiresHumanDecision(criterion: Criterion): boolean {
-  return (
-    criterion.evaluationMethod === "human" ||
-    criterion.evaluationMethod === "hybrid" ||
-    criterion.type === "human_only" ||
-    criterionEliminates(criterion)
-  );
-}
+const OFFLINE_RATIONALE = "AI motoru bağlı değil; hakem kontrolü gerekli.";
 
-function buildFinding(criterion: Criterion, pages: string[], pageCount: number, gateChecks: PreCheck[]): CriterionFinding {
+function buildFinding(criterion: Criterion, pageCount: number, pageLimits: PageLimitRule[]): CriterionFinding {
   const base = {
     criterionId: criterion.id,
     criterionName: criterion.name,
-    // Geçiş/baraj/ceza kriterlerinde eski veya hatalı maxScore değeri bulunsa
-    // bile görevliye puan alanı gösterilmez; yalnızca score etkisi puanlanır.
-    maxScore: criterionEffectOf(criterion) === "score" ? criterion.maxScore : null,
-    requiresHuman: requiresHumanDecision(criterion),
+    stage: criterion.stage,
+    required: criterion.required,
   };
-
-  if (criterion.evaluationMethod === "deterministic" && criterion.type === "mandatory_content") {
-    const match = matchCriterionInPages(criterion, pages);
-    if (!match.searchable) {
-      return {
-        ...base,
-        status: "needs_human",
-        proposedScore: null,
-        rationale: "Kriter adından arama yapılabilir anahtar kelime çıkarılamadı; bu başlığın raporda bulunup bulunmadığı hakem tarafından kontrol edilmelidir.",
-        evidence: [],
-        confidence: "low",
-      };
-    }
-    const snippet = match.snippet.trim();
+  const pageRule = pageLimits.find((entry) => entry.rule.id === criterion.id);
+  if (pageRule) {
+    const withinLimit = pageCount <= pageRule.limit;
     return {
       ...base,
-      status: match.found ? "met" : "not_found",
-      proposedScore: null,
-      rationale: match.found
-        ? `"${criterion.name}" başlığıyla eşleşen içerik ${match.page}. sayfada bulundu (${match.matchedKeywords}/${match.totalKeywords} anahtar kelime).`
-        : `"${criterion.name}" ile eşleşen bir bölüm raporda bulunamadı. Kelime eşleşmesine dayalı bu bulguyu hakem doğrulamalıdır.`,
-      evidence: match.found && match.page && snippet ? [{ page: match.page, text: snippet }] : [],
-      confidence: match.found && snippet ? "medium" : "low",
-    };
-  }
-
-  if (criterion.evaluationMethod === "deterministic" && criterion.type === "format_rule") {
-    const limit = parsePageLimit(`${criterion.name} ${criterion.sourceText}`);
-    if (limit !== null) {
-      const withinLimit = pageCount <= limit;
-      return {
-        ...base,
-        status: withinLimit ? "met" : "not_met",
-        proposedScore: null,
-        rationale: withinLimit
-          ? `Rapor ${pageCount} sayfa; kuralın izin verdiği en fazla ${limit} sayfa sınırına uygun.`
-          : `Rapor ${pageCount} sayfa; kural en fazla ${limit} sayfaya izin veriyor. İhlal sonucu: ${criterion.violationOutcome}`,
-        // Ölçüme dayalı kontrol: kanıt, raporun sayfa sayısının kendisidir.
-        evidence: criterion.sourcePage !== null ? [{ page: criterion.sourcePage, text: criterion.sourceText }] : [],
-        confidence: "high",
-      };
-    }
-    return {
-      ...base,
-      status: "needs_human",
-      proposedScore: null,
-      rationale: "Bu biçim kuralı sayısal bir sınır içermiyor; uygunluk hakem tarafından görsel olarak kontrol edilmelidir.",
+      verdict: withinLimit ? "BASARILI" : criterion.required ? "KRITIK_HATA" : "REVIZYON",
+      rationale: withinLimit
+        ? `Rapor ${pageCount} sayfa; kuralın izin verdiği en fazla ${pageRule.limit} sayfa sınırına uygun (deterministik sayım).`
+        : `Rapor ${pageCount} sayfa; kural en fazla ${pageRule.limit} sayfaya izin veriyor (deterministik sayım). İhlal sonucu: ${criterion.violationOutcome}`,
+      // Ölçüme dayalı kontrol: kanıt, raporun sayfa sayısının kendisidir.
       evidence: [],
-      confidence: "low",
+      evidenceMissing: false,
     };
   }
-
-  if (criterion.evaluationMethod === "deterministic" && criterion.type === "technical_upload") {
-    const failed = gateChecks.filter((check) => check.status === "failed" || check.status === "flagged" || check.status === "warning");
-    if (failed.length) {
-      return {
-        ...base,
-        status: "not_met",
-        proposedScore: null,
-        rationale: `Dosya kapısı kontrolleri uyarı üretti: ${failed.map((check) => check.detail).join(" ")} İhlal sonucu: ${criterion.violationOutcome}`,
-        evidence: [],
-        confidence: "high",
-        requiresHuman: true,
-      };
-    }
-    return {
-      ...base,
-      status: "met",
-      proposedScore: null,
-      rationale: `Teknik yükleme kuralları dosya kapısında kontrol edildi ve tümü uygun bulundu (${gateChecks.map((check) => check.name).join(", ")}).`,
-      evidence: [],
-      confidence: "high",
-    };
-  }
-
   return {
     ...base,
-    status: "needs_human",
-    proposedScore: null,
-    rationale: base.requiresHuman
-      ? "Bu kriterde nihai karar hakem, jüri veya sorumlu görevlidedir; sistem yalnızca bulgu sunar."
-      : "Anlamsal değerlendirme, AI analiz motoru bu prototipe bağlandığında gerekçeli puan önerisiyle doldurulacak. Hakem puanı elle verebilir.",
+    verdict: "REVIZYON",
+    rationale: OFFLINE_RATIONALE,
     evidence: [],
-    confidence: "low",
+    evidenceMissing: true,
   };
-}
-
-function buildFeedbackDraft(findings: CriterionFinding[]): ParticipantFeedback {
-  const strengths = findings
-    .filter((finding) => finding.status === "met")
-    .slice(0, 6)
-    .map((finding) => `${finding.criterionName}: raporda karşılandı.`);
-  const improvements = findings
-    .filter((finding) => finding.status === "not_found" || finding.status === "not_met")
-    .slice(0, 6)
-    .map((finding) => `${finding.criterionName}: ${finding.rationale}`);
-  const suggestions = findings
-    .filter((finding) => finding.status === "not_found")
-    .slice(0, 4)
-    .map((finding) => `"${finding.criterionName}" bölümünü şartnamedeki başlık adıyla birebir kullanarak ekleyin.`);
-  return { strengths, improvements, suggestions };
 }
 
 export function evaluateReportOffline(input: {
@@ -160,14 +71,58 @@ export function evaluateReportOffline(input: {
   gateChecks?: PreCheck[];
 }): ReportEvaluation {
   const { profile, file, pages, pageCount, peers } = input;
-  const startedAt = performance.now();
+  const startedAt = Date.now();
   const gateChecks = input.gateChecks ?? buildFileGateChecks(file, profile.setup);
   const activeCriteria = profile.criteria.filter((item) => item.active);
-  const findings = activeCriteria.map((criterion) => buildFinding(criterion, pages, pageCount, gateChecks));
+  const pageLimits = pageLimitRules(profile);
+  const findings = activeCriteria.map((criterion) => buildFinding(criterion, pageCount, pageLimits));
+
+  const expectedLanguage = profile.setup.reportLanguage ?? null;
+  const detected = detectLanguage(pages);
+  const mismatch = languageMismatch(detected, expectedLanguage);
+  const similarityCheck = buildSimilarityCheck(pages.join(" "), peers);
+  const headings = buildHeadingChecks(profile, pages);
+  const missingHeadings = headings.filter((item) => !item.present).length;
+
+  const stage1Verdict = worstVerdict([
+    ...findings.filter((item) => item.stage === "language_template").map((item) => item.verdict),
+    ...(mismatch ? ["REVIZYON" as const] : []),
+  ]);
+  const stages: StageResult[] = [
+    {
+      stage: "language_template",
+      verdict: stage1Verdict,
+      summary: `${mismatch ? `Dil uyuşmazlığı: rapor ${languageLabel(detected)}, şartname ${expectedLanguage} bekliyor. ` : ""}${stageSummaryOf("language_template", findings)}`,
+      detectedLanguage: languageLabel(detected),
+      expectedLanguage,
+      evidence: [],
+    },
+    {
+      stage: "headings_content",
+      verdict: worstVerdict([
+        ...findings.filter((item) => item.stage === "headings_content").map((item) => item.verdict),
+        ...(missingHeadings ? ["REVIZYON" as const] : []),
+      ]),
+      summary: headings.length
+        ? `${headings.length} zorunlu başlıktan ${headings.length - missingHeadings} tanesi kelime eşleşmesiyle bulundu; ${missingHeadings} tanesi bulunamadı. ${stageSummaryOf("headings_content", findings)}`
+        : stageSummaryOf("headings_content", findings),
+      headings,
+      evidence: [],
+    },
+    {
+      stage: "category_similarity",
+      verdict: worstVerdict(findings.filter((item) => item.stage === "category_similarity").map((item) => item.verdict)),
+      summary: `Kategori uygunluğu anlamsal analiz gerektirir; AI motoru bağlı olmadığı için skor üretilmedi. ${similarityCheck.detail}`,
+      categoryScore: null,
+      similarity: similarityResultOf(similarityCheck),
+      evidence: [],
+    },
+  ];
+  const orderedStages = orderStages(stages, findings);
 
   const preChecks: PreCheck[] = [
     ...gateChecks,
-    buildLanguageCheck(pages),
+    buildLanguageCheck(pages, expectedLanguage),
     buildTemplateCheck(profile, pageCount),
     buildHeadingsCheck(profile, pages),
     {
@@ -179,29 +134,11 @@ export function evaluateReportOffline(input: {
       detail: "Kategori uygunluğu anlamsal analiz gerektirir; AI analiz motoru bağlandığında çalışacak.",
       evidence: [],
     },
-    buildSimilarityCheck(pages.join(" "), peers),
+    similarityCheck,
   ];
 
-  const scoreCriteria = activeCriteria.filter((item) => criterionEffectOf(item) === "score");
-  const proposals = findings.filter((finding) => finding.proposedScore !== null);
-  /**
-   * MAKSİMUM HAM PUAN: profildeki AKTİF puan kriterlerinin azami toplamı.
-   * Belgede ilan edilen genel toplama düşülmez — pay bu kriterlerden geldiği
-   * için payda da aynı kümeden gelmelidir, aksi hâlde normalize puan 100'ü
-   * aşabilir. Eski profillerde normalization yoksa buradan hesaplanır.
-   */
-  const maxRawScore = profile.normalization?.evaluationTotal ?? maxRawScoreOf(profile.criteria);
-  const declaredTotal = maxRawScore > 0 ? maxRawScore : null;
-  // Her öneri kendi kriterinin azamisiyle sınırlanır; toplam yapısal olarak taşamaz.
-  const rawScore = proposals.length
-    ? proposals.reduce((sum, finding) => {
-      const proposed = Math.max(0, finding.proposedScore ?? 0);
-      return sum + (finding.maxScore !== null ? Math.min(proposed, finding.maxScore) : proposed);
-    }, 0)
-    : null;
-
   return {
-    version: "1.0",
+    version: "2.0",
     profileRef: {
       profileId: profile.profileId ?? null,
       competition: profile.setup.competition,
@@ -211,16 +148,12 @@ export function evaluateReportOffline(input: {
     },
     report: { name: file.name, pages: pageCount, sizeBytes: file.size },
     preChecks,
+    stages: orderedStages,
     findings,
-    proposedTotals: {
-      rawScore,
-      declaredTotal,
-      scoredCriteria: proposals.length,
-      pendingCriteria: Math.max(0, scoreCriteria.length - proposals.length),
-    },
-    feedbackDraft: buildFeedbackDraft(findings),
+    summary: summarizeFindings(findings, orderedStages),
+    feedbackDraft: feedbackOf(findings),
     analysisWarnings: [
-      "Bu sonuç çevrimdışı kesin kontrollerle üretildi; anlamsal kriter analizi AI motoru bağlandığında eklenecek.",
+      "Bu sonuç çevrimdışı deterministik kontrollerle üretildi; kural bazlı kanıt çıkarma AI motoru bağlandığında eklenecek.",
       ...(file.size > 50 * 1024 * 1024
         ? ["Dosya 50 MB'den büyük; mevcut sunucu analiz sınırı için sıkıştırılması gerekecek."]
         : []),
@@ -228,12 +161,12 @@ export function evaluateReportOffline(input: {
     provider: "demo",
     analyzedAt: new Date().toISOString(),
     diagnostics: {
-      totalMs: Math.round(performance.now() - startedAt),
+      totalMs: Date.now() - startedAt,
       modelMs: 0,
-      auditMs: 0,
       promptTokens: 0,
       outputTokens: 0,
       cached: false,
+      apiCalls: 0,
     },
   };
 }

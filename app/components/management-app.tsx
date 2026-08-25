@@ -15,7 +15,7 @@ import { PARTICIPANT_ROLE, ROLES, roleByCode } from "../lib/admin-roles";
 import type { AdminAccount, MailDelivery, RoleCode } from "../lib/admin-types";
 import { can } from "../lib/authorization";
 
-type Section = "overview" | "extractions" | "profiles" | "accounts" | "audit";
+type Section = "overview" | "extractions" | "profiles" | "accounts";
 
 type AdminData = {
   accounts: AdminAccount[];
@@ -33,12 +33,12 @@ const EMPTY: AdminData = { accounts: [], mail: [], audit: [], mailReady: false, 
  */
 const ROLE_WORKSPACES: Record<RoleCode, { title: string; intro: string }> = {
   "00": {
-    title: "Sistem yönetimi",
-    intro: "Personel hesaplarını ve ilk hakem atamalarını yönetin; gerektiğinde bütün çalışma alanlarına süper yetkiyle erişin.",
+    title: "Yönetici atama paneli",
+    intro: "Personel hesaplarını açın, rol atayın veya kaldırın. Admin girişi yalnızca yönetici ataması yapar; kriter, değerlendirme ve operasyon alanları bu hesaba kapalıdır.",
   },
   "01": {
     title: "Yarışma hazırlık alanı",
-    intro: "Şartnameyi ve varsa rapor şablonunu yükleyin; kriterleri, kapsamı ve puan yapısını doğrulayıp yayımlayın.",
+    intro: "Şartnameyi ve varsa rapor şablonunu yükleyin; dört aşamalı kontrol için çıkarılan kriterleri doğrulayıp yayımlayın.",
   },
   "02": {
     title: "Hakem çalışma alanı",
@@ -50,7 +50,7 @@ const ROLE_WORKSPACES: Record<RoleCode, { title: string; intro: string }> = {
   },
   "04": {
     title: "Değerlendirme operasyonları",
-    intro: "Hakem yüklerini, analiz hatalarını ve tamamlanma oranını izleyin; tıkanıklıkları giderip sonuç yayın akışını yönetin.",
+    intro: "Başvurulara ilk hakemi atayın; hakem yüklerini, analiz hatalarını ve tamamlanma oranını izleyin; tıkanıklıkları giderip sonuç yayın akışını yönetin.",
   },
 };
 
@@ -62,10 +62,10 @@ export default function ManagementApp() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const isModerator = session?.roleCode === "00";
+  const isAdmin = can(session, "manage_accounts");
 
   const loadAdminData = useCallback(async (account: AdminAccount) => {
-    if (account.roleCode !== "00") {
+    if (!can(account, "manage_accounts")) {
       setData(EMPTY);
       setError("");
       setLoading(false);
@@ -99,6 +99,7 @@ export default function ManagementApp() {
       .then(async (current) => {
         if (!active) return;
         setSession(current.account);
+        setSection(can(current.account, "manage_accounts") ? "accounts" : "overview");
         setLoading(true);
         await loadAdminData(current.account);
       })
@@ -109,7 +110,7 @@ export default function ManagementApp() {
 
   async function signedIn(account: AdminAccount) {
     setSession(account);
-    setSection("overview");
+    setSection(can(account, "manage_accounts") ? "accounts" : "overview");
     setChecking(false);
     setLoading(true);
     await loadAdminData(account);
@@ -138,19 +139,20 @@ export default function ManagementApp() {
   const canJudge = can(session, "final_judgement");
   const canOpenEvaluation = can(session, "run_ai_prescreen");
   const canOperate = can(session, "operations_dashboard");
+  const canInitialAssign = can(session, "assign_judge");
 
   // Bölümler yetki matrisinden türetilir; hiçbir rol adı burada sabitlenmez.
-  const sections: Array<{ id: Section; label: string; detail: string }> = [
-    { id: "overview", label: "Çalışma alanım", detail: role?.area ?? "Rol görünümü" },
-    ...(canAuthorProfile ? [
-      { id: "extractions" as const, label: "Geçmiş ayıklamalar", detail: "Analiz edilen şartname PDF'leri" },
-      { id: "profiles" as const, label: "Yayımlanan profiller", detail: "Aktif kriter ve puan kapsamı" },
-    ] : []),
-    ...(isModerator ? [
-      { id: "accounts" as const, label: "Hesap ve yetkiler", detail: "Kullanıcı hesaplarını yönet" },
-      { id: "audit" as const, label: "İşlem geçmişi", detail: "Yönetim hareketlerini izle" },
-    ] : []),
-  ];
+  // Admin yalnızca yönetici atama panelini görür; başka bölüm listelenmez.
+  const sections: Array<{ id: Section; label: string; detail: string }> = isAdmin
+    ? [{ id: "accounts", label: "Yönetici atama", detail: "Hesap aç, rol ata veya kaldır" }]
+    : [
+      { id: "overview", label: "Çalışma alanım", detail: role?.area ?? "Rol görünümü" },
+      ...(canAuthorProfile ? [
+        { id: "extractions" as const, label: "Geçmiş ayıklamalar", detail: "Analiz edilen şartname PDF'leri" },
+        { id: "profiles" as const, label: "Yayımlanan profiller", detail: "Aktif kriter setleri" },
+      ] : []),
+    ];
+  const activeSection: Section = isAdmin ? "accounts" : section === "accounts" ? "overview" : section;
 
   return (
     <div className="management-shell">
@@ -161,7 +163,7 @@ export default function ManagementApp() {
         </Link>
         <nav aria-label="Yönetim bölümleri">
           {sections.map((item) => (
-            <button key={item.id} type="button" className={section === item.id ? "active" : ""} onClick={() => setSection(item.id)}>
+            <button key={item.id} type="button" className={activeSection === item.id ? "active" : ""} onClick={() => setSection(item.id)}>
               <strong>{item.label}</strong>
               <small>{item.detail}</small>
             </button>
@@ -182,13 +184,13 @@ export default function ManagementApp() {
           </div>
         </header>
 
-        {data.production && !data.mailReady && isModerator ? (
+        {data.production && !data.mailReady && isAdmin ? (
           <p className="access-warning">Üretim ortamında e-posta sağlayıcısı tanımlı değil; yeni hesap bildirimleri gönderilemez.</p>
         ) : null}
         {error ? <p className="admin-error page-error">{error}</p> : null}
         {loading ? <p className="page-note">Yönetim bilgileri yükleniyor…</p> : null}
 
-        {!loading && section === "overview" ? (
+        {!loading && activeSection === "overview" && !isAdmin ? (
           <section className="role-workspace" aria-labelledby="role-workspace-title">
             <header>
               <span className="role-code">Rol {session.roleCode}</span>
@@ -202,7 +204,7 @@ export default function ManagementApp() {
                 {canAuthorProfile ? (
                   <Link href="/kriter-atolyesi" className="role-action primary">
                     <span>01</span>
-                    <div><strong>Kriter Atölyesi&apos;ni aç</strong><p>Şartnameyi analiz et, rapor kapsamındaki kriterleri doğrula ve profili yayımla.</p></div>
+                    <div><strong>Kriter Atölyesi&apos;ni aç</strong><p>Şartnameyi tek AI çağrısıyla analiz et, dört aşamalı kriterleri doğrula ve profili yayımla.</p></div>
                     <b aria-hidden="true">→</b>
                   </Link>
                 ) : null}
@@ -217,7 +219,7 @@ export default function ManagementApp() {
             ) : null}
 
             {canJudge ? <JudgeQueuePanel /> : null}
-            {canOperate ? <OperationsPanel canInitialAssign={isModerator} /> : null}
+            {canOperate ? <OperationsPanel canInitialAssign={canInitialAssign} /> : null}
             {canAuthorProfile ? <ManagerProfileHistory mode="profiles" compact /> : null}
 
             <div className="role-boundary">
@@ -225,32 +227,30 @@ export default function ManagementApp() {
               <p>{role?.summary}</p>
               {role?.boundary ? <small>{role.boundary}</small> : null}
             </div>
-
-            {isModerator ? (
-              <div className="admin-snapshot">
-                <div><strong>{data.accounts.filter((item) => item.status === "active").length}</strong><span>aktif hesap</span></div>
-                <div><strong>{data.accounts.filter((item) => item.status === "revoked").length}</strong><span>pasif hesap</span></div>
-                <div><strong>{data.audit.length}</strong><span>yakın işlem kaydı</span></div>
-              </div>
-            ) : null}
           </section>
         ) : null}
 
-        {!loading && section === "extractions" && canAuthorProfile ? <ManagerProfileHistory mode="extractions" /> : null}
-        {!loading && section === "profiles" && canAuthorProfile ? <ManagerProfileHistory mode="profiles" /> : null}
+        {!loading && activeSection === "extractions" && canAuthorProfile ? <ManagerProfileHistory mode="extractions" /> : null}
+        {!loading && activeSection === "profiles" && canAuthorProfile ? <ManagerProfileHistory mode="profiles" /> : null}
 
-        {!loading && section === "accounts" && isModerator ? (
-          <AdminAccountsPanel
-            accounts={data.accounts}
-            roles={ROLES}
-            mailReady={data.mailReady}
-            mail={data.mail}
-            viewerId={session.id}
-            onChanged={refresh}
-          />
+        {!loading && activeSection === "accounts" && isAdmin ? (
+          <>
+            <AdminAccountsPanel
+              accounts={data.accounts}
+              roles={ROLES}
+              mailReady={data.mailReady}
+              mail={data.mail}
+              viewerId={session.id}
+              onChanged={refresh}
+            />
+            <div className="role-boundary admin-boundary">
+              <strong>Bu rolün karar sınırı</strong>
+              <p>{role?.summary}</p>
+              {role?.boundary ? <small>{role.boundary}</small> : null}
+            </div>
+            <AuditPanel entries={data.audit} />
+          </>
         ) : null}
-
-        {!loading && section === "audit" && isModerator ? <AuditPanel entries={data.audit} /> : null}
       </div>
     </div>
   );

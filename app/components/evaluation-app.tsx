@@ -1,94 +1,55 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import FileBadge from "./file-badge";
-import DocumentLibraryModal from "./document-library-modal";
 import TopbarSession from "./topbar-session";
-import { applyPenalties, criterionEffectOf, criterionEliminates, normalizeScoreDetailed } from "../lib/evaluation-summary";
+import { formatDateTime } from "../lib/admin-client";
 import { extractPdfText } from "../lib/pdf-reader";
-import { loadLastApprovedProfile, readProfileFile, saveActiveProfile } from "../lib/profile-loader";
-import { createReportId, deleteReport, listReports, saveReport, type StoredReport } from "../lib/report-pool";
-import { buildFileGateChecks, gateBlocksUpload, type SimilarityPeer } from "../lib/report-prechecks";
+import { applySimilarity, buildFileGateChecks } from "../lib/report-prechecks";
 import { evaluateReport } from "../lib/report-evaluator";
 import { workflowApi } from "../lib/workflow-client";
-import { fold } from "../lib/competitions";
-import { APPLICATION_STATUS_LABELS, type CompetitionApplication } from "../lib/workflow-types";
-import type {
-  CheckStatus,
-  FindingStatus,
-  JudgeDecision,
-  JudgeReview,
-  ParticipantFeedback,
-  PreCheck,
-  ProfileExport,
-  ReportEvaluation,
-  ReportStatus,
+import { APPLICATION_STATUS_LABELS, type CompetitionApplication, type CompetitionProfile } from "../lib/workflow-types";
+import {
+  CHECK_STAGES,
+  RULE_VERDICTS,
+  RULE_VERDICT_LABELS,
+  checkStageOf,
+  isRuleVerdict,
+  type CriterionFinding,
+  type EvidenceRef,
+  type JudgeDecision,
+  type JudgeReview,
+  type ParticipantFeedback,
+  type ReportEvaluation,
+  type RuleVerdict,
+  type StageResult,
 } from "../lib/types";
 
-type EvalView = 1 | 2 | 3;
+/**
+ * Değerlendirme Atölyesi (Rol 02 · Hakem) — Problem 4 akışı.
+ *
+ *   Giriş → "Değerlendirme Atölyesi" ya da "Geçmiş değerlendirmeler"
+ *   Atölye → kriteri çıkarılmış (yayımlı) yarışmalar → seçilen yarışmanın
+ *   başvuruları kutucuk hâlinde → başvuruya tıkla → "Yapay Zeka Analizi"
+ *   Analiz = yayımlı kriterlerin PDF ile karşılaştırılması: uygun kriter ✓,
+ *   hatalı kriter için hata sebebi + kaynak sayfaya giden düğme.
+ *   Karar → ONAY / RED. RED'de AI'nin adım adım hata analizi düzenlenebilir bir
+ *   şablon olarak yarışmacıya iletilir; ekstra analiz yoktur.
+ *
+ * Yerel rapor havuzu, profil JSON yükleme ve cihaz içi depo yoktur; her şey
+ * D1'deki başvuru kaydı üzerinden yürür. AI nihai karar vermez.
+ */
 
-const VIEWS = [
-  { id: 1, title: "Rapor havuzu", short: "Yükleme ve ön kontrol" },
-  { id: 2, title: "Hakem incelemesi", short: "Bulguları karara bağla" },
-  { id: 3, title: "Yarışmacı görünümü", short: "Onaylı geri bildirim" },
-] as const;
+type Mode = "home" | "workshop" | "history";
+type Outcome = "accepted" | "rejected";
 
-const REPORT_STATUS_LABELS: Record<ReportStatus, string> = {
-  received: "Havuzda · AI ön değerlendirmesi bekliyor",
-  analyzing: "AI ön değerlendirmesi yapılıyor",
-  analyzed: "AI ön değerlendirmesi tamam · hakem bekliyor",
-  reviewed: "Nihai değerlendirme tamamlandı",
-};
+const ANALYZABLE_STATUSES = ["assigned", "resubmitted", "analysis_failed"] as const;
 
-const CHECK_STATUS_LABELS: Record<CheckStatus, string> = {
-  passed: "Uygun",
-  warning: "Uyarı",
-  flagged: "İncelemeye işaretlendi",
-  failed: "Uygun değil",
-  skipped: "Çalıştırılmadı",
-};
-
-const FINDING_STATUS_LABELS: Record<FindingStatus, string> = {
-  met: "Karşılandı",
-  partially_met: "Kısmen karşılandı",
-  not_met: "Karşılanmadı",
-  not_found: "Raporda bulunamadı",
-  needs_human: "Görevli kararı bekliyor",
-};
-
-/** Hakem sonucunun yarışmacıya gösterilen rozet, mühür ve renk karşılığı. */
-const OUTCOME_VIEW: Record<JudgeReview["outcome"], { label: string; seal: string; chip: string; summary: string }> = {
-  accepted: {
-    label: "Kabul edildi",
-    seal: "✓",
-    chip: "success",
-    summary: "Başvuru, uzman hakem tarafından incelendi ve kabul edildi.",
-  },
-  rejected: {
-    label: "Reddedildi",
-    seal: "✕",
-    chip: "danger",
-    summary: "Başvuru, uzman hakem tarafından incelendi ve reddedildi.",
-  },
-  revision_required: {
-    label: "Hatalar düzeltilmeli",
-    seal: "!",
-    chip: "warning",
-    summary: "Başvuru incelendi; aşağıdaki maddeler düzeltilerek yeniden gönderilmelidir.",
-  },
-  pending: {
-    label: "Sonuç bekliyor",
-    seal: "…",
-    chip: "neutral",
-    summary: "Değerlendirme tamamlandı; sonuç henüz kesinleştirilmedi.",
-  },
-};
-
-const VERDICT_LABELS: Record<JudgeDecision["verdict"], string> = {
+const OUTCOME_LABELS: Record<JudgeReview["outcome"], string> = {
   pending: "Karar bekliyor",
-  accepted: "Öneri kabul edildi",
-  adjusted: "Hakem düzeltti",
+  accepted: "ONAY",
+  rejected: "RED",
+  revision_required: "Düzeltme istendi",
 };
 
 function formatBytes(bytes: number) {
@@ -96,158 +57,135 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function feedbackToText(lines: string[]): string {
-  return lines.join("\n");
+/** Yalnızca dört aşamalı (2.0) sonuçlar incelenebilir; sunucu eski sonuçları zaten düşürür. */
+function usableEvaluation(application: CompetitionApplication): ReportEvaluation | null {
+  const evaluation = application.evaluation;
+  return evaluation && evaluation.version === "2.0" && Array.isArray(evaluation.findings) && Array.isArray(evaluation.stages) && evaluation.summary
+    ? evaluation
+    : null;
+}
+
+function fileUrl(application: CompetitionApplication, page?: number | null) {
+  const base = `/api/applications/${encodeURIComponent(application.id)}/file`;
+  return page ? `${base}#page=${page}` : base;
+}
+
+function evidenceLocation(item: EvidenceRef): string {
+  const parts = [
+    item.page ? `s. ${item.page}` : null,
+    item.paragraph ? `¶ ${item.paragraph}` : null,
+    item.section ? item.section : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "Konum belirtilmemiş";
 }
 
 /**
- * Yazarken satırlara ayırma kayıpsız yapılır: kırpma veya boş satır eleme
- * yapılmaz, aksi hâlde yazılan boşluk ve satır sonları anında geri alınır.
- * Temizlik yalnızca gösterim ve tamamlama anında uygulanır.
+ * Hakem karar taslağı. Öntanımlı olarak her kural AI kararıyla "onaylı" başlar;
+ * hakem şablon aşamasında dilediğini elle değiştirir (adjusted).
  */
-function textToFeedback(value: string): string[] {
-  return value.split("\n");
-}
-
-function normalizeFeedback(feedback: ParticipantFeedback): ParticipantFeedback {
-  const clean = (lines: string[]) => lines.map((line) => line.trim()).filter(Boolean);
-  return {
-    strengths: clean(feedback.strengths),
-    improvements: clean(feedback.improvements),
-    suggestions: clean(feedback.suggestions),
-  };
-}
-
-/**
- * Analiz bulgularından hakem karar taslağını kurar. Puan alanı boş başlar:
- * AI önerisi yalnızca ipucu olarak gösterilir, hakem değeri kendisi girer.
- */
-function buildInitialReview(evaluation: ReportEvaluation): JudgeReview {
-  return {
-    status: "in_progress",
-    outcome: "pending",
-    outcomeNote: "",
-    decisions: evaluation.findings.map((finding) => ({
+function draftDecisions(evaluation: ReportEvaluation, stored: JudgeReview | null): JudgeDecision[] {
+  const byId = new Map((stored?.decisions ?? []).map((decision) => [decision.criterionId, decision]));
+  return evaluation.findings.map((finding) => {
+    const previous = byId.get(finding.criterionId);
+    const finalVerdict = previous && isRuleVerdict(previous.finalVerdict) ? previous.finalVerdict : finding.verdict;
+    return {
       criterionId: finding.criterionId,
-      verdict: "pending",
-      finalScore: null,
-      penaltyPoints: null,
-      note: "",
-    })),
-    overallNote: "",
-    finalFeedback: {
-      strengths: [...evaluation.feedbackDraft.strengths],
-      improvements: [...evaluation.feedbackDraft.improvements],
-      suggestions: [...evaluation.feedbackDraft.suggestions],
-    },
-    feedbackApproved: false,
-    completedAt: null,
+      verdict: finalVerdict === finding.verdict ? "accepted" : "adjusted",
+      finalVerdict,
+      note: typeof previous?.note === "string" ? previous.note : "",
+    };
+  });
+}
+
+function finalVerdictOf(finding: CriterionFinding, decisions: JudgeDecision[]): RuleVerdict {
+  const decision = decisions.find((item) => item.criterionId === finding.criterionId);
+  return decision?.finalVerdict ?? finding.verdict;
+}
+
+function reasonOf(finding: CriterionFinding, decisions: JudgeDecision[]): string {
+  const decision = decisions.find((item) => item.criterionId === finding.criterionId);
+  return decision?.note.trim() || finding.rationale;
+}
+
+function pageOf(finding: CriterionFinding): number | null {
+  return finding.evidence.find((item) => item.page)?.page ?? null;
+}
+
+/**
+ * Yarışmacıya iletilecek şablon: karşılanan kriterler, hatalı kriterler ve
+ * sebepleri (kaynak sayfayla), revizyon önerileri. Bulgu dışı iddia içermez.
+ */
+function buildFeedback(findings: CriterionFinding[], decisions: JudgeDecision[]): ParticipantFeedback {
+  const line = (finding: CriterionFinding, mark: string) => {
+    const page = pageOf(finding);
+    return `${mark} ${finding.criterionName} — ${reasonOf(finding, decisions)}${page ? ` (rapor s. ${page})` : ""}`;
+  };
+  return {
+    strengths: findings.filter((finding) => finalVerdictOf(finding, decisions) === "BASARILI").map((finding) => `✓ ${finding.criterionName}`),
+    improvements: findings.filter((finding) => finalVerdictOf(finding, decisions) === "KRITIK_HATA").map((finding) => line(finding, "✕")),
+    suggestions: findings.filter((finding) => finalVerdictOf(finding, decisions) === "REVIZYON").map((finding) => line(finding, "⚠")),
   };
 }
 
-type RuleAuditItem = {
-  criterionId: string;
-  name: string;
-  detail: string;
-  sourcePage: number | null;
-  state: CheckStatus;
-  label: string;
-};
-
-/**
- * Bir karar kuralının bu rapordaki durumu. Görevli kararı verilmeden hiçbir
- * madde "sağlandı" veya "sağlanmadı" olarak kapatılmaz; sistem tek başına
- * eleme veya geçiş hükmü kurmaz.
- */
-function auditRule(status: FindingStatus | undefined, verdict: JudgeDecision["verdict"] | undefined): { state: CheckStatus; label: string } {
-  if (!status || !verdict || verdict === "pending") return { state: "warning", label: "Görevli kararı bekliyor" };
-  if (status === "met") return { state: "passed", label: "Sağlandı" };
-  if (status === "not_met" || status === "not_found") return { state: "failed", label: "Sağlanmadı" };
-  if (status === "partially_met") return { state: "flagged", label: "Kısmen sağlandı" };
-  return { state: "passed", label: "Görevli değerlendirdi" };
+function countVerdicts(findings: CriterionFinding[], decisions: JudgeDecision[]) {
+  const counts = { BASARILI: 0, REVIZYON: 0, KRITIK_HATA: 0 };
+  for (const finding of findings) counts[finalVerdictOf(finding, decisions)] += 1;
+  return counts;
 }
 
-function FeedbackField({ label, hint, lines, onChange }: {
-  label: string;
-  hint?: string;
-  lines: string[];
-  onChange: (lines: string[]) => void;
+function defaultOutcomeNote(outcome: Outcome, counts: ReturnType<typeof countVerdicts>): string {
+  const summary = `${counts.BASARILI} kriter uygun, ${counts.REVIZYON} kriter revizyon gerektiriyor, ${counts.KRITIK_HATA} kriterde kritik hata var.`;
+  return outcome === "accepted"
+    ? `Rapor kriterlere uygun bulundu ve onaylandı. ${summary}`
+    : `Rapor kriterleri karşılamadığı için reddedildi. ${summary} Hatalı kriterler ve sebepleri aşağıda listelenmiştir.`;
+}
+
+/* ----------------------------------------------------------------------- */
+
+function VerdictMark({ verdict }: { verdict: RuleVerdict }) {
+  const symbol = verdict === "BASARILI" ? "✓" : verdict === "REVIZYON" ? "!" : "✕";
+  return <span className={`eval-mark ${verdict}`} aria-label={RULE_VERDICT_LABELS[verdict]} title={RULE_VERDICT_LABELS[verdict]}>{symbol}</span>;
+}
+
+function VerdictBadge({ verdict }: { verdict: RuleVerdict }) {
+  return <span className={`eval-verdict ${verdict}`}>{RULE_VERDICT_LABELS[verdict]}</span>;
+}
+
+function Rail({ mode, pending, completed, onNavigate }: {
+  mode: Mode;
+  pending: number;
+  completed: number;
+  onNavigate: (mode: Mode) => void;
 }) {
+  const items: Array<{ id: Mode; title: string; short: string; badge: string }> = [
+    { id: "home", title: "Giriş", short: "Nereden devam edilecek?", badge: "◈" },
+    { id: "workshop", title: "Değerlendirme Atölyesi", short: "Yarışma → başvuru → AI analizi → karar", badge: String(pending) },
+    { id: "history", title: "Geçmiş değerlendirmeler", short: "Kararı verilmiş başvurular", badge: String(completed) },
+  ];
   return (
-    <Field label={label} hint={hint}>
-      <textarea
-        value={feedbackToText(lines)}
-        onChange={(event) => onChange(textToFeedback(event.target.value))}
-      />
-    </Field>
-  );
-}
-
-function CheckChip({ status }: { status: CheckStatus }) {
-  return <span className={`eval-check-chip ${status}`}>{CHECK_STATUS_LABELS[status]}</span>;
-}
-
-function PreCheckList({ checks, title }: { checks: PreCheck[]; title: string }) {
-  if (!checks.length) return null;
-  return (
-    <div className="eval-check-list">
-      <span className="inspector-label">{title}</span>
-      <ul>
-        {checks.map((check) => (
-          <li key={check.id}>
-            <div>
-              <strong>{check.name}</strong>
-              <p>{check.detail}</p>
-            </div>
-            <CheckChip status={check.status} />
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function EvalRail({ view, counts, onNavigate }: {
-  view: EvalView;
-  counts: { pool: number; analyzed: number; completed: number };
-  onNavigate: (view: EvalView) => void;
-}) {
-  const badges = [counts.pool, counts.analyzed, counts.completed];
-  return (
-    <nav className="step-rail" aria-label="Değerlendirme aşamaları">
+    <nav className="step-rail" aria-label="Değerlendirme bölümleri">
       <div className="rail-heading">
         <span className="rail-mark">DA</span>
         <div>
           <strong>Değerlendirme Atölyesi</strong>
-          <span>Rapor değerlendirme</span>
+          <span>Hakem · AI 4. göz</span>
         </div>
       </div>
       <ol>
-        {VIEWS.map((item, index) => {
-          const state = item.id === view ? "active" : "upcoming";
-          return (
-            <li key={item.id} className={`rail-step ${state}`}>
-              <button
-                type="button"
-                aria-current={state === "active" ? "step" : undefined}
-                aria-label={`${item.title} — ${badges[index]} kayıt`}
-                onClick={() => onNavigate(item.id)}
-              >
-                <span className="step-index" aria-hidden="true">{badges[index]}</span>
-                <span>
-                  <strong>{item.title}</strong>
-                  <small>{item.short}</small>
-                </span>
-              </button>
-            </li>
-          );
-        })}
+        {items.map((item) => (
+          <li key={item.id} className={`rail-step ${item.id === mode ? "active" : "upcoming"}`}>
+            <button type="button" aria-current={item.id === mode ? "page" : undefined} onClick={() => onNavigate(item.id)}>
+              <span className="step-index" aria-hidden="true">{item.badge}</span>
+              <span><strong>{item.title}</strong><small>{item.short}</small></span>
+            </button>
+          </li>
+        ))}
       </ol>
       <div className="rail-note">
         <span className="status-dot" />
         <div>
-          <strong>AI önerir, hakem kesinleştirir</strong>
-          <p>Sistem eleme veya nihai puan kararı vermez; her sonuç hakem onayından geçer.</p>
+          <strong>AI karşılaştırır, hakem karar verir</strong>
+          <p>Analiz, yayımlı kriterlerin rapor PDF&apos;i ile karşılaştırılmasıdır; ONAY veya RED kararı yalnızca hakemindir.</p>
         </div>
       </div>
       <Link className="eval-rail-link icon-back" href="/" aria-label="Çalışma alanıma dön" title="Çalışma alanıma dön"><span aria-hidden="true">←</span></Link>
@@ -255,1294 +193,665 @@ function EvalRail({ view, counts, onNavigate }: {
   );
 }
 
-function EvalTopbar({ view, onBack }: { view: EvalView; onBack: () => void }) {
-  const current = VIEWS.find((item) => item.id === view)!;
+function HomeView({ pending, completed, onChoose }: { pending: number; completed: number; onChoose: (mode: Mode) => void }) {
   return (
-    <header className="topbar">
-      <div className="topbar-lead">
-        <button type="button" className="topbar-back" onClick={onBack} aria-label="Geri dön" title="Geri dön">
-          <span aria-hidden="true">←</span>
-        </button>
+    <section className="workspace eval-home" aria-labelledby="eval-home-title">
+      <div className="workspace-heading">
         <div>
-          <span className="topbar-context">P4 · Değerlendirme karar destek sistemi</span>
-          <strong>{current.title}</strong>
+          <span className="section-kicker">Hakem girişi</span>
+          <h1 id="eval-home-title">Nereden devam etmek istersiniz?</h1>
+          <p>Yeni başvuruları değerlendirmek için atölyeye, kararı verilmiş başvuruları görmek için geçmişe geçin.</p>
         </div>
       </div>
-      <TopbarSession />
-    </header>
+      <div className="eval-home-choices">
+        <button type="button" className="eval-home-choice primary" onClick={() => onChoose("workshop")}>
+          <span className="eval-home-badge">{pending}</span>
+          <strong>Değerlendirme Atölyesi</strong>
+          <p>Kriteri çıkarılmış yarışmalar, size atanan başvurular, Yapay Zeka Analizi ve ONAY / RED kararı.</p>
+          <b aria-hidden="true">→</b>
+        </button>
+        <button type="button" className="eval-home-choice" onClick={() => onChoose("history")}>
+          <span className="eval-home-badge">{completed}</span>
+          <strong>Geçmiş değerlendirmeler</strong>
+          <p>Tamamlanan kararlar ve yarışmacıya iletilen şablonlar; gerekirse yeniden açılabilir.</p>
+          <b aria-hidden="true">→</b>
+        </button>
+      </div>
+    </section>
   );
 }
 
-function ProfilePanel({ profile, error, onProfileFile }: {
-  profile: ProfileExport | null;
-  error: string;
-  onProfileFile: (file: File) => void;
+function CompetitionList({ profiles, applications, selectedKey, history, onSelect }: {
+  profiles: CompetitionProfile[];
+  applications: CompetitionApplication[];
+  selectedKey: string | null;
+  history: boolean;
+  onSelect: (key: string) => void;
 }) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  if (!profile) {
-    return (
-      <div className="eval-profile-panel empty">
-        <div>
-          <strong>Onaylı değerlendirme profili gerekli</strong>
-          <p>
-            Raporlar, Kriter Atölyesi’nde onaylanan kural profiline göre değerlendirilir.
-            Bu cihazda onaylı profil bulunamadı.
-          </p>
-        </div>
-        <div className="eval-profile-actions">
-          <Link className="secondary-button" href="/kriter-atolyesi">Kriter Atölyesi’nde profil oluştur</Link>
-          <button type="button" className="secondary-button" onClick={() => inputRef.current?.click()}>
-            Profil JSON’u yükle
-          </button>
-          <input
-            ref={inputRef}
-            type="file"
-            accept="application/json,.json"
-            className="visually-hidden-input"
-            onChange={(event) => { const file = event.target.files?.[0]; if (file) onProfileFile(file); event.target.value = ""; }}
-          />
-        </div>
-        {error ? <div className="inline-error eval-inline-error" role="alert"><strong>Profil yüklenemedi.</strong><span>{error}</span></div> : null}
-      </div>
-    );
-  }
-  const activeCount = profile.criteria.filter((item) => item.active).length;
+  // Kriteri çıkarılmış (yayımlı) her yarışma listelenir; henüz başvurusu olmayan da görünür.
+  const entries = useMemo(() => {
+    const byKey = new Map<string, { key: string; name: string; profile: CompetitionProfile | null; items: CompetitionApplication[] }>();
+    for (const profile of profiles.filter((item) => item.status === "approved")) {
+      byKey.set(profile.competitionKey, { key: profile.competitionKey, name: profile.competitionName, profile, items: [] });
+    }
+    for (const application of applications) {
+      const entry = byKey.get(application.competitionKey) ?? { key: application.competitionKey, name: application.competitionName, profile: null, items: [] };
+      entry.items.push(application);
+      byKey.set(application.competitionKey, entry);
+    }
+    return [...byKey.values()].sort((left, right) => left.name.localeCompare(right.name, "tr"));
+  }, [profiles, applications]);
+
   return (
-    <div className="eval-profile-panel">
-      <div>
-        <span className="inspector-label">Aktif değerlendirme profili</span>
-        <strong>{profile.setup.competition}</strong>
-        <p>
-          {profile.setup.reportType} · {profile.setup.category} · {profile.setup.year}
-          {" · "}{activeCount} aktif kural · Kaynak: {profile.sourceDocument.name}
-        </p>
-      </div>
-      <div className="eval-profile-actions">
-        <button type="button" className="text-button" onClick={() => inputRef.current?.click()}>Farklı profil yükle</button>
-        <input
-          ref={inputRef}
-          type="file"
-          accept="application/json,.json"
-          className="visually-hidden-input"
-          onChange={(event) => { const file = event.target.files?.[0]; if (file) onProfileFile(file); event.target.value = ""; }}
-        />
-      </div>
-      {error ? <div className="inline-error eval-inline-error" role="alert"><strong>Profil yüklenemedi.</strong><span>{error}</span></div> : null}
+    <nav className="eval-competition-list" aria-label="Kriteri çıkarılmış yarışmalar">
+      {entries.map((entry) => {
+        const count = entry.items.filter((item) => history ? item.status === "completed" : item.status !== "completed").length;
+        const criteriaCount = entry.profile?.profile.criteria.filter((item) => item.active).length ?? 0;
+        return (
+          <button key={entry.key} type="button" className={entry.key === selectedKey ? "active" : ""} onClick={() => onSelect(entry.key)}>
+            <strong>{entry.name}</strong>
+            <span>{entry.profile ? `${criteriaCount} aktif kriter` : "Kriter profili yok"} · {count} {history ? "tamamlanan" : "bekleyen"} başvuru</span>
+          </button>
+        );
+      })}
+      {!entries.length ? <p className="library-empty">Kriteri çıkarılmış yarışma yok. Yarışma Yöneticisi Kriter Atölyesi&apos;nde profil yayımladığında burada görünür.</p> : null}
+    </nav>
+  );
+}
+
+function ApplicationGrid({ applications, selectedId, analyzingId, onSelect }: {
+  applications: CompetitionApplication[];
+  selectedId: string | null;
+  analyzingId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  if (!applications.length) return <p className="library-empty">Bu yarışmada gösterilecek başvuru yok.</p>;
+  return (
+    <div className="eval-application-grid" role="list">
+      {applications.map((application) => {
+        const evaluation = usableEvaluation(application);
+        const counts = evaluation ? countVerdicts(evaluation.findings, application.review?.decisions ?? []) : null;
+        return (
+          <button
+            key={application.id}
+            type="button"
+            role="listitem"
+            className={`eval-application-card ${application.id === selectedId ? "selected" : ""} ${application.status === "completed" ? `outcome-${application.outcome}` : ""}`}
+            onClick={() => onSelect(application.id)}
+          >
+            <span className="eval-card-status">
+              {analyzingId === application.id ? "Analiz ediliyor…" : application.status === "completed" ? OUTCOME_LABELS[application.outcome] : APPLICATION_STATUS_LABELS[application.status]}
+            </span>
+            <strong>{application.teamName}</strong>
+            <small>{application.applicantFullName || application.participantName}</small>
+            <small>{application.fileName ?? "Başvuru PDF'i"}{application.sizeBytes ? ` · ${formatBytes(application.sizeBytes)}` : ""} · sürüm {application.currentVersionNumber}</small>
+            {counts ? (
+              <span className="eval-card-counts">
+                <em className="BASARILI">✓ {counts.BASARILI}</em>
+                <em className="REVIZYON">! {counts.REVIZYON}</em>
+                <em className="KRITIK_HATA">✕ {counts.KRITIK_HATA}</em>
+              </span>
+            ) : <span className="eval-card-counts muted">AI analizi yapılmadı</span>}
+            <time>{formatDateTime(application.updatedAt)}</time>
+          </button>
+        );
+      })}
     </div>
   );
 }
 
-function PoolView({ profile, profileError, onProfileFile, records, uploadError, analyzingId, onUpload, onAnalyze, onDelete, onOpenReview, applications, onOpenApplication }: {
-  profile: ProfileExport | null;
-  profileError: string;
-  onProfileFile: (file: File) => void;
-  records: StoredReport[];
-  uploadError: string;
-  analyzingId: string | null;
-  onUpload: (file: File, participant: string) => Promise<boolean>;
-  onAnalyze: (record: StoredReport) => void;
-  onDelete: (id: string) => void;
-  onOpenReview: (id: string) => void;
-  applications: CompetitionApplication[];
-  onOpenApplication: (application: CompetitionApplication, analyze: boolean) => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [participant, setParticipant] = useState("");
-  const [dragging, setDragging] = useState(false);
-  const [confirmingId, setConfirmingId] = useState<string | null>(null);
-  const [libraryOpen, setLibraryOpen] = useState(false);
-  const [selectedCompetition, setSelectedCompetition] = useState("");
-  const [teamQuery, setTeamQuery] = useState("");
-  const [queueFilter, setQueueFilter] = useState<"pending" | "completed">("pending");
-
-  const competitionGroups = useMemo(() => {
-    const groups = new Map<string, CompetitionApplication[]>();
-    for (const application of applications) {
-      groups.set(application.competitionName, [...(groups.get(application.competitionName) ?? []), application]);
-    }
-    return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right, "tr"));
-  }, [applications]);
-  const effectiveCompetition = selectedCompetition && competitionGroups.some(([name]) => name === selectedCompetition)
-    ? selectedCompetition
-    : competitionGroups[0]?.[0] ?? "";
-  const visibleApplications = useMemo(() => {
-    const search = fold(teamQuery.trim());
-    return applications.filter((application) => application.competitionName === effectiveCompetition)
-      .filter((application) => queueFilter === "completed" ? application.status === "completed" : application.status !== "completed")
-      .filter((application) => !search || fold(`${application.teamName} ${application.applicantFullName} ${application.teamMembers.map((member) => member.fullName).join(" ")}`).includes(search));
-  }, [applications, effectiveCompetition, queueFilter, teamQuery]);
-
-  async function accept(file?: File) {
-    if (!file) return;
-    if (inputRef.current) inputRef.current.value = "";
-    // Başvuru adı yalnızca dosya gerçekten havuza alındığında temizlenir.
-    const accepted = await onUpload(file, participant.trim());
-    if (accepted) setParticipant("");
-  }
-
-  if (applications) {
-    return (
-      <section className="workspace eval-pool-workspace" aria-labelledby="pool-title">
-        <div className="workspace-heading">
-          <div><span className="section-kicker">Katılımcı başvuruları</span><h1 id="pool-title">Başvuru havuzu</h1><p>PDF&apos;ler yarışmacı gönderdiğinde burada görünür. AI analizi yalnızca hakem başlattığında çalışır.</p></div>
-          <span className="step-fraction">1 / 3</span>
-        </div>
-        {uploadError ? <div className="inline-error eval-panel-margin" role="alert"><strong>İşlem tamamlanamadı.</strong><span>{uploadError}</span></div> : null}
-        <section className="eval-pool-list eval-panel-margin" aria-label="Katılımcı başvuruları">
-          <div className="sample-library-heading"><div><h2>Projeler ve başvurular</h2><p>Önce yarışmayı seçin; ardından o yarışmaya başvuran takımları inceleyin.</p></div><span>{applications.length} başvuru</span></div>
-          {competitionGroups.length ? <div className="judge-project-layout">
-            <nav className="judge-project-list" aria-label="Başvuru bulunan yarışmalar">
-              {competitionGroups.map(([name, items]) => (
-                <button key={name} type="button" className={effectiveCompetition === name ? "active" : ""} onClick={() => { setSelectedCompetition(name); setTeamQuery(""); }}>
-                  <strong>{name}</strong><span>{items.filter((item) => item.status !== "completed").length} bekleyen · {items.length} toplam</span>
-                </button>
-              ))}
-            </nav>
-            <div className="judge-project-applications">
-              <div className="judge-project-toolbar"><div><strong>{effectiveCompetition}</strong><span>{visibleApplications.length} takım gösteriliyor</span></div><label className="search-box"><span aria-hidden="true">⌕</span><input value={teamQuery} onChange={(event) => setTeamQuery(event.target.value)} placeholder="Takım veya üye ara" /></label></div>
-              <div className="judge-queue-tabs" role="group" aria-label="Başvuru durumu filtresi"><button type="button" className={queueFilter === "pending" ? "active" : ""} onClick={() => setQueueFilter("pending")}>İncelenmeyi bekleyenler</button><button type="button" className={queueFilter === "completed" ? "active" : ""} onClick={() => setQueueFilter("completed")}>Tamamlananlar</button></div>
-              <div className="sample-document-list">
-            {visibleApplications.map((application) => <article key={application.id}>
-              <FileBadge fileName={application.fileName ?? "basvuru.pdf"} mimeType={application.mimeType ?? "application/pdf"} size="sm" />
-              <div className="sample-copy"><span>{APPLICATION_STATUS_LABELS[application.status]}</span><h3>{application.teamName}</h3><p>{application.applicantFullName} · {application.fileName ?? "Başvuru PDF'i"} · {formatBytes(application.sizeBytes ?? 0)}</p><small>{application.teamMembers.length ? `${application.teamMembers.length} ekip üyesi` : "Bireysel başvuru"}</small></div>
-              <div className="sample-actions eval-pool-actions">
-                <a className="text-button" href={`/api/applications/${application.id}/file`} target="_blank" rel="noreferrer">PDF&apos;i aç</a>
-                {["assigned", "resubmitted", "analysis_failed"].includes(application.status) ? <button type="button" className="primary-button" disabled={analyzingId !== null} onClick={() => onOpenApplication(application, true)}>{analyzingId === `server-${application.id}` ? "Analiz ediliyor…" : "AI ile değerlendir"}</button>
-                  : application.status === "submitted" ? <span className="eval-analyzing-note">Admin hakem ataması bekleniyor</span>
-                  : application.status === "analyzing" ? <span className="eval-analyzing-note">Analiz ediliyor…</span>
-                    : <button type="button" className="secondary-button" disabled={analyzingId !== null} onClick={() => onOpenApplication(application, false)}>{application.status === "completed" ? "Tamamlanan incelemeyi aç" : "Hakem incelemesini aç"}</button>}
-              </div>
-            </article>)}
-              {!visibleApplications.length ? <p className="library-empty">Bu aramayla eşleşen takım bulunamadı.</p> : null}
-              </div>
-            </div>
-          </div> : <p className="library-empty">Henüz katılımcı başvurusu yok.</p>}
-        </section>
-      </section>
-    );
-  }
-
+function StageStrip({ stages }: { stages: StageResult[] }) {
   return (
-    <section className="workspace eval-pool-workspace" aria-labelledby="pool-title">
-      <div className="workspace-heading">
-        <div>
-          <span className="section-kicker">Katılımcı raporları</span>
-          <h1 id="pool-title">Raporları havuza alın ve ön kontrolden geçirin</h1>
-          <p>
-            Dosya kapısı, dil, şablon, başlık ve benzerlik kontrolleri burada çalışır.
-            Anlamsal kriter analizi tamamlanan raporlar hakem incelemesine düşer.
-          </p>
-        </div>
-        <span className="step-fraction">1 / 3</span>
-      </div>
-
-      <div className="eval-panel-margin">
-        <ProfilePanel profile={profile} error={profileError} onProfileFile={onProfileFile} />
-      </div>
-
-      {profile ? (
-        <div className="eval-upload-row">
-          <div
-            className={`drop-zone eval-drop-zone ${dragging ? "dragging" : ""}`}
-            onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
-            onDragOver={(event) => event.preventDefault()}
-            onDragLeave={() => setDragging(false)}
-            onDrop={(event) => { event.preventDefault(); setDragging(false); accept(event.dataTransfer.files[0]); }}
-          >
-            <input
-              ref={inputRef}
-              type="file"
-              accept="application/pdf,.pdf"
-              onChange={(event) => accept(event.target.files?.[0])}
-            />
-            <div className="empty-upload">
-              <div className="upload-symbol" aria-hidden="true">↑</div>
-              <h2>Katılımcı raporunu buraya bırakın</h2>
-              <p>
-                PDF belgesinden çıkarılan teslim kuralları: {profile.setup.allowedFormats.join(", ") || "format belirtilmemiş"} · {profile.setup.maxFileSizeMb > 0 ? `en fazla ${profile.setup.maxFileSizeMb} MB` : "boyut belirtilmemiş"} ·
-                ihlal sonucu “{profile.setup.defaultViolationAction === "block" ? "yüklemeyi engelle" : profile.setup.defaultViolationAction === "warn" ? "uyarı oluştur" : profile.setup.defaultViolationAction === "jury" ? "jüri incelemesine gönder" : "PDF'de açıkça belirtilmemiş"}”
-              </p>
-              <label className="field eval-participant-field">
-                <span className="field-label">Takım / başvuru adı</span>
-                <input
-                  value={participant}
-                  onChange={(event) => setParticipant(event.target.value)}
-                  placeholder="Örn. Takım 42 — Hidra"
-                />
-              </label>
-              <div className="eval-upload-buttons">
-                <button type="button" className="secondary-button" onClick={() => inputRef.current?.click()}>PDF seç</button>
-                {/* Havuzdaki örnek yarışmacı raporları kod değişikliği olmadan test için kullanılabilir. */}
-                <button type="button" className="text-button" onClick={() => setLibraryOpen(true)}>Belge havuzundan seç</button>
-              </div>
+    <div className="eval-stage-strip" aria-label="Dört aşamalı kontrol özeti">
+      {CHECK_STAGES.map((definition) => {
+        const stage = stages.find((item) => item.stage === definition.id);
+        let meta = "";
+        if (stage && definition.id === "language_template") meta = `Dil: ${stage.detectedLanguage ?? "tespit edilemedi"}${stage.expectedLanguage ? ` (beklenen ${stage.expectedLanguage})` : ""}`;
+        if (stage && definition.id === "headings_content") {
+          const headings = stage.headings ?? [];
+          meta = headings.length ? `${headings.filter((item) => item.present && item.contentFilled).length}/${headings.length} başlık dolu` : "Başlık listesi yok";
+        }
+        if (stage && definition.id === "category_similarity") {
+          meta = `${stage.categoryScore === null || stage.categoryScore === undefined ? "Kategori skoru yok" : `Kategori %${stage.categoryScore}`}${stage.similarity?.percent !== null && stage.similarity?.percent !== undefined ? ` · benzerlik %${stage.similarity.percent}` : ""}`;
+        }
+        return (
+          <div key={definition.id} className={`eval-stage-chip ${stage?.verdict ?? "none"}`} title={stage?.summary || definition.detail}>
+            <span>{definition.order}</span>
+            <div>
+              <strong>{definition.title}</strong>
+              <small>{meta || stage?.summary || "Sonuç yok"}</small>
             </div>
+            {stage ? <VerdictBadge verdict={stage.verdict} /> : null}
           </div>
-        </div>
-      ) : null}
-
-      <DocumentLibraryModal
-        open={libraryOpen}
-        usage="rapor"
-        selectedFile={null}
-        onClose={() => setLibraryOpen(false)}
-        onSelect={(file) => { accept(file); }}
-      />
-
-      {uploadError ? (
-        <div className="inline-error eval-panel-margin" role="alert">
-          <strong>Rapor kabul edilmedi.</strong><span>{uploadError}</span>
-        </div>
-      ) : null}
-
-      <section className="eval-pool-list eval-panel-margin" aria-label="Değerlendirme havuzu">
-        <div className="sample-library-heading">
-          <div>
-            <h2>Değerlendirme havuzu</h2>
-            <p>Raporlar bu cihazda saklanır; analiz sonuçları hakem onayına kadar taslaktır.</p>
-          </div>
-          <span>{records.length} rapor</span>
-        </div>
-        {records.length ? (
-          <div className="sample-document-list">
-            {records.map((record) => {
-              const flaggedGate = record.gateChecks.filter((check) => check.status !== "passed");
-              return (
-                <article key={record.id}>
-                  <FileBadge fileName={record.fileName} mimeType={record.mimeType} size="sm" />
-                  <div className="sample-copy">
-                    <span>{REPORT_STATUS_LABELS[record.status]}</span>
-                    <h3>{record.participant}</h3>
-                    <p>
-                      {record.fileName} · {formatBytes(record.sizeBytes)}
-                      {record.pages ? ` · ${record.pages} sayfa` : ""}
-                    </p>
-                    {flaggedGate.length ? (
-                      <div className="eval-gate-chips">
-                        {flaggedGate.map((check) => (
-                          <span key={check.id} className={`eval-check-chip ${check.status}`} title={check.detail}>
-                            {check.name}: {CHECK_STATUS_LABELS[check.status]}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                  <div className="sample-actions eval-pool-actions">
-                    {record.status === "received" ? (
-                      <button
-                        type="button"
-                        className="primary-button"
-                        disabled={analyzingId !== null}
-                        onClick={() => onAnalyze(record)}
-                      >
-                        {analyzingId === record.id ? "Analiz ediliyor…" : "Analiz et"}
-                      </button>
-                    ) : record.status === "analyzing" ? (
-                      <span className="eval-analyzing-note" role="status">Analiz ediliyor…</span>
-                    ) : (
-                      <button type="button" className="secondary-button" onClick={() => onOpenReview(record.id)}>
-                        {record.status === "reviewed" ? "İncelemeyi aç" : "Hakem incelemesine git"}
-                      </button>
-                    )}
-                    {confirmingId === record.id ? (
-                      <span className="delete-confirm" role="alertdialog" aria-label="Rapor silme onayı">
-                        <button type="button" className="danger-button" onClick={() => { onDelete(record.id); setConfirmingId(null); }}>Evet, sil</button>
-                        <button type="button" className="text-button" onClick={() => setConfirmingId(null)}>Vazgeç</button>
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        className="danger-button ghost"
-                        disabled={analyzingId === record.id}
-                        onClick={() => setConfirmingId(record.id)}
-                      >
-                        Sil
-                      </button>
-                    )}
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        ) : (
-          <p className="library-empty">Havuzda henüz rapor yok. {profile ? "İlk katılımcı raporunu yukarıdan yükleyin." : "Önce onaylı bir profil yükleyin."}</p>
-        )}
-      </section>
-    </section>
+        );
+      })}
+    </div>
   );
 }
 
-function JudgeView({ profile, records, selectedId, onSelect, onUpdateReview, onComplete }: {
-  profile: ProfileExport | null;
-  records: StoredReport[];
-  selectedId: string;
-  onSelect: (id: string) => void;
-  onUpdateReview: (recordId: string, review: JudgeReview) => void;
-  onComplete: (recordId: string, review: JudgeReview) => void;
+function CriterionResult({ finding, application, decisions }: {
+  finding: CriterionFinding;
+  application: CompetitionApplication;
+  decisions: JudgeDecision[];
 }) {
-  const [reviewConfirmed, setReviewConfirmed] = useState(false);
-  const [selectedFindingId, setSelectedFindingId] = useState("");
-  // Seçim yapılmadan açılan ekranda ilk rapor sabitlenir; arkada tamamlanan yeni
-  // bir analiz, açık incelemeyi başka bir başvuruyla değiştiremez.
-  const [pinnedId, setPinnedId] = useState("");
-  const reviewable = records.filter((record) => record.evaluation);
-  const effectiveId = selectedId || pinnedId;
-  const record = reviewable.find((item) => item.id === effectiveId) ?? reviewable[0];
-  const evaluation = record?.evaluation ?? null;
-  const storedReview = record?.review ?? (evaluation ? buildInitialReview(evaluation) : null);
-  const review = storedReview ? {
-    ...storedReview,
-    outcome: storedReview.outcome ?? "pending",
-    outcomeNote: storedReview.outcomeNote ?? "",
-  } : null;
-  const [renderedRecordId, setRenderedRecordId] = useState(record?.id ?? "");
-
-  if (record && record.id !== effectiveId) setPinnedId(record.id);
-
-  // Rapor değişince seçim ve onay durumu render sırasında sıfırlanır (effect'siz uyarlama kalıbı).
-  if ((record?.id ?? "") !== renderedRecordId) {
-    setRenderedRecordId(record?.id ?? "");
-    setReviewConfirmed(false);
-    setSelectedFindingId("");
-  }
-
-  if (!record || !evaluation || !review) {
-    return (
-      <section className="workspace eval-empty-workspace" aria-labelledby="judge-title">
-        <div className="workspace-heading">
-          <div>
-            <span className="section-kicker">Hakem incelemesi</span>
-            <h1 id="judge-title">İncelenecek analiz bekleniyor</h1>
-            <p>Havuzdaki bir rapor analiz edildiğinde bulguları burada karara bağlayabilirsiniz.</p>
-          </div>
-          <span className="step-fraction">2 / 3</span>
+  const verdict = finalVerdictOf(finding, decisions);
+  const page = pageOf(finding);
+  const evidence = finding.evidence[0];
+  return (
+    <li className={`eval-result-row ${verdict}`}>
+      <VerdictMark verdict={verdict} />
+      <div className="eval-result-body">
+        <div className="eval-result-title">
+          <strong>{finding.criterionName}</strong>
+          <span className="eval-result-meta">{checkStageOf(finding.stage).shortTitle} · {finding.required ? "Zorunlu" : "Diğer"}</span>
         </div>
-        <p className="library-empty eval-panel-margin">Henüz analiz edilmiş rapor yok. Rapor havuzundan bir raporu analiz edin.</p>
-      </section>
-    );
-  }
-
-  const findings = evaluation.findings;
-  const selectedFinding = findings.find((item) => item.criterionId === selectedFindingId) ?? findings[0];
-  const selectedDecision = review.decisions.find((item) => item.criterionId === selectedFinding?.criterionId);
-  // Kriter kimlikleri profiller arasında tekrar eder; yüklü profil, sonucun
-  // üretildiği profil değilse şartname dayanağı ve karar kuralları gösterilmez.
-  const profileMatches = profile !== null && (
-    evaluation.profileRef.profileId !== null && profile.profileId
-      ? evaluation.profileRef.profileId === profile.profileId
-      : evaluation.profileRef.competition === profile.setup.competition
-        && evaluation.profileRef.year === profile.setup.year
-        && evaluation.profileRef.stage === profile.setup.stage
-        && evaluation.profileRef.reportType === profile.setup.reportType
+        {verdict !== "BASARILI" ? <p className="eval-result-reason">{reasonOf(finding, decisions)}</p> : null}
+        {evidence ? <q className="eval-result-quote">{evidence.text}</q> : null}
+        {verdict !== "BASARILI" && finding.evidenceMissing ? <small className="eval-result-note">Sistem rapordan alıntı gösteremedi; kaynağı PDF&apos;te kendiniz kontrol edin.</small> : null}
+      </div>
+      <div className="eval-result-actions">
+        {verdict !== "BASARILI" || evidence ? (
+          <a className="secondary-button eval-source-button" href={fileUrl(application, page)} target="_blank" rel="noreferrer">
+            Kaynağa git{page ? ` · s. ${page}` : ""}
+          </a>
+        ) : null}
+        {evidence ? <small>{evidenceLocation(evidence)}</small> : null}
+      </div>
+    </li>
   );
-  const criterion = profileMatches
-    ? profile?.criteria.find((item) => item.id === selectedFinding?.criterionId) ?? null
-    : null;
-  const selectedIsPenalty = criterion ? criterionEffectOf(criterion) === "penalty" : false;
+}
 
-  const scoreFindings = findings.filter((finding) => {
-    if (finding.maxScore === null) return false;
-    if (!profileMatches) return true;
-    const sourceCriterion = profile?.criteria.find((item) => item.id === finding.criterionId);
-    return sourceCriterion ? criterionEffectOf(sourceCriterion) === "score" : true;
-  });
-  const decidedScores = scoreFindings.filter((finding) => {
-    const decision = review.decisions.find((item) => item.criterionId === finding.criterionId);
-    return decision?.finalScore !== null && decision?.verdict !== "pending";
-  });
-  const decisionRuleIds = new Set(
-    profileMatches
-      ? (profile?.criteria ?? [])
-        .filter((item) => {
-          const effect = criterionEffectOf(item);
-          return criterionEliminates(item) || ["gate", "threshold", "penalty"].includes(effect);
-        })
-        .map((item) => item.id)
-      : [],
-  );
-  // İnsan yetkisindeki, olumsuz/kısmi bulunan veya karar kuralına bağlı hiçbir
-  // madde görevli kararı olmadan tamamlanamaz.
-  const decisionPending = findings.filter((finding) => {
-    const decision = review.decisions.find((item) => item.criterionId === finding.criterionId);
-    const needsDecision = finding.requiresHuman
-      || ["needs_human", "not_met", "not_found", "partially_met"].includes(finding.status)
-      || decisionRuleIds.has(finding.criterionId);
-    return needsDecision && decision?.verdict === "pending";
-  });
-  const positiveTotal = review.decisions.reduce((sum, decision) => {
-    const finding = findings.find((item) => item.criterionId === decision.criterionId);
-    if (!finding || finding.maxScore === null || decision.finalScore === null || decision.verdict === "pending") return sum;
-    const sourceCriterion = profileMatches ? profile?.criteria.find((item) => item.id === decision.criterionId) : null;
-    if (sourceCriterion && criterionEffectOf(sourceCriterion) !== "score") return sum;
-    return sum + decision.finalScore;
-  }, 0);
-  const penaltyTotal = review.decisions.reduce((sum, decision) => {
-    if (decision.verdict === "pending") return sum;
-    const criterion = profileMatches ? profile?.criteria.find((item) => item.id === decision.criterionId) : null;
-    return criterion && criterionEffectOf(criterion) === "penalty"
-      ? sum + Math.max(0, decision.penaltyPoints ?? 0)
-      : sum;
-  }, 0);
-  const { finalRaw: finalTotal, appliedPenalty } = applyPenalties(positiveTotal, penaltyTotal);
-  const declaredTotal = evaluation.proposedTotals.declaredTotal;
-  // Yardımcı hesap yalnızca resmî aralık dışı sonucu anomali olarak yakalamak
-  // için kullanılır; kullanıcıya otomatik 100'lük puan gösterilmez.
-  const normalized = normalizeScoreDetailed(finalTotal, declaredTotal ?? 0);
-  const flaggedChecks = evaluation.preChecks.filter((check) => check.status === "flagged" || check.status === "failed");
-  // Geçiş / baraj / ceza / eleme maddelerinin bu rapordaki durumu: bulgu + görevli kararı.
-  const ruleAudit = profile && profileMatches ? (() => {
-    const columns: Array<{ key: string; title: string; items: RuleAuditItem[] }> = [
-      { key: "gates", title: "Geçiş koşulları", items: [] },
-      { key: "thresholds", title: "Barajlar", items: [] },
-      { key: "penalties", title: "Cezalar", items: [] },
-      { key: "eliminations", title: "Eleme / diskalifiye", items: [] },
-    ];
-    let pending = 0;
-    let failed = 0;
-    for (const criterion of profile.criteria.filter((item) => item.active)) {
-      const eliminates = criterionEliminates(criterion);
-      const effect = criterionEffectOf(criterion);
-      const target = eliminates
-        ? columns[3]
-        : effect === "gate" ? columns[0]
-          : effect === "threshold" ? columns[1]
-            : effect === "penalty" ? columns[2]
-              : null;
-      if (!target) continue;
-      const finding = findings.find((item) => item.criterionId === criterion.id);
-      const decision = review.decisions.find((item) => item.criterionId === criterion.id);
-      const audited = auditRule(finding?.status, decision?.verdict);
-      if (audited.state === "warning") pending += 1;
-      if (audited.state === "failed") failed += 1;
-      target.items.push({
-        criterionId: criterion.id,
-        name: criterion.name,
-        detail: criterion.violationOutcome,
-        sourcePage: criterion.sourcePage,
-        state: audited.state,
-        label: audited.label,
-      });
-    }
-    return { columns, pending, failed };
-  })() : null;
-  const canComplete =
-    reviewConfirmed &&
-    decidedScores.length === scoreFindings.length &&
-    decisionPending.length === 0 &&
-    review.outcome !== "pending";
-
-  function patchDecision(criterionId: string, patch: Partial<JudgeDecision>) {
-    if (!record || !review) return;
-    const nextReview: JudgeReview = {
-      ...review,
-      status: "in_progress",
-      completedAt: null,
-      decisions: review.decisions.map((item) => item.criterionId === criterionId ? { ...item, ...patch } : item),
-    };
-    setReviewConfirmed(false);
-    onUpdateReview(record.id, nextReview);
-  }
-
-  function patchReview(patch: Partial<JudgeReview>) {
-    if (!record || !review) return;
-    setReviewConfirmed(false);
-    onUpdateReview(record.id, { ...review, ...patch, status: "in_progress", completedAt: null });
-  }
+/** Karar sonrası düzenlenebilir şablon: hakem elle değiştirir, ardından kesinleştirip iletir. */
+function DecisionTemplate({ application, evaluation, outcome, decisions, note, saving, error, onOutcome, onDecision, onNote, onFinalize, onCancel }: {
+  application: CompetitionApplication;
+  evaluation: ReportEvaluation;
+  outcome: Outcome;
+  decisions: JudgeDecision[];
+  note: string;
+  saving: boolean;
+  error: string;
+  onOutcome: (outcome: Outcome) => void;
+  onDecision: (criterionId: string, patch: Partial<JudgeDecision>) => void;
+  onNote: (note: string) => void;
+  onFinalize: () => void;
+  onCancel: () => void;
+}) {
+  const counts = countVerdicts(evaluation.findings, decisions);
+  const feedback = buildFeedback(evaluation.findings, decisions);
+  const failed = evaluation.findings.filter((finding) => finalVerdictOf(finding, decisions) !== "BASARILI");
+  const passed = evaluation.findings.filter((finding) => finalVerdictOf(finding, decisions) === "BASARILI");
 
   return (
-    <section className="workspace review-workspace" aria-labelledby="judge-title">
-      <div className="review-heading">
+    <section className={`eval-template outcome-${outcome}`} aria-labelledby="eval-template-title">
+      <header className="eval-template-head">
         <div>
-          <span className="section-kicker">AI 4. göz · karar hakemde</span>
-          <h1 id="judge-title">Bulguları inceleyin ve nihai puanı verin</h1>
-          <p>{record.participant} · {record.fileName} · {evaluation.report.pages} sayfa</p>
+          <span className="section-kicker">Yarışmacıya iletilecek şablon</span>
+          <h2 id="eval-template-title">Karar: {OUTCOME_LABELS[outcome]}</h2>
+          <p>{application.competitionName} · {application.teamName}. Şablon AI&apos;nin kriter analizinden üretildi; göndermeden önce elle değiştirebilirsiniz.</p>
         </div>
-        <span className="step-fraction">2 / 3</span>
+        <div className="eval-template-switch" role="group" aria-label="Kararı değiştir">
+          <button type="button" className={outcome === "accepted" ? "active" : ""} onClick={() => onOutcome("accepted")}>ONAY</button>
+          <button type="button" className={outcome === "rejected" ? "active" : ""} onClick={() => onOutcome("rejected")}>RED</button>
+        </div>
+      </header>
+
+      <div className="eval-template-summary">
+        <span className="BASARILI">✓ {counts.BASARILI} uygun</span>
+        <span className="REVIZYON">! {counts.REVIZYON} revizyon</span>
+        <span className="KRITIK_HATA">✕ {counts.KRITIK_HATA} kritik hata</span>
       </div>
 
-      {reviewable.length > 1 ? (
-        <div className="eval-record-picker eval-panel-margin">
-          <label className="field">
-            <span className="field-label">İncelenen rapor</span>
-            <select value={record.id} onChange={(event) => onSelect(event.target.value)} aria-label="İncelenecek raporu seç">
-              {reviewable.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.participant} · {REPORT_STATUS_LABELS[item.status]}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-      ) : null}
+      <label className="field eval-template-note">
+        <span className="field-label">Yarışmacıya sonuç açıklaması</span>
+        <textarea maxLength={1000} value={note} onChange={(event) => onNote(event.target.value)} />
+      </label>
 
-      <div className="analysis-summary" aria-label="İnceleme özeti">
-        <div><strong>{findings.length}</strong><span>bulgu</span></div>
-        <div><strong>{decidedScores.length}/{scoreFindings.length}</strong><span>puan kararı</span></div>
-        <div className={decisionPending.length ? "summary-warning" : "summary-ok"}>
-          <strong>{decisionPending.length}</strong><span>bekleyen görevli kararı</span>
-        </div>
-        <div className={flaggedChecks.length ? "summary-warning" : "summary-ok"}>
-          <strong>{flaggedChecks.length}</strong><span>işaretli ön kontrol</span>
-        </div>
-        <div>
-          <strong>{evaluation.proposedTotals.rawScore ?? "—"}</strong>
-          <span>AI puan önerisi</span>
-        </div>
-        <div>
-          <strong>{finalTotal}{declaredTotal ? ` / ${declaredTotal}` : ""}</strong>
-          <span>{appliedPenalty ? `${appliedPenalty} ceza sonrası · ` : ""}hakem toplamı · resmî ölçek</span>
-        </div>
-      </div>
-
-      {normalized.anomaly ? (
-        <div className="inline-error eval-panel-margin" role="alert">
-          <strong>Puan anomalisi</strong><span>{normalized.anomaly}</span>
-        </div>
-      ) : null}
-
-      {!profileMatches ? (
-        <div className="inline-error eval-panel-margin" role="alert">
-          <strong>Bu değerlendirme farklı bir profil ile üretildi.</strong>
-          <span>
-            Şartname dayanağı ve karar kuralları gösterilmiyor. Doğru dayanağı görmek için
-            {" "}{evaluation.profileRef.competition} · {evaluation.profileRef.year} profilini yükleyin.
-          </span>
-        </div>
-      ) : null}
-
-      {evaluation.analysisWarnings.length ? (
-        <div className="eval-warning-strip eval-panel-margin" role="status">
-          <span className="inspector-label">Analiz uyarıları</span>
-          <ul>
-            {evaluation.analysisWarnings.map((warning) => <li key={warning}>{warning}</li>)}
-          </ul>
-        </div>
-      ) : null}
-
-      <div className="eval-panel-margin">
-        <PreCheckList checks={evaluation.preChecks} title="Ön kontroller" />
-      </div>
-
-      {ruleAudit ? (
-        <section className="decision-rules" aria-labelledby="eval-decision-rules-title">
-          <div className="score-plan-heading">
-            <div>
-              <h2 id="eval-decision-rules-title">Karar kuralları denetimi</h2>
-              <p>
-                Toplam puandan bağımsız denetlenen geçiş, baraj, ceza ve eleme maddelerinin bu rapordaki durumu.
-                Sistem eleme kararı vermez; kapatılmamış her madde görevli kararı bekler.
-              </p>
-            </div>
-            <span className={`score-audit ${ruleAudit.pending ? "mismatch" : ruleAudit.failed ? "mismatch" : "matched"}`}>
-              {ruleAudit.pending
-                ? `${ruleAudit.pending} madde karar bekliyor`
-                : ruleAudit.failed
-                  ? `${ruleAudit.failed} madde sağlanmadı`
-                  : "Tüm maddeler karara bağlandı"}
-            </span>
-          </div>
-          <div className="decision-rule-grid">
-            {ruleAudit.columns.map((column) => (
-              <details key={column.key} className={`decision-column ${column.key}`} open={column.items.some((item) => item.state !== "passed")}>
-                <summary><strong>{column.items.length}</strong><span>{column.title}</span></summary>
-                {column.items.length ? (
-                  <ul>
-                    {column.items.map((item) => (
-                      <li key={item.criterionId}>
-                        <strong>{item.name}</strong>
-                        <span>{item.detail}{item.sourcePage ? ` · s. ${item.sourcePage}` : ""}</span>
-                        <span className={`eval-check-chip ${item.state}`}>{item.label}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p>Bu profilde tanımlı madde bulunmadı.</p>
-                )}
-              </details>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      <div className="review-grid">
-        <div className="criteria-ledger" id="finding-list">
-          <div className="criteria-section-heading">
-            <div><h2>Kriter bulguları</h2><p>Karara bağlamak istediğiniz bulguyu seçin.</p></div>
-          </div>
-          <div className="ledger-list" role="listbox" aria-label="Kriter bulguları">
-            {findings.map((finding) => {
-              const decision = review.decisions.find((item) => item.criterionId === finding.criterionId);
-              const pending = decision?.verdict === "pending";
+      <div className="eval-template-section">
+        <h3>Hatalı kriterler ve sebepleri <span>{failed.length}</span></h3>
+        {failed.length ? (
+          <ol className="eval-template-rows">
+            {failed.map((finding) => {
+              const decision = decisions.find((item) => item.criterionId === finding.criterionId);
+              const page = pageOf(finding);
               return (
-                <button
-                  key={finding.criterionId}
-                  type="button"
-                  role="option"
-                  aria-selected={finding.criterionId === selectedFinding?.criterionId}
-                  className={`criterion-row ${finding.criterionId === selectedFinding?.criterionId ? "selected" : ""}`}
-                  onClick={() => {
-                    setSelectedFindingId(finding.criterionId);
-                    requestAnimationFrame(() => document.getElementById("finding-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }));
-                  }}
-                >
-                  <span className={`type-mark ${(profileMatches && profile?.criteria.find((item) => item.id === finding.criterionId)?.type) || "qualitative_score"}`} aria-hidden="true" />
-                  <span className="criterion-main">
+                <li key={finding.criterionId}>
+                  <div className="eval-template-row-head">
                     <strong>{finding.criterionName}</strong>
-                    <small>
-                      {FINDING_STATUS_LABELS[finding.status]}
-                      {" · "}{decision ? VERDICT_LABELS[decision.verdict] : "Karar bekliyor"}
-                    </small>
-                  </span>
-                  <span className={`criterion-value ${finding.maxScore !== null ? "score" : "advisory"}`}>
-                    {finding.maxScore !== null
-                      ? `${decision?.finalScore ?? "—"} / ${finding.maxScore}`
-                      : FINDING_STATUS_LABELS[finding.status]}
-                  </span>
-                  {pending && (finding.requiresHuman || finding.maxScore !== null) ? <span className="row-alert" title="Karar bekliyor">!</span> : null}
-                </button>
+                    <select
+                      value={decision?.finalVerdict ?? finding.verdict}
+                      aria-label={`${finding.criterionName} nihai durumu`}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        if (isRuleVerdict(value)) onDecision(finding.criterionId, { finalVerdict: value, verdict: value === finding.verdict ? "accepted" : "adjusted" });
+                      }}
+                    >
+                      {RULE_VERDICTS.map((verdict) => <option key={verdict} value={verdict}>{RULE_VERDICT_LABELS[verdict]}{verdict === finding.verdict ? " (AI)" : ""}</option>)}
+                    </select>
+                  </div>
+                  <textarea
+                    value={decision?.note ?? ""}
+                    placeholder={finding.rationale}
+                    aria-label={`${finding.criterionName} hata sebebi`}
+                    onChange={(event) => onDecision(finding.criterionId, { note: event.target.value, verdict: "adjusted" })}
+                  />
+                  <small>
+                    Boş bırakılırsa AI gerekçesi iletilir.
+                    {page ? <> · <a href={fileUrl(application, page)} target="_blank" rel="noreferrer">Kaynak s. {page}</a></> : null}
+                  </small>
+                </li>
               );
             })}
-          </div>
-        </div>
-
-        {selectedFinding && selectedDecision ? (
-          <div className="criterion-inspector" id="finding-detail">
-            <div className="inspector-title">
-              <div><span>Seçili bulgu</span><h2>{selectedFinding.criterionName}</h2></div>
-              <a href="#finding-list">Bulgu listesine dön ↑</a>
-            </div>
-            <div className="inspector-topline">
-              <div>
-                <span className={`confidence ${selectedFinding.confidence}`}>
-                  {selectedFinding.confidence === "high" ? "Yüksek güven" : selectedFinding.confidence === "medium" ? "Orta güven" : "Düşük güven"}
-                </span>
-                <span className="origin-label">{FINDING_STATUS_LABELS[selectedFinding.status]}</span>
-              </div>
-              <span className={`eval-check-chip ${selectedDecision.verdict === "pending" ? "warning" : "passed"}`}>
-                {VERDICT_LABELS[selectedDecision.verdict]}
-              </span>
-            </div>
-
-            <div className="inspector-section">
-              <span className="inspector-label">Sistem bulgusu</span>
-              <p className="eval-rationale">{selectedFinding.rationale}</p>
-              {selectedFinding.evidence.length ? (
-                <blockquote className="eval-evidence">
-                  {selectedFinding.evidence[0].text}
-                  {selectedFinding.evidence[0].page ? <small> — Rapor s. {selectedFinding.evidence[0].page}</small> : null}
-                </blockquote>
-              ) : null}
-              {criterion?.sourceText ? (
-                <div className="eval-source-rule">
-                  <span>Şartnamedeki dayanak{criterion.sourcePage ? ` · s. ${criterion.sourcePage}` : ""}</span>
-                  <p>{criterion.sourceText}</p>
-                </div>
-              ) : null}
-              {selectedFinding.requiresHuman ? (
-                <p className="human-authority-note">Bu kontrol için sistem yalnızca bulgu sunar. Nihai karar hakem, jüri veya sorumlu görevlidedir.</p>
-              ) : null}
-            </div>
-
-            <div className="inspector-section">
-              <span className="inspector-label">Hakem kararı</span>
-              <div className="form-grid two-col">
-                {selectedIsPenalty ? (
-                  <Field label="Uygulanan ceza puanı" hint="Belgedeki ceza kuralını ve tekrar sayısını doğrulayarak toplam düşülecek puanı girin.">
-                    <input
-                      type="number"
-                      min={0}
-                      max={declaredTotal ?? undefined}
-                      value={selectedDecision.penaltyPoints ?? ""}
-                      placeholder="Örn. 5"
-                      onChange={(event) => {
-                        const raw = event.target.value === "" ? null : Number(event.target.value);
-                        const capped = raw === null
-                          ? null
-                          : Math.max(0, Math.min(declaredTotal ?? raw, Number.isFinite(raw) ? raw : 0));
-                        patchDecision(selectedFinding.criterionId, {
-                          penaltyPoints: capped,
-                          finalScore: null,
-                          verdict: capped === null ? "pending" : "adjusted",
-                        });
-                      }}
-                    />
-                  </Field>
-                ) : selectedFinding.maxScore !== null ? (
-                  <Field label={`Nihai puan (azami ${selectedFinding.maxScore})`}>
-                    <input
-                      type="number"
-                      min={0}
-                      max={selectedFinding.maxScore}
-                      value={selectedDecision.finalScore ?? ""}
-                      placeholder={selectedFinding.proposedScore !== null ? `Öneri: ${selectedFinding.proposedScore}` : "Puan girin"}
-                      onChange={(event) => {
-                        const raw = event.target.value === "" ? null : Number(event.target.value);
-                        const clamped = raw === null ? null : Math.max(0, Math.min(selectedFinding.maxScore ?? raw, raw));
-                        patchDecision(selectedFinding.criterionId, {
-                          finalScore: clamped,
-                          verdict: clamped === null ? "pending" : clamped === selectedFinding.proposedScore ? "accepted" : "adjusted",
-                        });
-                      }}
-                    />
-                  </Field>
-                ) : (
-                  <Field label="Karar">
-                    <select
-                      value={selectedDecision.verdict}
-                      onChange={(event) => patchDecision(selectedFinding.criterionId, { verdict: event.target.value as JudgeDecision["verdict"] })}
-                    >
-                      <option value="pending">Karar bekliyor</option>
-                      <option value="accepted">Bulguyu onayla</option>
-                      <option value="adjusted">Bulguyu düzelterek onayla</option>
-                    </select>
-                  </Field>
-                )}
-                <Field label="Hakem notu" hint="Not, yarışmacı geri bildirimine otomatik geçmez.">
-                  <input
-                    value={selectedDecision.note}
-                    onChange={(event) => patchDecision(selectedFinding.criterionId, { note: event.target.value })}
-                    placeholder="Gerekçe veya gözlem"
-                  />
-                </Field>
-              </div>
-              {selectedIsPenalty && selectedDecision.penaltyPoints === null ? (
-                <p className="eval-pending-note">Ceza uygulanmayacaksa 0 girin; bu karar verilmeden inceleme tamamlanamaz.</p>
-              ) : selectedFinding.maxScore !== null && selectedDecision.finalScore === null ? (
-                <p className="eval-pending-note">Bu kriter puanlanmadan inceleme tamamlanamaz.</p>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
+          </ol>
+        ) : <p className="library-empty">Hatalı kriter yok.</p>}
       </div>
 
-      <section className="eval-feedback-editor eval-panel-margin" aria-labelledby="feedback-editor-title">
-        <div className="score-plan-heading">
-          <div>
-            <h2 id="feedback-editor-title">Yarışmacı geri bildirimi</h2>
-            <p>Taslak, analiz bulgularından türetildi. Hakem düzenler ve onaylar; onaysız geri bildirim yarışmacıya gösterilmez.</p>
-          </div>
-        </div>
-        <div className="eval-feedback-grid">
-          <FeedbackField
-            label="Güçlü yönler"
-            hint="Her satır bir madde olarak gösterilir."
-            lines={review.finalFeedback.strengths}
-            onChange={(strengths) => patchReview({ finalFeedback: { ...review.finalFeedback, strengths } })}
-          />
-          <FeedbackField
-            label="Geliştirilmesi gereken alanlar"
-            lines={review.finalFeedback.improvements}
-            onChange={(improvements) => patchReview({ finalFeedback: { ...review.finalFeedback, improvements } })}
-          />
-          <FeedbackField
-            label="Öneriler"
-            lines={review.finalFeedback.suggestions}
-            onChange={(suggestions) => patchReview({ finalFeedback: { ...review.finalFeedback, suggestions } })}
-          />
-        </div>
-        <label className="eval-feedback-approve">
-          <input
-            type="checkbox"
-            checked={review.feedbackApproved}
-            onChange={(event) => patchReview({ feedbackApproved: event.target.checked })}
-          />
-          <span>Geri bildirim yarışmacıya gösterilsin.</span>
-        </label>
-        <div className="form-grid two-col eval-outcome-fields">
-          <Field label="Başvuru sonucu" hint="Bu sonuç yarışmacının Başvurularım ekranında gösterilir.">
-            <select value={review.outcome} onChange={(event) => patchReview({ outcome: event.target.value as JudgeReview["outcome"] })}>
-              <option value="pending">Sonuç seçin</option>
-              <option value="accepted">Kabul edildi</option>
-              <option value="rejected">Reddedildi</option>
-              <option value="revision_required">Hatalar düzeltilmeli</option>
-            </select>
-          </Field>
-          <Field label="Yarışmacıya sonuç açıklaması" hint="Kısa, açık ve uygulanabilir bir açıklama yazın.">
-            <textarea maxLength={1000} value={review.outcomeNote} onChange={(event) => patchReview({ outcomeNote: event.target.value })} placeholder="Sonucun kısa gerekçesi veya beklenen düzeltme" />
-          </Field>
-        </div>
-        <Field label="Genel değerlendirme notu" hint="İç kayıt; yarışmacıya gösterilmez.">
-          <textarea
-            value={review.overallNote}
-            onChange={(event) => patchReview({ overallNote: event.target.value })}
-          />
-        </Field>
-      </section>
+      <div className="eval-template-section">
+        <h3>Karşılanan kriterler <span>{passed.length}</span></h3>
+        {passed.length ? (
+          <ul className="eval-template-passed">
+            {passed.map((finding) => (
+              <li key={finding.criterionId}>
+                <span>✓ {finding.criterionName}</span>
+                <button type="button" className="text-button" onClick={() => onDecision(finding.criterionId, { finalVerdict: finding.required ? "KRITIK_HATA" : "REVIZYON", verdict: "adjusted" })}>
+                  Hatalı işaretle
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : <p className="library-empty">Karşılanan kriter yok.</p>}
+      </div>
 
-      <div className="approval-bar">
-        <span className="save-note">Kararlar bu cihazda anlık kaydedilir.</span>
-        <div className="approval-check">
-          <label>
-            <input type="checkbox" checked={reviewConfirmed} onChange={(event) => setReviewConfirmed(event.target.checked)} />
-            <span>Ön kontrolleri, bulguları, kanıtları ve görevli kararı gerektiren maddeleri inceledim.</span>
-          </label>
-          {!canComplete ? (
-            <small>
-              {decidedScores.length !== scoreFindings.length && `${scoreFindings.length - decidedScores.length} puan kriteri kararsız. `}
-              {decisionPending.length > 0 && `${decisionPending.length} görevli kararı bekliyor. `}
-              {review.outcome === "pending" && "Başvuru sonucunu seçin. "}
-              {!reviewConfirmed && "Hakem kontrolünü onaylayın."}
-            </small>
-          ) : <small className="ready-note">İnceleme tamamlanmaya hazır.</small>}
+      <details className="eval-template-preview">
+        <summary>Yarışmacının göreceği metin önizlemesi</summary>
+        <div>
+          <p className="eval-template-preview-note">{note}</p>
+          {feedback.strengths.length ? <section><strong>Karşılanan kriterler</strong><ul>{feedback.strengths.map((line) => <li key={line}>{line}</li>)}</ul></section> : null}
+          {feedback.improvements.length ? <section><strong>Hatalı kriterler ve sebepleri</strong><ul>{feedback.improvements.map((line) => <li key={line}>{line}</li>)}</ul></section> : null}
+          {feedback.suggestions.length ? <section><strong>Revizyon önerileri</strong><ul>{feedback.suggestions.map((line) => <li key={line}>{line}</li>)}</ul></section> : null}
         </div>
-        <button
-          type="button"
-          className="primary-button"
-          disabled={!canComplete}
-          onClick={() => onComplete(record.id, {
-            ...review,
-            // Boş satırlar ve baştaki/sondaki boşluklar yalnızca burada temizlenir.
-            finalFeedback: normalizeFeedback(review.finalFeedback),
-            status: "completed",
-            completedAt: new Date().toISOString(),
-          })}
-        >
-          Değerlendirmeyi tamamla <span aria-hidden="true">→</span>
+      </details>
+
+      {error ? <div className="inline-error" role="alert"><strong>Karar kaydedilemedi.</strong><span>{error}</span></div> : null}
+
+      <div className="eval-template-actions">
+        <button type="button" className="text-button" disabled={saving} onClick={onCancel}>Vazgeç</button>
+        <button type="button" className={`primary-button ${outcome === "rejected" ? "danger" : "success"}`} disabled={saving} onClick={onFinalize}>
+          {saving ? "Kaydediliyor…" : outcome === "accepted" ? "ONAYI kesinleştir ve ilet" : "REDDİ kesinleştir ve ilet"}
         </button>
       </div>
     </section>
   );
 }
 
-function ParticipantView({ profile, records, selectedId, onSelect }: {
-  profile: ProfileExport | null;
-  records: StoredReport[];
-  selectedId: string;
-  onSelect: (id: string) => void;
+function ApplicationDetail({ application, analyzing, progress, onAnalyze, onFinalize }: {
+  application: CompetitionApplication;
+  analyzing: boolean;
+  progress: string;
+  onAnalyze: (application: CompetitionApplication) => void;
+  onFinalize: (application: CompetitionApplication, review: JudgeReview) => Promise<boolean>;
 }) {
-  const completed = records.filter((record) => record.review?.status === "completed");
-  const record = completed.find((item) => item.id === selectedId) ?? completed[0];
+  const evaluation = usableEvaluation(application);
+  const completed = application.status === "completed" && application.review?.status === "completed";
+  const [reopened, setReopened] = useState(false);
+  const [pendingOutcome, setPendingOutcome] = useState<Outcome | null>(null);
+  const [decisions, setDecisions] = useState<JudgeDecision[]>(() => evaluation ? draftDecisions(evaluation, application.review) : []);
+  const [note, setNote] = useState(application.review?.outcomeNote ?? "");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
-  if (!record || !record.evaluation || !record.review) {
-    return (
-      <section className="workspace eval-empty-workspace" aria-labelledby="participant-title">
-        <div className="workspace-heading">
-          <div>
-            <span className="section-kicker">Yarışmacı görünümü</span>
-            <h1 id="participant-title">Sonuç henüz yayımlanmadı</h1>
-            <p>Hakem değerlendirmeyi tamamladığında sonuç ve gelişim odaklı geri bildirim burada görünür.</p>
-          </div>
-          <span className="step-fraction">3 / 3</span>
-        </div>
-        <p className="library-empty eval-panel-margin">Tamamlanmış değerlendirme bulunmuyor.</p>
-      </section>
-    );
+  const canAnalyze = (ANALYZABLE_STATUSES as readonly string[]).includes(application.status) && !analyzing;
+  const canRefresh = !analyzing && (canAnalyze || application.status === "awaiting_judge" || application.status === "judge_in_review");
+  const locked = completed && !reopened;
+
+  function patchDecision(criterionId: string, patch: Partial<JudgeDecision>) {
+    setDecisions((current) => current.map((item) => item.criterionId === criterionId ? { ...item, ...patch } : item));
   }
 
-  const evaluation = record.evaluation;
-  const review = record.review;
-  const findings = evaluation.findings;
-  const declaredTotal = evaluation.proposedTotals.declaredTotal;
-  const profileMatches = profile !== null && (
-    evaluation.profileRef.profileId
-      ? profile.profileId === evaluation.profileRef.profileId
-      : profile.setup.competition === evaluation.profileRef.competition
-        && profile.setup.year === evaluation.profileRef.year
-        && profile.setup.stage === evaluation.profileRef.stage
-        && profile.setup.reportType === evaluation.profileRef.reportType
-  );
-  const positiveTotal = review.decisions.reduce((sum, decision) => {
-    const finding = findings.find((item) => item.criterionId === decision.criterionId);
-    if (!finding || finding.maxScore === null || decision.finalScore === null || decision.verdict === "pending") return sum;
-    const sourceCriterion = profileMatches ? profile.criteria.find((item) => item.id === decision.criterionId) : null;
-    if (sourceCriterion && criterionEffectOf(sourceCriterion) !== "score") return sum;
-    return sum + decision.finalScore;
-  }, 0);
-  const penaltyTotal = review.decisions.reduce((sum, decision) => {
-    if (decision.verdict === "pending") return sum;
-    const criterion = profileMatches ? profile.criteria.find((item) => item.id === decision.criterionId) : null;
-    return criterion && criterionEffectOf(criterion) === "penalty"
-      ? sum + Math.max(0, decision.penaltyPoints ?? 0)
-      : sum;
-  }, 0);
-  const { finalRaw: finalTotal, appliedPenalty } = applyPenalties(positiveTotal, penaltyTotal);
-  // Yardımcı hesap yalnızca resmî aralık dışı sonucu anomali olarak yakalamak
-  // için kullanılır; sonuç PDF'deki puan ölçeğiyle gösterilir.
-  const normalized = normalizeScoreDetailed(finalTotal, declaredTotal ?? 0);
-  const feedback: ParticipantFeedback | null = review.feedbackApproved
-    ? normalizeFeedback(review.finalFeedback)
-    : null;
+  function startDecision(outcome: Outcome) {
+    if (!evaluation) return;
+    setPendingOutcome(outcome);
+    setSaveError("");
+    setNote((current) => current.trim() ? current : defaultOutcomeNote(outcome, countVerdicts(evaluation.findings, decisions)));
+  }
 
-  const outcome = OUTCOME_VIEW[review.outcome] ?? OUTCOME_VIEW.pending;
+  function switchOutcome(outcome: Outcome) {
+    if (!evaluation) return;
+    const previousDefault = pendingOutcome ? defaultOutcomeNote(pendingOutcome, countVerdicts(evaluation.findings, decisions)) : "";
+    setPendingOutcome(outcome);
+    setNote((current) => !current.trim() || current === previousDefault ? defaultOutcomeNote(outcome, countVerdicts(evaluation.findings, decisions)) : current);
+  }
+
+  async function finalize() {
+    if (!evaluation || !pendingOutcome) return;
+    setSaving(true);
+    setSaveError("");
+    const review: JudgeReview = {
+      status: "completed",
+      outcome: pendingOutcome,
+      outcomeNote: note.trim().slice(0, 1000),
+      decisions,
+      overallNote: "",
+      finalFeedback: buildFeedback(evaluation.findings, decisions),
+      feedbackApproved: true,
+      completedAt: new Date().toISOString(),
+    };
+    try {
+      const ok = await onFinalize(application, review);
+      if (ok) { setPendingOutcome(null); setReopened(false); }
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Bilinmeyen hata.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const counts = evaluation ? countVerdicts(evaluation.findings, decisions) : null;
+  const failed = evaluation ? evaluation.findings.filter((finding) => finalVerdictOf(finding, decisions) !== "BASARILI") : [];
+  const passed = evaluation ? evaluation.findings.filter((finding) => finalVerdictOf(finding, decisions) === "BASARILI") : [];
 
   return (
-    <section className={`workspace ready-workspace outcome-${review.outcome ?? "pending"}`} aria-labelledby="participant-title">
-      <div className="ready-hero">
-        <span className="approval-seal" aria-hidden="true">{outcome.seal}</span>
-        <span className="section-kicker">Değerlendirme sonucu</span>
-        <h1 id="participant-title">{record.participant}</h1>
-        <p className="ready-outcome-line">
-          <span className="outcome-badge">{outcome.label}</span>
-        </p>
-        <p>
-          {evaluation.profileRef.competition} · {evaluation.profileRef.reportType} · {evaluation.profileRef.year}.
-          {" "}{outcome.summary}
-        </p>
-        {review.outcomeNote ? <p className="ready-outcome-note">{review.outcomeNote}</p> : null}
-      </div>
-
-      {completed.length > 1 ? (
-        <div className="eval-record-picker eval-panel-margin">
-          <label className="field">
-            <span className="field-label">Başvuru</span>
-            <select value={record.id} onChange={(event) => onSelect(event.target.value)} aria-label="Başvuru seç">
-              {completed.map((item) => <option key={item.id} value={item.id}>{item.participant}</option>)}
-            </select>
-          </label>
-        </div>
-      ) : null}
-
-      <div className="profile-sheet">
-        <div className="profile-sheet-header">
-          <div><span>Sonuç</span><strong>{record.fileName}</strong></div>
-          <span className={`status-chip ${outcome.chip}`}>{outcome.label}</span>
-        </div>
-        <div className="profile-metrics">
-          <div>
-            <strong>{finalTotal}{declaredTotal ? ` / ${declaredTotal}` : ""}</strong>
-            <span>{appliedPenalty ? `${appliedPenalty} ceza sonrası · ` : ""}toplam puan · resmî ölçek</span>
-          </div>
-          <div>
-            <strong>{declaredTotal ?? "—"}</strong>
-            <span>resmî azami puan</span>
-          </div>
-          <div>
-            <strong>{findings.filter((finding) => finding.status === "met").length}<small> / {findings.length}</small></strong>
-            <span>karşılanan kriter</span>
-          </div>
-          <div>
-            <strong>{evaluation.report.pages}</strong>
-            <span>rapor sayfası</span>
-          </div>
-        </div>
-        {normalized.anomaly ? (
-          <div className="inline-error" role="alert">
-            <strong>Puan anomalisi</strong><span>{normalized.anomaly}</span>
-          </div>
-        ) : null}
-        {feedback ? (
-          <div className="eval-participant-feedback">
-            <section>
-              <span className="inspector-label">Güçlü yönler</span>
-              {feedback.strengths.length ? <ul>{feedback.strengths.map((line) => <li key={line}>{line}</li>)}</ul> : <p>Hakem bu bölüme madde eklemedi.</p>}
-            </section>
-            <section>
-              <span className="inspector-label">Geliştirilmesi gereken alanlar</span>
-              {feedback.improvements.length ? <ul>{feedback.improvements.map((line) => <li key={line}>{line}</li>)}</ul> : <p>Hakem bu bölüme madde eklemedi.</p>}
-            </section>
-            <section>
-              <span className="inspector-label">Öneriler</span>
-              {feedback.suggestions.length ? <ul>{feedback.suggestions.map((line) => <li key={line}>{line}</li>)}</ul> : <p>Hakem bu bölüme madde eklemedi.</p>}
-            </section>
-          </div>
-        ) : (
-          <div className="profile-footer-note">
-            <span>Geri bildirim</span>
-            <p>Hakem, bu değerlendirme için ayrıntılı geri bildirimi yayımlamadı.</p>
-          </div>
-        )}
-        <div className="profile-footer-note">
-          <span>Nasıl değerlendirildi?</span>
+    <section className="eval-detail" aria-labelledby="eval-detail-title">
+      <header className="eval-detail-head">
+        <div>
+          <span className="section-kicker">{application.competitionName}</span>
+          <h2 id="eval-detail-title">{application.teamName}</h2>
           <p>
-            Rapor, {evaluation.profileRef.year} yılı onaylı değerlendirme profilindeki kurallara göre incelendi.
-            Sistem yalnızca bulgu sundu; tüm puanlar ve kararlar uzman hakem tarafından verildi.
+            {application.applicantFullName || application.participantName}
+            {application.teamMembers.length ? ` · ${application.teamMembers.length} ekip üyesi` : ""}
+            {" · "}sürüm {application.currentVersionNumber} · {formatDateTime(application.submittedAt)}
           </p>
         </div>
-      </div>
+        <div className="eval-detail-actions">
+          <span className={`status-chip ${completed ? (application.outcome === "accepted" ? "success" : "danger") : "neutral"}`}>
+            {completed ? OUTCOME_LABELS[application.outcome] : APPLICATION_STATUS_LABELS[application.status]}
+          </span>
+          <a className="secondary-button" href={fileUrl(application)} target="_blank" rel="noreferrer">PDF&apos;i aç</a>
+        </div>
+      </header>
+
+      {!evaluation ? (
+        <div className="eval-analyze-block">
+          <div>
+            <strong>{application.status === "analysis_failed" ? "AI analizi tamamlanamadı veya eski sürümle yapılmış" : "Bu başvuru henüz analiz edilmedi"}</strong>
+            <p>Yapay zekâ, yayımlı kriterlerin her birini rapor PDF&apos;i ile karşılaştırır; uygun kriteri ✓, hatalı kriteri sebebi ve kaynak sayfasıyla işaretler. Nihai karar sizindir.</p>
+          </div>
+          {analyzing ? (
+            <div className="analysis-progress" role="status" aria-live="polite">
+              <span className="progress-spinner" />
+              <div><strong>Yapay Zeka Analizi sürüyor</strong><p>{progress}</p></div>
+              <div className="progress-line"><span /></div>
+            </div>
+          ) : (
+            <button type="button" className="primary-button eval-analyze-button" disabled={!canAnalyze} onClick={() => onAnalyze(application)}>
+              Yapay Zeka Analizi <span aria-hidden="true">→</span>
+            </button>
+          )}
+          {!canAnalyze && !analyzing ? (
+            <small>{application.status === "analyzing" ? "Analiz başka bir oturumda sürüyor." : "Bu durumda analiz başlatılamaz."}</small>
+          ) : null}
+        </div>
+      ) : (
+        <>
+          <StageStrip stages={evaluation.stages} />
+
+          {evaluation.analysisWarnings.length ? (
+            <details className="eval-warnings">
+              <summary>{evaluation.analysisWarnings.length} analiz uyarısı</summary>
+              <ul>{evaluation.analysisWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+            </details>
+          ) : null}
+
+          <div className="eval-result-summary" aria-label="Kriter sonucu özeti">
+            <div className="BASARILI"><strong>{counts?.BASARILI}</strong><span>uygun kriter</span></div>
+            <div className="REVIZYON"><strong>{counts?.REVIZYON}</strong><span>revizyon</span></div>
+            <div className="KRITIK_HATA"><strong>{counts?.KRITIK_HATA}</strong><span>kritik hata</span></div>
+            <div><strong>{evaluation.findings.length}</strong><span>toplam kriter</span></div>
+            {analyzing ? (
+              <span className="eval-analyzing-note" role="status">{progress || "Analiz ediliyor…"}</span>
+            ) : !locked ? (
+              <button type="button" className="text-button" disabled={!canRefresh} onClick={() => onAnalyze(application)}>Analizi yenile</button>
+            ) : null}
+          </div>
+
+          {pendingOutcome && !locked ? (
+            <DecisionTemplate
+              application={application}
+              evaluation={evaluation}
+              outcome={pendingOutcome}
+              decisions={decisions}
+              note={note}
+              saving={saving}
+              error={saveError}
+              onOutcome={switchOutcome}
+              onDecision={patchDecision}
+              onNote={setNote}
+              onFinalize={finalize}
+              onCancel={() => { setPendingOutcome(null); setSaveError(""); }}
+            />
+          ) : (
+            <>
+              <div className="eval-result-group">
+                <h3>Hatalı kriterler <span>{failed.length}</span></h3>
+                {failed.length ? (
+                  <ul className="eval-result-list">
+                    {failed.map((finding) => <CriterionResult key={finding.criterionId} finding={finding} application={application} decisions={decisions} />)}
+                  </ul>
+                ) : <p className="eval-result-empty">Hatalı kriter bulunmadı.</p>}
+              </div>
+              <div className="eval-result-group">
+                <h3>Uygun kriterler <span>{passed.length}</span></h3>
+                {passed.length ? (
+                  <ul className="eval-result-list compact">
+                    {passed.map((finding) => <CriterionResult key={finding.criterionId} finding={finding} application={application} decisions={decisions} />)}
+                  </ul>
+                ) : <p className="eval-result-empty">Uygun kriter bulunmadı.</p>}
+              </div>
+
+              <div className="eval-decision-bar">
+                {locked ? (
+                  <>
+                    <div>
+                      <strong>Karar verildi: {OUTCOME_LABELS[application.outcome]}</strong>
+                      <p>{application.review?.completedAt ? `${formatDateTime(application.review.completedAt)} · ` : ""}Şablon yarışmacıya iletildi{application.outcomeNote ? `: “${application.outcomeNote}”` : "."}</p>
+                    </div>
+                    <button type="button" className="secondary-button" onClick={() => { setReopened(true); setPendingOutcome(application.outcome === "rejected" ? "rejected" : "accepted"); }}>
+                      Kararı yeniden aç
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <div>
+                      <strong>Nihai karar</strong>
+                      <p>ONAY veya RED&apos;e basınca şablon açılır; kriter durumlarını ve hata sebeplerini elle değiştirip kesinleştirebilirsiniz.</p>
+                    </div>
+                    <div className="eval-decision-buttons">
+                      <button type="button" className="primary-button success" onClick={() => startDecision("accepted")}>ONAY</button>
+                      <button type="button" className="primary-button danger" onClick={() => startDecision("rejected")}>RED</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </>
+      )}
     </section>
   );
 }
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <label className="field">
-      <span className="field-label">{label}</span>
-      {children}
-      {hint ? <span className="field-hint">{hint}</span> : null}
-    </label>
-  );
-}
-
 export default function EvaluationApp() {
-  const [view, setView] = useState<EvalView>(1);
-  const [profile, setProfile] = useState<ProfileExport | null>(null);
-  const [profileError, setProfileError] = useState("");
-  const [records, setRecords] = useState<StoredReport[]>([]);
-  const [uploadError, setUploadError] = useState("");
-  const [analyzingId, setAnalyzingId] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState("");
-  const [persistError, setPersistError] = useState("");
+  const [mode, setMode] = useState<Mode>("home");
+  const [profiles, setProfiles] = useState<CompetitionProfile[]>([]);
   const [applications, setApplications] = useState<CompetitionApplication[]>([]);
-  const remoteReviewTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  // Analiz sürerken silinen kayıtlar; tamamlanan analiz bunları depoya geri yazmamalı.
-  const deletedIds = useRef(new Set<string>());
-
-  function reportPersistFailure() {
-    setPersistError("Bu cihazın deposuna yazılamadı. Tarayıcı depolama alanını veya gizli sekme kısıtlarını kontrol edin; sayfa yenilenirse son değişiklikler kaybolabilir.");
-  }
-
-  /** Depoya yazma hatalarını yutmadan, kullanıcıya görünür biçimde bildirir. */
-  function persist(operation: Promise<unknown>) {
-    return operation.then(() => setPersistError("")).catch(reportPersistFailure);
-  }
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [competitionKey, setCompetitionKey] = useState<string | null>(null);
+  const [applicationId, setApplicationId] = useState<string | null>(null);
+  const [analyzingId, setAnalyzingId] = useState<string | null>(null);
+  const [progress, setProgress] = useState("");
 
   useEffect(() => {
     let active = true;
-    async function restore() {
-      const [stored, remote] = await Promise.allSettled([listReports(), workflowApi.applications()]);
+    Promise.allSettled([workflowApi.profiles(), workflowApi.applications()]).then(([profileResult, applicationResult]) => {
       if (!active) return;
-      if (stored.status === "fulfilled") { setRecords(stored.value); setPersistError(""); }
-      else reportPersistFailure();
-      if (remote.status === "fulfilled") setApplications(remote.value.applications);
-      else setUploadError(remote.reason instanceof Error ? remote.reason.message : "Başvuru havuzu yüklenemedi.");
-      setProfile(loadLastApprovedProfile());
-    }
-    restore();
+      if (profileResult.status === "fulfilled") setProfiles(profileResult.value.profiles);
+      if (applicationResult.status === "fulfilled") setApplications(applicationResult.value.applications);
+      const failure = [profileResult, applicationResult].find((result) => result.status === "rejected");
+      setError(failure && failure.status === "rejected" ? (failure.reason instanceof Error ? failure.reason.message : "Veriler yüklenemedi.") : "");
+      setLoading(false);
+    });
     return () => { active = false; };
   }, []);
 
-  useEffect(() => () => {
-    for (const timer of remoteReviewTimers.current.values()) clearTimeout(timer);
-    remoteReviewTimers.current.clear();
-  }, []);
+  const pending = applications.filter((item) => item.status !== "completed");
+  const completed = applications.filter((item) => item.status === "completed");
+  const history = mode === "history";
+  const pool = history ? completed : pending;
+  const visible = competitionKey ? pool.filter((item) => item.competitionKey === competitionKey) : [];
+  const selected = applications.find((item) => item.id === applicationId) ?? null;
 
-  const counts = useMemo(() => ({
-    pool: applications.length,
-    // AI ön değerlendirmesi tamamlanan her başvuru; hakem incelemesi sürenler dahil.
-    analyzed: applications.filter((item) => ["awaiting_judge", "judge_in_review", "completed"].includes(item.status)).length,
-    completed: applications.filter((item) => item.status === "completed").length,
-  }), [applications]);
-
-  async function handleProfileFile(file: File) {
-    const { profile: parsed, error } = await readProfileFile(file);
-    if (parsed) {
-      setProfile(parsed);
-      setProfileError("");
-      // Yüklenen profil bu cihazda saklanır; sayfa yenilendiğinde seçim korunur.
-      saveActiveProfile(parsed);
-    } else {
-      setProfileError(error);
-    }
+  function replaceApplication(next: CompetitionApplication) {
+    setApplications((current) => current.some((item) => item.id === next.id)
+      ? current.map((item) => item.id === next.id ? next : item)
+      : [next, ...current]);
   }
 
-  /** Yükleme kabul edildiyse true döner; reddedildiyse başvuru adı formda korunur. */
-  async function handleUpload(file: File, participant: string): Promise<boolean> {
-    if (!profile) return false;
-    setUploadError("");
-    const participantName = participant || file.name.replace(/\.pdf$/i, "");
-    const existingFileCount = records.filter((item) => item.participant === participantName).length;
-    const gateChecks = buildFileGateChecks(file, profile.setup, existingFileCount);
-    if (gateBlocksUpload(gateChecks)) {
-      const failed = gateChecks.filter((check) => check.status === "failed");
-      setUploadError(
-        `${failed.map((check) => check.detail).join(" ")} Dosya bu sürümde analiz edilemediği veya PDF'de açıkça engelleyici bir kural bulunduğu için havuza alınmadı.`,
-      );
-      return false;
-    }
-    const entry: StoredReport = {
-      id: createReportId(),
-      participant: participantName,
-      fileName: file.name,
-      mimeType: file.type || "application/pdf",
-      sizeBytes: file.size,
-      pages: null,
-      uploadedAt: new Date().toISOString(),
-      status: "received",
-      gateChecks,
-      evaluation: null,
-      review: null,
-      file,
-    };
-    await persist(saveReport(entry));
-    setRecords((current) => [entry, ...current]);
-    return true;
+  function navigate(next: Mode) {
+    setMode(next);
+    setApplicationId(null);
+    setNotice("");
+    setError("");
   }
 
-  async function analyzeRecord(record: StoredReport, activeProfile: ProfileExport, remoteAlreadyStarted = false) {
-    setAnalyzingId(record.id);
-    setUploadError("");
-    setRecords((current) => current.map((item) => item.id === record.id ? { ...item, status: "analyzing" } : item));
-    try {
-      if (record.sourceApplicationId && !remoteAlreadyStarted) {
-        await workflowApi.updateApplication(record.sourceApplicationId, "start_analysis");
-      }
-      const extracted = await extractPdfText(record.file);
-      const peers: SimilarityPeer[] = records
-        .filter((item) => item.id !== record.id && item.pagesText?.length)
-        .map((item) => ({ label: item.participant, text: (item.pagesText ?? []).join(" ") }));
-      const evaluation = await evaluateReport({
-        profile: activeProfile,
-        file: record.file,
-        pages: extracted.pages,
-        pageCount: extracted.pageCount,
-        peers,
-        gateChecks: record.gateChecks,
-      });
-      if (record.sourceApplicationId) {
-        try {
-          const { check } = await workflowApi.similarityCheck(record.sourceApplicationId, extracted.pages.join("\n"));
-          evaluation.preChecks = [...evaluation.preChecks.filter((item) => item.kind !== "similarity"), check];
-        } catch (similarityError) {
-          evaluation.analysisWarnings.push(
-            similarityError instanceof Error
-              ? `Aynı yarışma havuzu benzerlik kontrolü tamamlanamadı: ${similarityError.message}`
-              : "Aynı yarışma havuzu benzerlik kontrolü tamamlanamadı.",
-          );
-        }
-      }
-      // Analiz sürerken rapor silinmiş olabilir; silinen kayıt depoya geri yazılmaz.
-      if (deletedIds.current.has(record.id)) return;
-      const updated: StoredReport = {
-        ...record,
-        status: "analyzed",
-        pages: extracted.pageCount,
-        pagesText: extracted.pages,
-        evaluation,
-        review: null,
-      };
-      if (record.sourceApplicationId) {
-        const saved = await workflowApi.updateApplication(record.sourceApplicationId, "save_evaluation", { evaluation });
-        setApplications((current) => current.map((item) => item.id === saved.application.id ? saved.application : item));
-      } else await persist(saveReport(updated));
-      setRecords((current) => current.map((item) => item.id === record.id ? updated : item));
-      if (record.sourceApplicationId) { setSelectedId(record.id); setView(2); }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Bilinmeyen bir hata oluştu.";
-      setUploadError(`"${record.fileName}" analiz edilemedi: ${message}`);
-      setRecords((current) => current.map((item) => item.id === record.id ? { ...item, status: "received" } : item));
-      if (record.sourceApplicationId) {
-        workflowApi.updateApplication(record.sourceApplicationId, "analysis_failed")
-          .then((saved) => setApplications((current) => current.map((item) => item.id === saved.application.id ? saved.application : item)))
-          .catch(() => undefined);
-      }
-    } finally {
-      setAnalyzingId(null);
-    }
-  }
-
-  async function handleAnalyze(record: StoredReport) {
-    if (!profile || analyzingId) return;
-    await analyzeRecord(record, profile);
-  }
-
-  async function openApplication(application: CompetitionApplication, analyze: boolean) {
+  async function analyze(application: CompetitionApplication) {
     if (analyzingId) return;
-    setUploadError("");
-    setAnalyzingId(`server-${application.id}`);
-    let analysisStarted = false;
+    setAnalyzingId(application.id);
+    setError("");
+    setNotice("");
+    let started = false;
     try {
-      const current = analyze
-        ? (await workflowApi.updateApplication(application.id, "start_analysis")).application
-        : application;
-      analysisStarted = analyze;
-      if (!current.profileId) throw new Error("Bu yarışma için onaylı kriter profili bulunamadı.");
+      setProgress("Analiz başlatılıyor…");
+      const current = (await workflowApi.updateApplication(application.id, "start_analysis")).application;
+      started = true;
+      replaceApplication(current);
+      if (!current.profileId) throw new Error("Bu yarışma için yayımlanmış kriter profili bulunamadı.");
       const [profileResult, file] = await Promise.all([
         workflowApi.profile(current.profileId),
         workflowApi.applicationFile(current.id, current.fileName ?? "basvuru.pdf"),
       ]);
-      const activeProfile = profileResult.profile.profile;
-      setProfile(activeProfile);
-      const report: StoredReport = {
-        id: `server-${current.id}`,
-        sourceApplicationId: current.id,
-        participant: current.teamName || current.participantName,
-        fileName: current.fileName ?? "basvuru.pdf",
-        mimeType: current.mimeType ?? "application/pdf",
-        sizeBytes: current.sizeBytes ?? 0,
-        pages: current.evaluation?.report.pages ?? null,
-        uploadedAt: current.submittedAt,
-        status: current.status === "completed" ? "reviewed" : current.evaluation ? "analyzed" : "received",
-        gateChecks: buildFileGateChecks(file, activeProfile.setup, 0),
-        evaluation: current.evaluation,
-        review: current.review,
+      const profile = profileResult.profile.profile;
+      setProgress("Rapor PDF'i okunuyor…");
+      const extracted = await extractPdfText(file);
+      setProgress(`${profile.criteria.filter((item) => item.active).length} kriter rapor ile karşılaştırılıyor…`);
+      let evaluation = await evaluateReport({
+        profile,
         file,
-      };
-      setRecords((items) => [report, ...items.filter((item) => item.id !== report.id)]);
-      setApplications((items) => items.map((item) => item.id === current.id ? current : item));
-      if (analyze) await analyzeRecord(report, activeProfile, true);
-      else { setSelectedId(report.id); setView(2); setAnalyzingId(null); }
+        pages: extracted.pages,
+        pageCount: extracted.pageCount,
+        peers: [],
+        gateChecks: buildFileGateChecks(file, profile.setup),
+      });
+      setProgress("Aynı yarışma havuzunda benzerlik kontrol ediliyor…");
+      try {
+        const { check } = await workflowApi.similarityCheck(current.id, extracted.pages.join("\n"));
+        evaluation = applySimilarity(evaluation, check);
+      } catch (similarityError) {
+        evaluation.analysisWarnings.push(similarityError instanceof Error
+          ? `Benzerlik kontrolü tamamlanamadı: ${similarityError.message}`
+          : "Benzerlik kontrolü tamamlanamadı.");
+      }
+      setProgress("Sonuç kaydediliyor…");
+      const saved = await workflowApi.updateApplication(current.id, "save_evaluation", { evaluation });
+      replaceApplication(saved.application);
+      setApplicationId(saved.application.id);
     } catch (caught) {
-      setUploadError(caught instanceof Error ? caught.message : "Başvuru açılamadı.");
-      if (analysisStarted) {
+      setError(`"${application.teamName}" analiz edilemedi: ${caught instanceof Error ? caught.message : "Bilinmeyen hata."}`);
+      if (started) {
         workflowApi.updateApplication(application.id, "analysis_failed")
-          .then((saved) => setApplications((current) => current.map((item) => item.id === saved.application.id ? saved.application : item)))
+          .then((saved) => replaceApplication(saved.application))
           .catch(() => undefined);
       }
+    } finally {
       setAnalyzingId(null);
+      setProgress("");
     }
   }
 
-  async function handleDelete(id: string) {
-    deletedIds.current.add(id);
-    await persist(deleteReport(id));
-    setRecords((current) => current.filter((item) => item.id !== id));
+  async function finalize(application: CompetitionApplication, review: JudgeReview): Promise<boolean> {
+    const saved = await workflowApi.updateApplication(application.id, "save_review", { review });
+    replaceApplication(saved.application);
+    setNotice(`${application.teamName}: ${OUTCOME_LABELS[review.outcome]} kararı kaydedildi ve şablon yarışmacıya iletildi.`);
+    return true;
   }
 
-  function persistReview(recordId: string, review: JudgeReview, status: ReportStatus) {
-    const target = records.find((item) => item.id === recordId);
-    if (!target) return;
-    const updated: StoredReport = { ...target, review, status };
-    setRecords((current) => current.map((item) => item.id === recordId ? updated : item));
-    // Yan etki güncelleyicinin dışında: StrictMode'da çift çalışmaz.
-    if (target.sourceApplicationId) {
-      const applicationId = target.sourceApplicationId;
-      const existingTimer = remoteReviewTimers.current.get(applicationId);
-      if (existingTimer) clearTimeout(existingTimer);
-      const saveRemote = () => {
-        remoteReviewTimers.current.delete(applicationId);
-        workflowApi.updateApplication(applicationId, "save_review", { review })
-          .then((saved) => setApplications((current) => current.map((item) => item.id === saved.application.id ? saved.application : item)))
-          .catch(reportPersistFailure);
-      };
-      if (status === "reviewed") saveRemote();
-      else remoteReviewTimers.current.set(applicationId, setTimeout(saveRemote, 600));
-    } else persist(saveReport(updated));
-  }
+  const title = mode === "home" ? "Giriş" : mode === "workshop" ? "Değerlendirme Atölyesi" : "Geçmiş değerlendirmeler";
 
   return (
     <main className="app-shell">
-      <EvalRail view={view} counts={counts} onNavigate={setView} />
+      <Rail mode={mode} pending={pending.length} completed={completed.length} onNavigate={navigate} />
       <div className="app-main">
-        <EvalTopbar view={view} onBack={() => { if (view > 1) setView((view - 1) as EvalView); else window.location.href = "/"; }} />
-        <div className="context-line" aria-hidden="true">
-          {profile ? `${profile.setup.competition} · ${profile.setup.reportType}` : "Onaylı profil bekleniyor"}
-        </div>
-        {persistError ? (
-          <div className="inline-error eval-persist-error" role="alert">
-            <strong>Kayıt yapılamadı.</strong><span>{persistError}</span>
+        <header className="topbar">
+          <div className="topbar-lead">
+            <button type="button" className="topbar-back" onClick={() => { if (applicationId) setApplicationId(null); else if (mode !== "home") navigate("home"); else window.location.href = "/"; }} aria-label="Geri dön" title="Geri dön">
+              <span aria-hidden="true">←</span>
+            </button>
+            <div>
+              <span className="topbar-context">Değerlendirme karar destek sistemi</span>
+              <strong>{title}</strong>
+            </div>
           </div>
-        ) : null}
-        {view === 1 ? (
-          <PoolView
-            profile={profile}
-            profileError={profileError}
-            onProfileFile={handleProfileFile}
-            records={records}
-            uploadError={uploadError}
-            analyzingId={analyzingId}
-            onUpload={handleUpload}
-            onAnalyze={handleAnalyze}
-            onDelete={handleDelete}
-            onOpenReview={(id) => { setSelectedId(id); setView(2); }}
-            applications={applications}
-            onOpenApplication={openApplication}
-          />
-        ) : null}
-        {view === 2 ? (
-          <JudgeView
-            profile={profile}
-            records={records}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onUpdateReview={(recordId, review) => persistReview(recordId, review, "analyzed")}
-            onComplete={(recordId, review) => {
-              persistReview(recordId, review, "reviewed");
-              setSelectedId(recordId);
-              setView(3);
-            }}
-          />
-        ) : null}
-        {view === 3 ? (
-          <ParticipantView profile={profile} records={records} selectedId={selectedId} onSelect={setSelectedId} />
+          <TopbarSession />
+        </header>
+        <div className="context-line" aria-hidden="true">
+          {selected ? `${selected.competitionName} · ${selected.teamName}` : competitionKey ? (profiles.find((item) => item.competitionKey === competitionKey)?.competitionName ?? "") : "Hakem çalışma alanı"}
+        </div>
+
+        {error ? <div className="inline-error eval-persist-error" role="alert"><strong>İşlem tamamlanamadı.</strong><span>{error}</span></div> : null}
+        {notice ? <p className="success-note eval-notice" role="status">{notice}</p> : null}
+
+        {loading ? <p className="page-note eval-panel-margin">Yarışmalar ve başvurular yükleniyor…</p> : null}
+
+        {!loading && mode === "home" ? <HomeView pending={pending.length} completed={completed.length} onChoose={navigate} /> : null}
+
+        {!loading && mode !== "home" ? (
+          <section className="workspace eval-workshop" aria-labelledby="eval-workshop-title">
+            <div className="workspace-heading">
+              <div>
+                <span className="section-kicker">{history ? "Kararı verilmiş başvurular" : "Kriteri çıkarılmış yarışmalar"}</span>
+                <h1 id="eval-workshop-title">{history ? "Geçmiş değerlendirmeler" : "Yarışmayı seçin, başvuruyu açın"}</h1>
+                <p>{history ? "Tamamlanan kararlar ve yarışmacıya iletilen şablonlar." : "Başvuruya tıklayın; Yapay Zeka Analizi düğmesiyle kriterler PDF ile karşılaştırılır."}</p>
+              </div>
+            </div>
+            <div className="eval-workshop-layout">
+              <CompetitionList
+                profiles={profiles}
+                applications={applications}
+                selectedKey={competitionKey}
+                history={history}
+                onSelect={(key) => { setCompetitionKey(key); setApplicationId(null); }}
+              />
+              <div className="eval-workshop-main">
+                {!competitionKey ? (
+                  <p className="library-empty">Soldan bir yarışma seçin.</p>
+                ) : selected ? (
+                  <ApplicationDetail
+                    key={`${selected.id}-${selected.evaluation?.analyzedAt ?? ""}`}
+                    application={selected}
+                    analyzing={analyzingId === selected.id}
+                    progress={progress}
+                    onAnalyze={analyze}
+                    onFinalize={finalize}
+                  />
+                ) : (
+                  <ApplicationGrid applications={visible} selectedId={applicationId} analyzingId={analyzingId} onSelect={setApplicationId} />
+                )}
+                {selected ? (
+                  <button type="button" className="text-button eval-back-to-grid" onClick={() => setApplicationId(null)}>← Başvuru listesine dön</button>
+                ) : null}
+              </div>
+            </div>
+          </section>
         ) : null}
       </div>
     </main>

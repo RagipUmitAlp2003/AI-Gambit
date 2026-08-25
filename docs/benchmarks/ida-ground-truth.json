@@ -1,40 +1,35 @@
 {
-  "_schema": "AI-Gambit benchmark ground-truth v1",
+  "_schema": "AI-Gambit benchmark ground-truth v2 (dört aşamalı, puansız)",
   "_nasilDoldurulur": [
     "Bu dosya RESMÎ ŞARTNAMEDEN ELLE doldurulur. Model çıktısından (docs/corpus/ida-analiz.json gibi) kopyalanmaz;",
     "AI çıktısını AI çıktısıyla doğrulamak dairesel test olur ve hiçbir hatayı yakalamaz.",
-    "Her madde için sourcePage alanına şartnamedeki 1 tabanlı sayfayı yazın; keywords alanına",
-    "o maddeyi metinde tekilleştiren 2-3 kelime girin (küçük harf, Türkçe karakterli yazılabilir).",
+    "Yalnızca yarışmacı RAPORUNDA (PDF aşamasında) kontrol edilebilen kurallar requiredFindings'e yazılır.",
+    "Puan tabloları, ağırlıklar, baraj ve ceza puanları, parkur/saha görevleri kriter DEĞİLDİR; bunlar forbiddenFindings'e yazılır.",
+    "Her madde için keywords alanına o maddeyi metinde tekilleştiren 2-3 kelime girin (küçük harf, Türkçe karakterli yazılabilir);",
+    "stage alanına dört aşamadan birini (veya kabul edilen aşamalar dizisini), required alanına belge zorunlu kılıyorsa true yazın;",
+    "sourcePage alanına şartnamedeki 1 tabanlı PDF sayfa sırasını yazın (bilgi amaçlı).",
     "Doldurulmamış diziler benchmark tarafından ATLANIR; uydurma değer girmeyin.",
-    "Doldurduktan sonra: node tools/run_benchmark.mjs ida"
+    "Doldurduktan sonra (sunucu çalışırken): node tools/run_celikkubbe_benchmark.mjs --benchmark ida"
   ],
   "competition": "İnsansız Deniz Aracı Yarışması",
-  "sourceDocument": "2026_Insansiz_Deniz_Araci_Sartnamesi.pdf",
+  "document": "2026_Insansiz_Deniz_Araci_Sartnamesi.pdf",
+  "pageCount": 29,
   "category": "",
   "stage": "",
   "reportType": "",
-  "maximumRawScore": 315,
-  "declaredTotalScore": null,
+  "minCriteria": null,
 
-  "_sectionsAciklama": "Şartnamenin ilan ettiği üst düzey puan grupları. maxScore toplamı maximumRawScore ile tutmalıdır.",
-  "sections": [],
-  "_sectionOrnek": { "name": "", "maxScore": 0, "minimumScore": null, "sourcePage": null, "keywords": [] },
+  "_requiredFindingsAciklama": "Rapor aşamasında kontrol edilecek kurallar: dil/şablon (sayfa sınırı, biçim), zorunlu başlıklar, kategori/özgünlük koşulları ve raporda kanıtlanması gereken teknik kurallar.",
+  "requiredFindings": [],
+  "_requiredFindingOrnek": {
+    "name": "",
+    "keywords": [],
+    "stage": "language_template | headings_content | category_similarity | criteria_evidence",
+    "required": true,
+    "sourcePage": null
+  },
 
-  "_thresholdsAciklama": "Belirli bir kriterde/grupta geçilmesi zorunlu minimum puanlar (baraj).",
-  "thresholds": [],
-  "_thresholdOrnek": { "name": "", "appliesTo": "", "minimumScore": 0, "sourcePage": null, "keywords": [] },
-
-  "_penaltiesAciklama": "Şartnamede yazan puan cezaları; amount negatif puan miktarı veya 'tam' (tüm puanın silinmesi).",
-  "penalties": [],
-  "_penaltyOrnek": { "name": "", "condition": "", "amount": null, "sourcePage": null, "keywords": [] },
-
-  "_passRulesAciklama": "Bir sonraki aşamaya geçiş ve eleme/diskalifiye koşulları.",
-  "passRules": [],
-  "_passRuleOrnek": { "name": "", "condition": "", "outcome": "gecti | kaldi | eleme | inceleme", "sourcePage": null, "keywords": [] },
-
-  "_humanReviewAciklama": "Nihai kararı görevli/hakem/jüriye ait olması gereken maddeler (fiziksel güvenlik, saha kontrolü…).",
-  "humanReviewFindings": [],
-
-  "_forbiddenAciklama": "Şartnamede BULUNMAYAN, modelin uydurabileceği ifadeler. Sonuçta görülürse halüsinasyon sayılır.",
-  "forbiddenFindings": []
+  "_forbiddenFindingsAciklama": "Şartnamede BULUNMAYAN ya da fiziksel aşamaya ait (puan, baraj, ceza, parkur, saha) ifadeler. Sonuçta görülürse hata sayılır. fields: [\"name\"] yalnızca kriter adına bakar.",
+  "forbiddenFindings": [],
+  "_forbiddenFindingOrnek": { "name": "", "keywords": [], "fields": ["name"] }
 }

@@ -7,7 +7,7 @@ import { recordAudit } from "../../lib/admin-db";
  * Değerlendirme profili uçları (Aşama A).
  *
  *   GET    profil listesi / tek profil — rol görünürlüğüne göre
- *   POST   kriter profilini yayımlama   — 00, 01
+ *   POST   kriter profilini yayımlama   — 01
  */
 export async function GET(request: Request): Promise<Response> {
   const auth = await requirePermission(request, "read_profiles");

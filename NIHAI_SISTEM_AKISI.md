@@ -1,75 +1,96 @@
 # AI-Gambit — Nihai Sistem Akışı
 
 **Dal:** `faruk_deneme`  
-**Amaç:** Şartname kurallarını güvenilir biçimde çıkarmak, katılımcı raporlarını toplamak ve Hakeme kanıtlı karar desteği sunmak.
+**Amaç:** Şartname kurallarını dört aşamalı prensiple güvenilir biçimde çıkarmak, katılımcı raporlarını toplamak ve Hakeme kanıtlı, puansız karar desteği sunmak.
 
 ## Roller
 
 | Kod | Rol | Ana işi | Sınırı |
 |---|---|---|---|
-| 00 | Genel Yönetici / Admin | Personel hesabı ve rol oluşturur, ilk Hakem atamasını yapar, bütün çalışma alanlarına süper yetkiyle erişir. | Katılımcının yüklediği PDF'i değiştiremez. |
+| 00 | Genel Yönetici / Admin | Yalnızca yönetici ataması yapar: personel hesabı açar, rol atar/kaldırır, atama geçmişini izler. | Kriter hazırlayamaz, rapor değerlendiremez, hakem atayamaz, yarışma sürecine müdahale edemez. Kriter, değerlendirme, operasyon ve başvuru uçlarına erişimi yoktur. |
 | 01 | Yarışma Yöneticisi | Şartnameyi ve varsa rapor şablonunu yükler, AI kriter taslağını düzenler ve yayımlar. | Katılımcı raporuna nihai karar veremez. |
-| 02 | Hakem | Kendisine atanmış raporda AI analizini başlatır; kabul, ret veya gerekçeli revizyon kararı verir. | Şartname veya kriter seti oluşturamaz. |
+| 02 | Hakem | Kendisine atanmış raporda AI ön değerlendirmesini başlatır; her kuralın kararını onaylar veya değiştirir; kabul, ret veya gerekçeli revizyon kararı verir. | Şartname veya kriter seti oluşturamaz. |
 | 03 | Yarışmacı | Yarışma seçer, takım bilgileri ve PDF ile başvurur; kendi durumunu ve yayımlanan sonucunu görür. | Yönetim alanlarını ve başka takımların verilerini göremez. |
-| 04 | Değerlendirme Yöneticisi | İş yükü ve hataları izler; yeniden atama, hatırlatma, yeniden analiz ve sonuç yayın akışını yönetir. | Rapor puanlayamaz, kriter değiştiremez, nihai karar veya diskalifiye kararı veremez. |
+| 04 | Değerlendirme Yöneticisi | Başvuruya **ilk Hakemi atar**; iş yükü ve hataları izler; yeniden atama, hatırlatma, yeniden analiz ve sonuç yayın akışını yönetir. | Kriter değiştiremez, rapor değerlendiremez, nihai karar veya diskalifiye kararı veremez. |
 
-İlk Hakem atamasını yalnızca Admin yapar. Daha sonra operasyonel bir sorun olursa Değerlendirme Yöneticisi raporu başka Hakeme aktarabilir.
+Yetki matrisi `app/lib/authorization.ts` içindedir ve tek doğruluk kaynağıdır: 00 yalnızca `manage_accounts`; 01 kriter/profil yazma ve yayımlama; 02 AI ön değerlendirme ve nihai karar; 04 operasyon panosu, ilk hakem ataması (`assign_judge`), yeniden atama ve yarışma aşaması yönetimi. Bir rol matriste yoksa uç ona 403 döner.
+
+## Dört aşamalı kontrol prensibi
+
+Şartname analizi (birinci AI aşaması) ve rapor değerlendirmesi (ikinci AI aşaması) aynı dört aşamayı kullanır:
+
+1. **Dil ve Şablon Uygunluğu** — tespit edilen dil ve şablon/biçim uyumu.
+2. **Başlık ve İçerik Kontrolü** — zorunlu başlıkların raporda varlığı ve altındaki içeriğin doluluğu.
+3. **Kategori Uygunluğu ve Benzerlik** — kategoriye uygunluk skoru ve başvurular arası benzerlik durumu.
+4. **Kriter Bazlı Kanıt Çıkarma** — her teknik kural için BAŞARILI / REVİZYON / KRİTİK HATA, rapordan sayfa/paragraf numaralı doğrudan alıntı ve gerekçe.
+
+Yalnızca yarışmanın PDF (rapor) aşaması kontrol edilir. Puanlama sistemleri (puan, ağırlık, ceza, baraj, puan grubu, normalizasyon, karar kuralları) ve saha/fiziksel aşama maddeleri yarışmanın fiziksel aşamasına ait olduğu için kriter sistemine dahil değildir. Kriterler **Zorunlu** (ihlali KRİTİK HATA) ve **Diğer** (ihlali REVİZYON) olarak ayrılır. Güven seviyesi, "emin değilim" durumu ve otomatik pasifleştirme yoktur.
 
 ## Birinci AI aşaması — şartnameden kriter çıkarma
 
 1. Yarışma Yöneticisi resmî şartname PDF'ini seçer.
-2. İsterse ayrı resmî rapor şablonunu ekler. Şablon yalnızca zorunlu başlıkları ve biçim yapısını anlamak için kullanılır; ondan puan veya yeni yarışma kuralı üretilmez.
-3. Uzun şartname bir sayfa örtüşmeli en fazla dört dengeli aralığa ayrılır. Harita ve aralık analizleri paralel çalışır.
-4. Çıktılar birleştirilir, tekrarlar temizlenir ve ikinci turda kaynak sayfası, alıntı, sayı, kapsam ve ihlal sonucu doğrulanır.
-5. Kriterler rapor, dosya yüklemesi, fiziksel aşama, haricî onay ve bilgi notu olarak ayrılır.
-6. Fiziksel aşama puanları kaynakta korunur fakat katılımcı PDF puanına otomatik eklenmez. Karma madde varsa rapor ve saha koşulu ayrı kriterlere bölünür.
-7. Kaynağı kesinleşmeyen kriter pasif ve “karar bekliyor” görünür. Yönetici doğrular veya dışarıda bırakır.
-8. Yönetici puanlamayı kapatabilir; kriter ekleyebilir, düzenleyebilir, pasifleştirebilir veya kendi eklediği kriteri silebilir.
-9. Yönetici profili yayımladığında yarışma başvuruya açılır. Hakem kriter oluşturma veya yayımlama aşamasına katılmaz.
-
-Kriter ekranının en üstünde altı sabit ön kontrol bulunur: PDF/dosya, dil, şablon, başlık ve içerik, kategori, benzerlik. Bunlar şartnamedeki puan satırlarıyla karıştırılmaz.
+2. İsterse ayrı resmî rapor şablonunu ekler. Şablon yalnızca zorunlu başlıkları (2. aşama) ve biçim notlarını anlamak için kullanılır; ondan yeni yarışma kuralı üretilmez.
+3. Belge Files API'ye bir kez yüklenir ve **tek model çağrısıyla** bütünüyle okunur. Sayfa aralığı, paralel çağrı veya ikinci denetim turu yoktur. Model tek cevapta belge profili (yarışma, kategori, aşama, rapor türü, dil, teslim sınırları), şablon yapısı, dört aşamaya ayrılmış kriterler ve kapsam dışı bırakılan maddeleri döndürür.
+4. Sunucu cevabı doğrular: aşaması tanınmayan kriter 4. aşamaya düşer, tekrarlar birleştirilir, PDF sınırı dışındaki kaynak sayfası boşaltılıp uyarı yazılır, liste aşama ve sayfa sırasına göre dizilir. Kapsam dışı madde sayısı (saha/fiziksel aşama, puanlama, haricî onay) uyarı olarak gösterilir.
+5. Her kriter ad, aşama, Zorunlu/Diğer, tek anlamlı açıklama, belgede yazan ihlal sonucu, kaynak sayfa ve özgün dilde birebir alıntıyla ekrana gelir. Belgede olmayan kural, zorunluluk veya sonuç üretilmez.
+6. Yönetici kriter ekleyebilir, düzenleyebilir, pasifleştirebilir veya silebilir. Kriter bölümü dışındaki bölümler (sabit ön kontroller, şablon önizleme, puan yapısı, AI notları) ekranda yoktur.
+7. Yönetici profili yayımladığında yarışma başvuruya açılır. Profil sürümü 2.0'dır; eski 1.0 profiller okunurken yükseltilir. Hakem kriter oluşturma veya yayımlama aşamasına katılmaz.
 
 ## Başvuru ve Hakem akışı
 
 1. Yarışmacı açık yarışmayı seçer; adı-soyadı, takım adı, ekip üyeleri ve PDF'i gönderir.
 2. Başvuru D1'e, PDF özel R2 deposuna yazılır. Yükleme AI analizini başlatmaz.
-3. Admin ilk Hakemi atar. Hakem yalnızca kendisine atanmış başvuruları görür.
-4. Hakem “AI ile değerlendir” dediğinde ikinci aşama başlar.
-5. Hakem AI kanıtlarını ve önerilerini inceler; nihai sonucu kabul, ret veya gerekçeli revizyon olarak belirler.
-6. Revizyon verilirse yarışmacı yeni PDF sürümü yükler. Eski sürüm silinmez.
-7. Kabul/ret sonucu, sonuçlar yayımlanana kadar yarışmacıya açılmaz. Revizyon isteği yeni dosya yüklenebilmesi için hemen görünür.
+3. Değerlendirme Yöneticisi ilk Hakemi atar. Hakem yalnızca kendisine atanmış başvuruları görür.
+4. Hakem Değerlendirme Atölyesi'nde kriteri çıkarılmış yarışmayı, ardından başvuru kutusunu açar ve "Yapay Zeka Analizi" der; ikinci aşama başlar. Analiz, yayımlı kriterlerin rapor PDF'i ile karşılaştırılmasıdır.
+5. Uygun kriterler ✓ ile, hatalı kriterler hata sebebi ve kaynak sayfaya giden düğmeyle listelenir. Hakem ONAY veya RED kararını verir; karar düğmesi, yarışmacıya iletilecek düzenlenebilir şablonu açar (kriter durumu ve hata sebebi elle değiştirilebilir).
+6. RED'de AI'nin adım adım hata analizi şablon olarak yarışmacıya iletilir; ekstra analiz yapılmaz. Kararı verilen başvuru "Geçmiş değerlendirmeler"e düşer, gerekirse yeniden açılır.
+7. Sonuç, sonuçlar yayımlanana kadar yarışmacıya açılmaz; yayımlanınca ONAY/RED, açıklama ve şablon görünür. Değerlendirme Yöneticisi yeni belge isteyebilir; yeni PDF sürümü eskiyi silmez.
 
 ## İkinci AI aşaması — rapor değerlendirme
 
-Önce PDF imzası ve okunabilirlik, şartnamedeki format/boyut sınırları, rapor dili, resmî şablon, zorunlu başlıklar, kategori uyumu ve aynı yarışma havuzundaki benzerlik kontrol edilir.
+Önce deterministik dosya kapısı çalışır: PDF imzası ve okunabilirlik, profildeki format/boyut/adet sınırları. Ardından AI yalnızca yayımlanmış aktif kriterleri kullanır; yeni kriter uyduramaz ve puan üretmez.
 
-AI yalnızca yayımlanmış aktif kriterleri kullanır; yeni kriter uyduramaz. Her kriter için durum, kısa gerekçe, uygunsa puan önerisi, güven seviyesi ve sayfa + bölüm + doğrudan alıntı döndürür. Fiziksel, haricî, ceza, baraj ve insan kararı gerektiren maddelerde nihai karar vermez.
+Sonuç dört aşama hâlinde döner:
 
-Modelin alıntısı tarayıcıda çıkarılmış gerçek sayfa metniyle tekrar karşılaştırılır. Alıntı belirtilen sayfada bulunamazsa kanıt çıkarılır, puan önerisi iptal edilir ve kriter Hakem incelemesine bırakılır. Böylece uydurulmuş kanıt sessizce kullanılamaz.
+- **1. Dil ve Şablon Uygunluğu:** tespit edilen dil, beklenen dil ve şablon/biçim uyumu; aşama kararı.
+- **2. Başlık ve İçerik Kontrolü:** her zorunlu başlık için varlık, içerik doluluğu ve sayfa; aşama kararı.
+- **3. Kategori Uygunluğu ve Benzerlik:** 0–100 kategori uygunluk skoru ve havuz benzerlik durumu; aşama kararı.
+- **4. Kriter Bazlı Kanıt Çıkarma:** profildeki her aktif kural için tam olarak bir bulgu.
+
+Her bulgu kriter kimliği, aşama, zorunluluk, **BAŞARILI / REVİZYON / KRİTİK HATA** kararı, gerekçe ve rapordan sayfa/paragraf numaralı doğrudan alıntı taşır. Alıntı gösterilemediyse bulgu `evidenceMissing` ile işaretlenir; hakem kaynağı kendisi doğrular. Özet, kararların sayımını ve bütüncül sonucu verir. Hakem ekranında her kural için karar onaylanır ya da değiştirilir; hakemin nihai kural durumu AI bulgusundan ayrı saklanır.
 
 ### Benzerlik
 
-Ham rapor metni benzerlik veritabanında saklanmaz. Metinden geri döndürülemez, 64 parçalı MinHash izi çıkarılır. Yalnızca aynı yarışma + yıl + aşamadaki izlerle karşılaştırılır. Sonuç Hakeme yüzde ve en yakın takım adıyla işaret olarak sunulur; otomatik intihal, ret veya diskalifiye kararı verilmez.
+Ham rapor metni benzerlik veritabanında saklanmaz. Metinden geri döndürülemez, 64 parçalı MinHash izi çıkarılır. Yalnızca aynı yarışma + yıl + aşamadaki izlerle karşılaştırılır. Sonuç Hakeme yüzde ve en yakın takım adıyla **yalnızca işaret** olarak sunulur; otomatik intihal, ret veya diskalifiye kararı verilmez.
 
 Anlamsal embedding katmanı bu sürümde dış servise ayrıca rapor metni göndermemek için etkin değildir. Daha sonra açık veri aktarım onayı, gizlilik politikası ve maliyet ölçümüyle eklenebilir.
 
 ## Değerlendirme Yöneticisi
 
+- Yeni başvuruya ilk Hakemi atar; iş akışı bu atamayla başlar.
 - Hakem başına aktif, tamamlanan ve hatalı dosya sayılarını görür.
 - Atanmış raporu başka Hakeme aktarabilir ve sistem içi hatırlatma oluşturabilir.
 - Başarısız AI analizini yeniden sıraya alabilir veya yarışmacıdan yeni PDF isteyebilir.
 - Başvuruları kapatır, değerlendirmeyi başlatır, kararları dondurur, sonuçları yayımlar ve yarışmayı arşivler.
 - Katılımcı PDF'ini, kanıt alıntılarını ve özel proje içeriğini göremez.
 
+## Admin
+
+- Personel hesabı açar; 01, 02 ve 04 rollerini atar veya kaldırır; hesabı pasife alır.
+- Her atama denetim izine yazılır; atama geçmişini izler.
+- Yarışma sürecine, kriterlere, başvurulara ve değerlendirmeye erişmez.
+
 ## Yarışma durumları
 
 `Kriter taslağı → AI kriter işlemi → Kriter inceleme → Başvuruya açık → Başvurular kapalı → Değerlendiriliyor → Kararlar donduruldu → Sonuçlar yayımlandı → Arşiv`
 
-Kararlar dondurulmadan önce bütün başvurular tamamlanmış olmalıdır. Admin dışındaki roller geçersiz bir aşamayı atlayamaz.
+Kararlar dondurulmadan önce bütün başvurular tamamlanmış olmalıdır. Aşama geçişlerini yalnızca Değerlendirme Yöneticisi yapar; hiçbir rol geçersiz bir aşamayı atlayamaz.
 
 ## Veritabanı
 
 Cloudflare D1 içinde hesaplar, oturumlar, roller, yarışmalar, kriterler, başvurular, PDF sürüm kayıtları, Hakem atamaları, AI çıktıları, nihai kararlar, MinHash izleri ve işlem geçmişi saklanır. JSON alanları D1 uyumu için `TEXT` tutulur. Katılımcı PDF dosyaları özel Cloudflare R2 deposundadır.
+
+`criteria` tablosunda dört aşamalı model şu şekilde tutulur: `applicability` sütunu kriterin **aşamasını** (`language_template`, `headings_content`, `category_similarity`, `criteria_evidence`), `effect` sütunu zorunluluğu (`required` / `other`) taşır; `max_score` her zaman `NULL` yazılır. Kriterin tam hâli `criterion_json` içindedir. Sütun adları eski şemadan korunmuştur; anlamları yukarıdaki gibidir.
 
 SQL sırası:
 

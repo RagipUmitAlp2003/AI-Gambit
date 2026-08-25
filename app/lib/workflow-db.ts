@@ -2,7 +2,9 @@ import { env } from "cloudflare:workers";
 import { getDatabase, recordWorkflowEvent, recordWorkflowEvents } from "./admin-db";
 import { fold } from "./competitions";
 import type { AdminAccount, WorkflowEventInput } from "./admin-types";
-import type { AnalysisResult, JudgeReview, ProfileExport, ReportEvaluation } from "./types";
+import { can } from "./authorization";
+import { validateProfileExport } from "./profile-loader";
+import { RULE_VERDICT_LABELS, type AnalysisResult, type JudgeReview, type ProfileExport, type ReportEvaluation, type RuleVerdict } from "./types";
 import type { SimilarityFingerprint } from "./similarity-engine";
 import {
   APPLICATION_STATUSES,
@@ -363,6 +365,23 @@ function normalizeProfileStatus(value: string): ProfileStatus {
     : "draft";
 }
 
+/**
+ * Saklı profil JSON'unu okur ve eski (1.0, puanlı) kayıtları dört aşamalı 2.0
+ * şekline yükseltir. Böylece GET /api/profiles her zaman güncel sözleşmeyi
+ * döndürür; istemci deterministik kontrolleri doğru alanlarla çalıştırır.
+ * Doğrulanamayan kayıt ham hâliyle döner (ekran açıkça bozuk kaydı gösterir).
+ */
+function upgradeStoredProfile(json: string, rowId: string): ProfileExport {
+  const parsed = JSON.parse(json) as ProfileExport;
+  const { profile } = validateProfileExport(parsed);
+  return profile ? { ...profile, profileId: profile.profileId ?? rowId } : parsed;
+}
+
+/** Kriter satırı kimliği profile bağlanır: "criterion-1" gibi kimlikler profiller arasında tekrar eder. */
+function criterionRowId(profileId: string, criterionId: string): string {
+  return `${profileId}:${criterionId || crypto.randomUUID()}`;
+}
+
 function toProfile(row: ProfileRow): CompetitionProfile {
   return {
     id: row.id,
@@ -372,7 +391,7 @@ function toProfile(row: ProfileRow): CompetitionProfile {
     stage: row.stage,
     reportType: row.report_type,
     sourceDocumentName: row.source_document_name,
-    profile: JSON.parse(row.profile_json) as ProfileExport,
+    profile: upgradeStoredProfile(row.profile_json, row.id),
     status: normalizeProfileStatus(row.status),
     createdBy: row.created_by,
     createdByName: row.created_by_name || "",
@@ -401,7 +420,15 @@ function toApplication(
   const participantResultHidden = view === "participant"
     && row.outcome !== "revision_required"
     && !["results_published", "archived"].includes(row.competition_status ?? "");
-  const evaluation = parseJson<ReportEvaluation>(row.evaluation_json);
+  const storedEvaluation = parseJson<ReportEvaluation>(row.evaluation_json);
+  // Eski (puanlı, 1.0) AI sonucu dört aşamalı ekranda incelenemez; başvuru
+  // "analiz başarısız" gibi sunulur ki hakem yeniden analiz edebilsin veya
+  // Değerlendirme Yöneticisi yeniden sıraya alabilsin.
+  const legacyEvaluation = isLegacyEvaluation(storedEvaluation);
+  const evaluation = legacyEvaluation ? null : storedEvaluation;
+  const storedStatus: ApplicationStatus = (APPLICATION_STATUSES as string[]).includes(row.status)
+    ? row.status as ApplicationStatus
+    : "submitted";
   return {
     id: row.id,
     participantId: operations ? "" : row.participant_id,
@@ -416,9 +443,7 @@ function toApplication(
     fileName: operations ? null : row.file_name,
     mimeType: operations ? null : row.mime_type,
     sizeBytes: operations ? null : row.size_bytes,
-    status: (APPLICATION_STATUSES as string[]).includes(row.status)
-      ? row.status as ApplicationStatus
-      : "submitted",
+    status: legacyEvaluation && ["awaiting_judge", "judge_in_review"].includes(storedStatus) ? "analysis_failed" : storedStatus,
     evaluation: view === "full" ? evaluation : operations ? redactEvaluation(evaluation) : null,
     review: operations || participantResultHidden ? null : parseJson<JudgeReview>(row.review_json),
     judgeId: row.judge_id,
@@ -519,13 +544,15 @@ export async function submitProfileForReview(profile: ProfileExport, actor: Admi
          source_page, source_text, criterion_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
-      criterion.id || crypto.randomUUID(),
+      criterionRowId(id, criterion.id),
       id,
       position,
       criterion.name,
-      criterion.applicability ?? "report",
-      criterion.effect ?? (criterion.maxScore === null ? "advisory" : "score"),
-      criterion.maxScore,
+      // Dört aşamalı modelde kapsam her zaman PDF (rapor) aşamasıdır; aşama kimliği
+      // applicability sütununda, zorunluluk effect sütununda tutulur. Puan yoktur.
+      criterion.stage,
+      criterion.required ? "required" : "other",
+      null,
       criterion.active ? 1 : 0,
       criterion.sourcePage,
       criterion.sourceText,
@@ -696,9 +723,10 @@ export async function changeCompetitionStage(
   const row = await database.prepare(`SELECT * FROM competitions WHERE id = ?`).bind(competitionId).first<CompetitionRow>();
   if (!row) return "not_found";
   const current = toCompetition(row);
-  // `force` istemciden gelen bir bayraktır; yalnızca Admin için yetkiye dönüşür.
-  // Böylece Rol 04 geçerli bir aşama geçişinde dahi çözülmemiş dosya barajını
-  // request gövdesine `force: true` yazarak atlayamaz.
+  // `force` istemciden gelen bir bayraktır ve yalnızca Admin (00) için yetkiye
+  // dönüşürdü. Admin artık yarışma aşaması ucuna erişmediği için bugün hiçbir
+  // rol barajı atlayamaz; bayrak, ileride açık bir "acil durum" yetkisi
+  // tanımlanırsa yetki matrisine bağlanmak üzere korunur.
   const adminForce = force && actor.roleCode === "00";
   if (!COMPETITION_TRANSITIONS[current.status].includes(nextStatus) && !adminForce) return "invalid_transition";
   if (nextStatus === "decisions_frozen" && !adminForce) {
@@ -852,14 +880,34 @@ function applicationView(account: AdminAccount): "full" | "participant" | "opera
  * metinleri ve yarışmacı geri bildirimi çıkarılır. Kalan alanlar süreç takibi
  * için yeterlidir; proje içeriği sızmaz.
  */
+/** Dört aşamalı (2.0) sözleşmeye uymayan saklı AI sonucu. */
+function isLegacyEvaluation(evaluation: ReportEvaluation | null): boolean {
+  return !!evaluation && (
+    evaluation.version !== "2.0"
+    || !Array.isArray(evaluation.findings)
+    || !Array.isArray(evaluation.stages)
+    || !evaluation.summary
+  );
+}
+
 function redactEvaluation(evaluation: ReportEvaluation | null): ReportEvaluation | null {
   if (!evaluation) return null;
   return {
     ...evaluation,
     report: { ...evaluation.report, name: "" },
-    preChecks: evaluation.preChecks.map((check) => ({ ...check, detail: "", evidence: [] })),
-    findings: evaluation.findings.map((finding) => ({ ...finding, rationale: "", evidence: [] })),
+    preChecks: (evaluation.preChecks ?? []).map((check) => ({ ...check, detail: "", evidence: [] })),
+    // Aşama özetleri, başlık tablosu, alıntılar ve benzerlik ayrıntısı (en yakın
+    // takım) proje içeriği taşır; yalnızca durum ve sayaçlar kalır.
+    stages: (evaluation.stages ?? []).map((stage) => ({
+      ...stage,
+      summary: "",
+      evidence: [],
+      headings: [],
+      similarity: stage.similarity ? { ...stage.similarity, detail: "", closestTeam: null } : stage.similarity ?? null,
+    })),
+    findings: (evaluation.findings ?? []).map((finding) => ({ ...finding, rationale: "", evidence: [] })),
     feedbackDraft: { strengths: [], improvements: [], suggestions: [] },
+    analysisWarnings: [],
   };
 }
 
@@ -928,7 +976,7 @@ export async function applicationFileKey(id: string, account: AdminAccount): Pro
   return row?.file_key ?? null;
 }
 
-export type AssignmentResult = CompetitionApplication | "not_found" | "already_assigned" | "initial_requires_admin" | "completed";
+export type AssignmentResult = CompetitionApplication | "not_found" | "already_assigned" | "initial_forbidden" | "completed";
 
 export async function assignApplication(
   id: string,
@@ -943,7 +991,8 @@ export async function assignApplication(
   if (!current) return "not_found";
   if (current.status === "completed") return "completed";
   const reassigning = Boolean(current.assigned_judge_id);
-  if (!reassigning && actor.roleCode !== "00") return "initial_requires_admin";
+  // İlk atama yetki matrisinden okunur (assign_judge); yeniden atama koordinasyon yetkisidir.
+  if (!reassigning && !can(actor, "assign_judge")) return "initial_forbidden";
   if (current.assigned_judge_id === judge.id) return "already_assigned";
   const timestamp = new Date().toISOString();
   const nextStatus = ["submitted", "resubmitted", "analysis_failed", "document_reupload_requested"].includes(current.status)
@@ -979,9 +1028,11 @@ export async function coordinateApplication(
 ): Promise<CompetitionApplication | "not_found" | "invalid_state"> {
   const database = await workflowDatabase();
   const current = await database.prepare(
-    `SELECT status, assigned_judge_id, assigned_judge_name FROM competition_applications WHERE id = ?`,
-  ).bind(id).first<{ status: string; assigned_judge_id: string | null; assigned_judge_name: string | null }>();
+    `SELECT status, assigned_judge_id, assigned_judge_name, evaluation_json FROM competition_applications WHERE id = ?`,
+  ).bind(id).first<{ status: string; assigned_judge_id: string | null; assigned_judge_name: string | null; evaluation_json: string | null }>();
   if (!current) return "not_found";
+  // Eski (puanlı) AI sonucu taşıyan başvurular da yeniden sıraya alınabilir.
+  const legacy = isLegacyEvaluation(parseJson<ReportEvaluation>(current.evaluation_json));
   const detail = note.trim().slice(0, 500);
   if (action === "remind_judge") {
     if (!current.assigned_judge_id) return "invalid_state";
@@ -990,7 +1041,8 @@ export async function coordinateApplication(
       detail: `${current.assigned_judge_name ?? "Atanmış hakem"}${detail ? ` · ${detail}` : ""}`,
     });
   } else if (action === "requeue_analysis") {
-    if (current.status !== "analysis_failed") return "invalid_state";
+    const legacyStuck = ["awaiting_judge", "judge_in_review"].includes(current.status) && legacy;
+    if (current.status !== "analysis_failed" && !legacyStuck) return "invalid_state";
     await database.prepare(
       `UPDATE competition_applications
        SET status = ?, evaluation_json = NULL, review_json = NULL, updated_at = ? WHERE id = ?`,
@@ -1119,9 +1171,13 @@ export async function saveAndListSimilarityFingerprints(
 export async function markApplicationAnalyzing(id: string, judge: AdminAccount): Promise<"started" | "profile_missing" | "conflict"> {
   const database = await workflowDatabase();
   const current = await database.prepare(
-    `SELECT competition_name, profile_id, status, assigned_judge_id FROM competition_applications WHERE id = ?`,
-  ).bind(id).first<{ competition_name: string; profile_id: string | null; status: string; assigned_judge_id: string | null }>();
-  if (!current || !["assigned", "resubmitted", "analysis_failed"].includes(current.status)) return "conflict";
+    `SELECT competition_name, profile_id, status, assigned_judge_id, evaluation_json FROM competition_applications WHERE id = ?`,
+  ).bind(id).first<{ competition_name: string; profile_id: string | null; status: string; assigned_judge_id: string | null; evaluation_json: string | null }>();
+  // Eski (puanlı, 1.0) AI sonucu taşıyan başvurular dört aşamalı ekranda
+  // incelenemez; hakem kuyruğunda görünseler de yeniden analiz edilebilir.
+  const legacyStuck = ["awaiting_judge", "judge_in_review"].includes(current?.status ?? "")
+    && isLegacyEvaluation(parseJson<ReportEvaluation>(current?.evaluation_json ?? null));
+  if (!current || (!["assigned", "resubmitted", "analysis_failed"].includes(current.status) && !legacyStuck)) return "conflict";
   if (judge.roleCode === "02" && current.assigned_judge_id !== judge.id) return "conflict";
   // profile_id başvuru anında bağlanmış olsa bile hakem onayından geçmemiş olabilir;
   // o durumda aynı yarışmanın onaylı profiline düşülür.
@@ -1131,7 +1187,7 @@ export async function markApplicationAnalyzing(id: string, judge: AdminAccount):
   const result = await database.prepare(
     `UPDATE competition_applications
      SET status = 'analyzing', profile_id = ?, judge_id = ?, judge_name = ?, updated_at = ?
-     WHERE id = ? AND status IN ('assigned', 'resubmitted', 'analysis_failed')`,
+     WHERE id = ? AND status IN ('assigned', 'resubmitted', 'analysis_failed', 'awaiting_judge', 'judge_in_review')`,
   ).bind(profile.id, judge.id, judge.fullName, new Date().toISOString(), id).run();
   if (!result.meta.changes) return "conflict";
   await recordWorkflowEvent({
@@ -1186,15 +1242,16 @@ export async function saveApplicationEvaluation(
     actor: judge,
     detail: failed || !evaluation
       ? "Analiz tamamlanamadı; başvuru yeniden başlatılabilir."
-      : `AI önerilen ham puan: ${evaluation.proposedTotals.rawScore ?? "—"} / ${evaluation.proposedTotals.declaredTotal ?? "—"} · ${evaluation.proposedTotals.pendingCriteria} kriter hakem kararı bekliyor`,
+      : `AI bulguları: ${evaluation.summary?.basarili ?? 0} ${RULE_VERDICT_LABELS.BASARILI} · ${evaluation.summary?.revizyon ?? 0} ${RULE_VERDICT_LABELS.REVIZYON} · ${evaluation.summary?.kritikHata ?? 0} ${RULE_VERDICT_LABELS.KRITIK_HATA} · genel durum: ${evaluation.summary ? RULE_VERDICT_LABELS[evaluation.summary.overall] : "—"} · ${evaluation.summary?.total ?? evaluation.findings.length} kural hakem kararı bekliyor`,
   });
 }
 
 /**
- * Hakemin AI önerisinden saptığı kriterleri, gerekçesiyle birlikte çıkarır.
- * Denetim izi bu farkları taşır: "AI puanı: 72 → Hakem nihai puanı: 76".
+ * Hakemin AI kural kararından saptığı kriterleri, gerekçesiyle birlikte çıkarır.
+ * Denetim izi bu farkları taşır: "AI kararı: REVİZYON → Hakem nihai kararı: BAŞARILI".
+ * Olay adı (judge_score_adjusted) geçmiş kayıtlarla uyum için korunur.
  */
-function scoreAdjustmentEvents(
+function verdictAdjustmentEvents(
   id: string,
   judge: AdminAccount,
   evaluation: ReportEvaluation | null,
@@ -1203,11 +1260,12 @@ function scoreAdjustmentEvents(
   if (!evaluation) return [];
   const proposals = new Map(evaluation.findings.map((finding) => [finding.criterionId, finding]));
   const events: WorkflowEventInput[] = [];
+  const label = (verdict: RuleVerdict | null | undefined) => verdict ? RULE_VERDICT_LABELS[verdict] : "—";
   for (const decision of review.decisions) {
     if (decision.verdict !== "adjusted") continue;
     const finding = proposals.get(decision.criterionId);
-    const before = finding?.proposedScore ?? null;
-    if (before === decision.finalScore) continue;
+    const before = finding?.verdict ?? null;
+    if (before === decision.finalVerdict) continue;
     const name = finding?.criterionName ?? decision.criterionId;
     const reason = decision.note.trim();
     events.push({
@@ -1215,7 +1273,7 @@ function scoreAdjustmentEvents(
       subjectId: id,
       event: "judge_score_adjusted",
       actor: judge,
-      detail: `${name} · AI puanı: ${before ?? "—"} → Hakem nihai puanı: ${decision.finalScore ?? "—"}`
+      detail: `${name} · AI kararı: ${label(before)} → Hakem nihai kararı: ${label(decision.finalVerdict)}`
         + (reason ? ` · Değişiklik gerekçesi: ${reason.slice(0, 400)}` : " · Gerekçe girilmedi"),
     });
   }
@@ -1273,7 +1331,7 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
   if (before?.status === "awaiting_judge") {
     events.push({ subjectType: "application", subjectId: id, event: "judge_review_started", actor: judge, detail: "" });
   }
-  events.push(...scoreAdjustmentEvents(id, judge, evaluation, review));
+  events.push(...verdictAdjustmentEvents(id, judge, evaluation, review));
   if (completed) {
     const outcomeLabel = review.outcome === "accepted" ? "Kabul edildi"
       : review.outcome === "rejected" ? "Reddedildi"

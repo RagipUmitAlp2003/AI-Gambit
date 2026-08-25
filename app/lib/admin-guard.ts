@@ -163,7 +163,7 @@ export function assertEmail(value: string): string {
 
 /**
  * Rol kodu allowlist kontrolü; 05, admin, -1 gibi değerler reddedilir.
- * Yarışmacı (04) moderatör tarafından atanmaz; kendi kaydını açar.
+ * Yarışmacı (03) moderatör tarafından atanmaz; kendi kaydını açar.
  */
 export function assertRoleCode(value: unknown, label = "Rol numarası"): RoleCode {
   if (!isRoleCode(value) || !ASSIGNABLE_ROLE_CODES.includes(value)) {

@@ -22,8 +22,8 @@ type ParticipantView = "competitions" | "applications";
 
 const OUTCOME_LABELS: Record<CompetitionApplication["outcome"], string> = {
   pending: "Sonuç henüz açıklanmadı",
-  accepted: "Hakem inceledi ve kabul etti",
-  rejected: "Hakem inceledi ve reddetti",
+  accepted: "ONAY — hakem inceledi ve onayladı",
+  rejected: "RED — hakem inceledi ve reddetti",
   revision_required: "Hakem inceledi; hatalar düzeltilmeli",
 };
 
@@ -149,9 +149,9 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
                 {application.status === "completed" && application.outcomeNote ? <p className="participant-outcome-note">{application.outcomeNote}</p> : null}
                 {application.status === "completed" && application.review?.feedbackApproved ? (
                   <div className="participant-result">
-                    <section><strong>Güçlü yönler</strong><ul>{application.review.finalFeedback.strengths.map((item) => <li key={item}>{item}</li>)}</ul></section>
-                    <section><strong>Gelişime açık alanlar</strong><ul>{application.review.finalFeedback.improvements.map((item) => <li key={item}>{item}</li>)}</ul></section>
-                    <section><strong>Öneriler</strong><ul>{application.review.finalFeedback.suggestions.map((item) => <li key={item}>{item}</li>)}</ul></section>
+                    <section><strong>Karşılanan kriterler</strong><ul>{application.review.finalFeedback.strengths.map((item) => <li key={item}>{item}</li>)}</ul></section>
+                    <section><strong>Hatalı kriterler ve sebepleri</strong><ul>{application.review.finalFeedback.improvements.map((item) => <li key={item}>{item}</li>)}</ul></section>
+                    <section><strong>Revizyon önerileri</strong><ul>{application.review.finalFeedback.suggestions.map((item) => <li key={item}>{item}</li>)}</ul></section>
                   </div>
                 ) : <p className="application-wait-note">Sonuç, hakem nihai değerlendirmeyi tamamlayıp geri bildirimi onayladığında burada açılır. AI ön değerlendirmesi tek başına sonuç değildir.</p>}
                 {(application.status === "document_reupload_requested" || (application.status === "completed" && application.outcome === "revision_required")) ? (

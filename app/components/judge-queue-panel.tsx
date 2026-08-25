@@ -3,14 +3,16 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { formatDateTime } from "../lib/admin-client";
+import { RULE_VERDICT_LABELS } from "../lib/types";
 import { workflowApi } from "../lib/workflow-client";
 import { APPLICATION_STATUS_LABELS, type CompetitionApplication } from "../lib/workflow-types";
 
 /**
  * Aşama D · hakem kuyruğu (Rol 02).
  *
- * AI ön değerlendirmesi tamamlanan başvuruları sıraya koyar. Gösterilen puan
- * AI ÖNERİSİDİR; nihai karar Değerlendirme Atölyesi'nde hakem tarafından verilir.
+ * AI ön değerlendirmesi tamamlanan başvuruları sıraya koyar. Gösterilen kural
+ * sayaçları AI BULGUSUDUR; nihai karar Değerlendirme Atölyesi'nde hakem
+ * tarafından verilir. Puan yoktur.
  */
 export default function JudgeQueuePanel() {
   const [applications, setApplications] = useState<CompetitionApplication[]>([]);
@@ -43,7 +45,7 @@ export default function JudgeQueuePanel() {
         <div>
           <span className="role-code">Aşama D · nihai değerlendirme</span>
           <h2 id="judge-queue-title">Hakem kuyruğu</h2>
-          <p>AI ön değerlendirmesi tamamlanan başvurular. AI önerdiği puanı sunar; nihai kararı siz verirsiniz.</p>
+          <p>AI ön değerlendirmesi tamamlanan başvurular. AI kural bazlı bulgu sunar; nihai kararı siz verirsiniz.</p>
         </div>
         <Link href="/degerlendirme" className="secondary-button">Değerlendirme Atölyesi</Link>
       </header>
@@ -61,7 +63,8 @@ export default function JudgeQueuePanel() {
       {queue.length ? (
         <div className="judge-queue-list">
           {queue.map((application) => {
-            const proposed = application.evaluation?.proposedTotals;
+            // Eski sürüm (puanlı) sonuçlarda sayaç yoktur; satır boş kalır.
+            const summary = application.evaluation?.version === "2.0" ? application.evaluation.summary : null;
             return (
               <article key={application.id}>
                 <div>
@@ -69,8 +72,8 @@ export default function JudgeQueuePanel() {
                   <strong>{application.teamName}</strong>
                   <p>{application.competitionName} · {application.fileName ?? "Başvuru PDF'i"}</p>
                   <small>
-                    {proposed
-                      ? `AI önerilen ham puan: ${proposed.rawScore ?? "—"} / ${proposed.declaredTotal ?? "—"} · ${proposed.pendingCriteria} kriter hakem kararı bekliyor`
+                    {summary
+                      ? `AI bulguları: ${summary.basarili} ${RULE_VERDICT_LABELS.BASARILI} · ${summary.revizyon} ${RULE_VERDICT_LABELS.REVIZYON} · ${summary.kritikHata} ${RULE_VERDICT_LABELS.KRITIK_HATA} · genel durum: ${RULE_VERDICT_LABELS[summary.overall]}`
                       : "AI ön değerlendirmesi henüz okunmadı"}
                   </small>
                 </div>

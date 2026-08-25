@@ -1,33 +1,10 @@
-import { criterionEliminates } from "../app/lib/evaluation-summary.ts";
+// İstek koruması (hız ve eşzamanlılık sınırı) regresyon testleri.
+// Çalıştırma: npm run test:regressions
 import { acquireAnalysisPermit } from "../app/lib/request-guard.ts";
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
-
-const baseCriterion = {
-  id: "regression",
-  name: "Aşama 3 ardışık başarısızlık koşulu",
-  type: "formula",
-  maxScore: null,
-  weight: null,
-  required: true,
-  violationOutcome: "Dört ardışık turda 0 puan verilir.",
-  evaluationMethod: "deterministic",
-  sourcePage: 1,
-  sourceText: "",
-  aiInterpretation: "",
-  confidence: "high",
-  active: true,
-  origin: "document",
-  effect: "threshold",
-};
-
-assert(!criterionEliminates(baseCriterion), "0 puan koşulu eleme sayılmamalıdır.");
-assert(
-  criterionEliminates({ ...baseCriterion, name: "Takım elenir", violationOutcome: "Takım yarışma dışı bırakılır." }),
-  "Açık eleme sonucu yakalanmalıdır.",
-);
 
 process.env.ANALYSIS_RATE_LIMIT_WINDOW_MS = "60000";
 process.env.ANALYSIS_RATE_LIMIT_MAX = "10";

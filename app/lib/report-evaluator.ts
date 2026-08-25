@@ -1,5 +1,6 @@
 import { evaluateReportOffline } from "./demo-report-evaluator";
 import {
+  applySimilarity,
   buildFileGateChecks,
   buildHeadingsCheck,
   buildLanguageCheck,
@@ -7,14 +8,14 @@ import {
   buildTemplateCheck,
   type SimilarityPeer,
 } from "./report-prechecks";
-import type { PreCheck, ProfileExport, ReportEvaluation } from "./types";
+import type { EvidenceRef, PreCheck, ProfileExport, ReportEvaluation } from "./types";
 
 /**
  * Rapor analizi istemci sarmalayıcısı. Önce sunucudaki AI analiz motorunu
  * (POST /api/evaluate-report) dener; motor henüz bağlı değilse (501) veya uç
- * nokta yoksa (404) çevrimdışı kesin kontrollere düşer. Ağa hiç ulaşılamadığında
- * da çevrimdışı sonuç üretilir ve sonucun uyarı listesine bu durum yazılır.
- * Motorun bildirdiği diğer hatalar gizlenmez; çağırana iletilir.
+ * nokta yoksa (404) çevrimdışı deterministik kontrollere düşer. Ağa hiç
+ * ulaşılamadığında da çevrimdışı sonuç üretilir ve sonucun uyarı listesine bu
+ * durum yazılır. Motorun bildirdiği diğer hatalar gizlenmez; çağırana iletilir.
  *
  * İstek/cevap sözleşmesi: docs/RAPOR_DEGERLENDIRME_SOZLESMESI.md
  */
@@ -22,15 +23,23 @@ import type { PreCheck, ProfileExport, ReportEvaluation } from "./types";
 /** Sunucunun bildirdiği hata; çevrimdışı yedeğe düşülmez, kullanıcıya gösterilir. */
 class ReportEngineError extends Error {}
 
+/** Sunucuya gönderilen sayfa metni üst sınırı; deterministik kontroller için yeterlidir. */
+const MAX_PAGES_TEXT_CHARS = 1_500_000;
+
 function evidenceNeedle(value: string) {
-  return value.toLocaleLowerCase("tr-TR").normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+  return value.toLocaleLowerCase("tr-TR").normalize("NFKD").replace(/[̀-ͯ]/g, "")
     .replace(/ı/g, "i").replace(/\s+/g, " ").replace(/[^a-z0-9çğıöşü ]+/gi, "").trim();
 }
 
-/** AI alıntısı gerçekten gösterdiği PDF sayfasında yoksa sonuç sessizce kullanılmaz. */
+/**
+ * AI alıntısı gerçekten gösterdiği PDF sayfasında yoksa kanıt listesinden
+ * düşer. Kural kararı (verdict) DEĞİŞMEZ; bulgunun bütün kanıtı düştüyse
+ * evidenceMissing işaretlenir ve hakemin kaynağı kendisinin doğrulaması gerektiği
+ * gerekçeye eklenir.
+ */
 function verifyEvidenceQuotes(evaluation: ReportEvaluation, pages: string[]): ReportEvaluation {
   let removed = 0;
-  const validEvidence = (evidence: ReportEvaluation["findings"][number]["evidence"]) => evidence.filter((item) => {
+  const validEvidence = (evidence: EvidenceRef[]) => evidence.filter((item) => {
     if (!item.page || !pages[item.page - 1]) { removed += 1; return false; }
     const needle = evidenceNeedle(item.text);
     const page = evidenceNeedle(pages[item.page - 1]);
@@ -40,26 +49,36 @@ function verifyEvidenceQuotes(evaluation: ReportEvaluation, pages: string[]): Re
   });
   const findings = evaluation.findings.map((finding) => {
     const evidence = validEvidence(finding.evidence);
-    if (evidence.length || !["met", "partially_met", "not_met"].includes(finding.status)) return { ...finding, evidence };
+    if (evidence.length === finding.evidence.length) return { ...finding, evidence };
+    const lost = evidence.length === 0;
     return {
       ...finding,
-      status: "needs_human" as const,
-      proposedScore: null,
-      confidence: "low" as const,
-      requiresHuman: true,
       evidence,
-      rationale: `${finding.rationale} AI alıntısı kaynak sayfada birebir doğrulanamadığı için nihai kontrol Hakeme bırakıldı.`,
+      evidenceMissing: finding.evidenceMissing || lost,
+      rationale: lost
+        ? `${finding.rationale} AI alıntısı kaynak sayfada birebir doğrulanamadı; hakem kaynağı kendisi doğrulamalı.`
+        : finding.rationale,
     };
   });
-  const preChecks = evaluation.preChecks.map((check) => ({ ...check, evidence: validEvidence(check.evidence) }));
+  const stages = evaluation.stages.map((stage) => ({ ...stage, evidence: validEvidence(stage.evidence) }));
+  const preChecks = evaluation.preChecks.map((check) => (
+    // Şablon kontrolünün kanıtı şartname metnidir; rapor sayfalarında aranmaz.
+    check.kind === "template" ? check : { ...check, evidence: validEvidence(check.evidence) }
+  ));
   return {
     ...evaluation,
     findings,
+    stages,
     preChecks,
     analysisWarnings: removed
       ? [...evaluation.analysisWarnings, `${removed} AI alıntısı belirtilen PDF sayfasında birebir doğrulanamadı ve kanıt listesinden çıkarıldı.`]
       : evaluation.analysisWarnings,
   };
+}
+
+function pagesPayload(pages: string[]): string | null {
+  const payload = JSON.stringify(pages);
+  return payload.length <= MAX_PAGES_TEXT_CHARS ? payload : null;
 }
 
 export async function evaluateReport(input: {
@@ -78,6 +97,10 @@ export async function evaluateReport(input: {
     formData.append("file", file);
     formData.append("profile", JSON.stringify(profile));
     formData.append("pageCount", String(pageCount));
+    // Sayfa metni yalnızca sunucudaki deterministik kontroller (dil, başlık
+    // yedeği) için gönderilir; modele PDF'nin kendisi gider.
+    const pagesJson = pagesPayload(pages);
+    if (pagesJson) formData.append("pages", pagesJson);
 
     const response = await fetch("/api/evaluate-report", { method: "POST", body: formData });
     const contentType = response.headers.get("content-type") || "";
@@ -86,37 +109,33 @@ export async function evaluateReport(input: {
       ? await response.json().catch(() => null) as (Partial<ReportEvaluation> & { error?: string }) | null
       : null;
 
-    if (response.ok && payload && !payload.error && Array.isArray(payload.findings)) {
-      const evaluation = verifyEvidenceQuotes(payload as ReportEvaluation, pages);
+    if (response.ok && payload && !payload.error && payload.version === "2.0" && Array.isArray(payload.findings) && Array.isArray(payload.stages)) {
+      const verified = verifyEvidenceQuotes(payload as ReportEvaluation, pages);
       // Dosya biçimi/boyutu/adedi istemcide gerçek dosya üzerinden ölçülür;
       // model bu kesin kontrollerin yerine geçmez. Aynı kimlikli sunucu satırı
       // varsa yerel ölçüm önceliklidir.
       const localChecks = [
         ...(gateChecks ?? buildFileGateChecks(file, profile.setup)),
-        buildLanguageCheck(pages),
+        buildLanguageCheck(pages, profile.setup.reportLanguage),
         buildTemplateCheck(profile, pageCount),
         buildHeadingsCheck(profile, pages),
       ];
       const localIds = new Set(localChecks.map((check) => check.id));
-      evaluation.preChecks = [
-        ...localChecks,
-        ...(Array.isArray(evaluation.preChecks) ? evaluation.preChecks : [])
-          .filter((check) => check.kind !== "file_gate" && !localIds.has(check.id)),
-      ];
-      // Benzerlik havuzu sunucuda yoktur; istemci kendi sonucuyla tamamlar.
-      const similarity = buildSimilarityCheck(pages.join(" "), peers);
-      const checks = evaluation.preChecks;
-      const similarityIndex = checks.findIndex((check) => check.kind === "similarity");
-      if (similarityIndex >= 0) checks[similarityIndex] = similarity;
-      else checks.push(similarity);
-      evaluation.preChecks = checks;
-      return evaluation;
+      const merged: ReportEvaluation = {
+        ...verified,
+        preChecks: [
+          ...localChecks,
+          ...verified.preChecks.filter((check) => check.kind !== "file_gate" && !localIds.has(check.id)),
+        ],
+      };
+      // Benzerlik havuzu sunucuda yoktur; istemci kendi sonucuyla 3. aşamayı tamamlar.
+      return applySimilarity(merged, buildSimilarityCheck(pages.join(" "), peers));
     }
 
     if (response.status === 501 || response.status === 404 || response.status === 503) {
       offlineReason = response.status === 503
-        ? "AI servis anahtarı bu ortamda kullanılamıyor; yalnızca kesin kontroller çalıştırıldı."
-        : "AI analiz motoru bu ortamda bağlı değil; yalnızca kesin kontroller çalıştırıldı.";
+        ? "AI servis anahtarı bu ortamda kullanılamıyor; yalnızca deterministik kontroller çalıştırıldı."
+        : "AI analiz motoru bu ortamda bağlı değil; yalnızca deterministik kontroller çalıştırıldı.";
     } else {
       throw new ReportEngineError(
         payload?.error || `Analiz motoru beklenmedik bir cevap döndürdü (HTTP ${response.status}).`,
@@ -125,7 +144,7 @@ export async function evaluateReport(input: {
   } catch (error) {
     if (error instanceof ReportEngineError) throw error;
     // Yalnızca ağ/istek hatası buraya düşer; kullanıcı sonucu uyarı listesinden görür.
-    offlineReason = "Analiz motoruna ulaşılamadı; yalnızca kesin kontroller çalıştırıldı.";
+    offlineReason = "Analiz motoruna ulaşılamadı; yalnızca deterministik kontroller çalıştırıldı.";
   }
 
   const evaluation = evaluateReportOffline({ profile, file, pages, pageCount, peers, gateChecks });

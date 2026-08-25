@@ -13,9 +13,9 @@ import {
 /**
  * Yarışma yöneticisinin (Rol 01) geçmişi.
  *   extractions  Analiz edilen şartname PDF'leri.
- *   profiles     Hazırladığı profiller ve HAKEM ONAY DURUMU.
+ *   profiles     Yayımladığı dört aşamalı kriter profilleri ve yayın durumu.
  *
- * Profil hazırlanır hazırlanmaz yürürlüğe girmez; hakem onayı beklenir.
+ * Profil yayımlandığı anda yürürlüğe girer; ayrı bir hakem onayı yoktur.
  */
 
 const STATUS_CHIP: Record<CompetitionProfile["status"], string> = {
@@ -64,13 +64,13 @@ export default function ManagerProfileHistory({ mode, compact = false }: {
   return (
     <section className="history-workspace" aria-labelledby={compact ? undefined : "history-title"}>
       {compact ? (
-        <header><span className="role-code">Hakem onay durumu</span><h2>Hazırladığım profiller</h2></header>
+        <header><span className="role-code">Yayın durumu</span><h2>Hazırladığım profiller</h2></header>
       ) : (
         <header>
-          <span className="role-code">{mode === "profiles" ? "Hakem onay durumu" : "Analiz kayıtları"}</span>
+          <span className="role-code">{mode === "profiles" ? "Yayın durumu" : "Analiz kayıtları"}</span>
           <h1 id="history-title">{mode === "profiles" ? "Hazırladığım değerlendirme profilleri" : "Geçmiş ayıklama işlemleri"}</h1>
           <p>{mode === "profiles"
-            ? "Hazırladığınız profillerin hakem doğrulama durumunu izleyin. Düzeltme istenen profili Kriter Atölyesi'nde güncelleyip yeniden gönderebilirsiniz."
+            ? "Yayımladığınız dört aşamalı kriter profillerini izleyin. Değişiklik gerekiyorsa profili Kriter Atölyesi'nde düzenleyip yeniden yayımlayın."
             : "Başarıyla analiz edilen şartname PDF'lerini ve onay durumlarını görün."}</p>
         </header>
       )}
@@ -101,7 +101,7 @@ export default function ManagerProfileHistory({ mode, compact = false }: {
                     <strong>Hakem notu{item.reviewedByName ? ` (${item.reviewedByName})` : ""}:</strong> {item.reviewNote}
                   </p>
                 ) : null}
-                {item.status === "judge_review_pending" ? <p className="page-note">Hakem incelemesi bekleniyor; profil henüz değerlendirmede kullanılamaz.</p> : null}
+                {item.status !== "approved" ? <p className="page-note">Bu profil yürürlükte değil; değerlendirmede kullanılmaz.</p> : null}
                 <ul>{item.profile.criteria.map((criterion) => <li key={criterion.id}><span>{criterion.active ? "Etkin" : "Pasif"}</span><strong>{criterion.name}</strong><small>{criterion.sourcePage ? `Kaynak s. ${criterion.sourcePage}` : "Kaynak sayfası belirtilmemiş"}</small></li>)}</ul>
               </div>
             </details>
@@ -110,7 +110,7 @@ export default function ManagerProfileHistory({ mode, compact = false }: {
         </div>
       ) : (
         <div className="history-list extraction-history-list">
-          {filteredExtractions.map((item) => <article key={item.id}><div><span className={`history-status ${item.status}`}>{item.status === "approved" ? "Hakem onaylı" : "Analiz edildi"}</span><strong>{item.competitionName || "Yarışma adı PDF'de bulunamadı"}</strong><p>{item.sourceDocumentName}</p></div><div><em>{item.criteriaCount} kriter</em><small>{formatDateTime(item.analyzedAt)}</small></div></article>)}
+          {filteredExtractions.map((item) => <article key={item.id}><div><span className={`history-status ${item.status}`}>{item.status === "approved" ? "Yayımlandı" : "Analiz edildi"}</span><strong>{item.competitionName || "Yarışma adı PDF'de bulunamadı"}</strong><p>{item.sourceDocumentName}</p></div><div><em>{item.criteriaCount} kriter</em><small>{formatDateTime(item.analyzedAt)}</small></div></article>)}
           {!filteredExtractions.length ? <div className="participant-empty"><strong>Ayıklama geçmişi bulunamadı</strong><p>İlk şartname PDF&apos;i analiz edildiğinde kayıt burada oluşacak.</p></div> : null}
         </div>
       )}

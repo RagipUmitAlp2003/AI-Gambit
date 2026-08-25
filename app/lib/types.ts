@@ -2,6 +2,7 @@ export type Step = 1 | 2 | 3;
 
 export type ViolationAction = "block" | "warn" | "jury" | "unspecified";
 
+/** Yarışma ve teslim bilgileri; yalnızca organizatör PDF'sinden çıkarılır. */
 export type SetupData = {
   competition: string;
   category: string;
@@ -12,160 +13,180 @@ export type SetupData = {
   maxFileSizeMb: number;
   maxFileCount: number;
   defaultViolationAction: ViolationAction;
+  /** Şartnamenin raporda beklediği dil (ör. "Türkçe"); belge sessizse null. */
+  reportLanguage?: string | null;
 };
 
-export type CriterionType =
-  | "technical_upload"
-  | "format_rule"
-  | "mandatory_content"
-  | "qualitative_score"
-  | "elimination_review"
-  | "formula"
-  | "human_only";
+/* ------------------------------------------------------------------------- *
+ * Dört aşamalı kontrol prensibi
+ *
+ * Şartname analizi (Kriter Atölyesi) ve rapor değerlendirmesi (Değerlendirme
+ * Atölyesi) aynı dört aşamayı kullanır. Şartnameden çıkarılan her kriter bu
+ * aşamalardan birine bağlanır; rapor kontrolü aşama aşama sonuç üretir.
+ *
+ *   1. Dil ve Şablon Uygunluğu
+ *   2. Başlık ve İçerik Kontrolü
+ *   3. Kategori Uygunluğu ve Benzerlik
+ *   4. Kriter Bazlı Kanıt Çıkarma
+ *
+ * Yalnızca yarışmanın PDF (rapor) aşaması kontrol edilir. Fiziksel/saha
+ * aşaması puanları ve puanlama sistemleri kriter sistemine dahil değildir.
+ * ------------------------------------------------------------------------- */
 
-export type EvaluationMethod = "deterministic" | "ai" | "human" | "hybrid";
-export type Confidence = "high" | "medium" | "low";
-export type CriterionOrigin = "document" | "manager";
-export type CriterionEffect = "gate" | "score" | "penalty" | "threshold" | "advisory";
-export type CriterionReviewStatus = "ready" | "needs_review" | "confirmed" | "excluded";
-export type EvidenceStatus = "verified" | "partial" | "not_found" | "contradicted" | "not_run";
-export type CriterionApplicability = "report" | "upload" | "physical" | "external" | "informational";
+export type CheckStage =
+  | "language_template"
+  | "headings_content"
+  | "category_similarity"
+  | "criteria_evidence";
 
-export type DocumentSection = {
+export type CheckStageDefinition = {
+  id: CheckStage;
+  order: 1 | 2 | 3 | 4;
   title: string;
-  startPage: number;
-  endPage: number;
-  kind: "rules" | "scoring" | "submission" | "definitions" | "schedule" | "reference" | "mixed";
-  ruleDensity: "high" | "medium" | "low";
+  shortTitle: string;
+  detail: string;
 };
 
-export type ScoreGroup = {
-  /**
-   * Benzersiz ve kararlı kimlik. Kapsam kararları, kriter bağlama ve toplama
-   * işlemleri YALNIZCA bu alan üzerinden yapılır; `name` sadece gösterimdir.
-   * Eski analizlerde bulunmayabilir (o profillerde isme düşülür).
-   */
-  id?: string;
-  name: string;
-  scope: string;
-  maxScore: number;
-  minimumScore: number | null;
-  sourcePage: number;
-  sourceText: string;
-  breakdown: string[];
+export const CHECK_STAGES: readonly CheckStageDefinition[] = [
+  {
+    id: "language_template",
+    order: 1,
+    title: "Dil ve Şablon Uygunluğu",
+    shortTitle: "Dil / Şablon",
+    detail: "Tespit edilen dil ve şablon format uyumu.",
+  },
+  {
+    id: "headings_content",
+    order: 2,
+    title: "Başlık ve İçerik Kontrolü",
+    shortTitle: "Başlık / İçerik",
+    detail: "Zorunlu başlıkların raporda varlığı ve altındaki içeriğin doluluğu.",
+  },
+  {
+    id: "category_similarity",
+    order: 3,
+    title: "Kategori Uygunluğu ve Benzerlik",
+    shortTitle: "Kategori / Benzerlik",
+    detail: "Kategoriye uygunluk skoru ve başvurular arası benzerlik durumu.",
+  },
+  {
+    id: "criteria_evidence",
+    order: 4,
+    title: "Kriter Bazlı Kanıt Çıkarma",
+    shortTitle: "Teknik kural",
+    detail: "Her teknik kural için durum (BAŞARILI / REVİZYON / KRİTİK_HATA), rapordan sayfa/paragraf numaralı doğrudan alıntı ve gerekçe.",
+  },
+] as const;
+
+export const CHECK_STAGE_IDS: readonly CheckStage[] = CHECK_STAGES.map((stage) => stage.id);
+
+export function checkStageOf(id: CheckStage): CheckStageDefinition {
+  return CHECK_STAGES.find((stage) => stage.id === id) ?? CHECK_STAGES[3];
+}
+
+export function isCheckStage(value: unknown): value is CheckStage {
+  return typeof value === "string" && (CHECK_STAGE_IDS as readonly string[]).includes(value);
+}
+
+/**
+ * Kural bazlı durum. Şartname kriteri raporda kontrol edildiğinde yalnızca bu
+ * üç sonuçtan biri verilir; güven seviyesi veya "emin değilim" durumu yoktur.
+ *
+ *   BASARILI     Kural karşılandı.
+ *   REVIZYON     Kural eksik/kısmi karşılandı; düzeltme gerekir.
+ *   KRITIK_HATA  Zorunlu kural karşılanmadı veya belgede açık ihlal var.
+ */
+export type RuleVerdict = "BASARILI" | "REVIZYON" | "KRITIK_HATA";
+
+export const RULE_VERDICTS: readonly RuleVerdict[] = ["BASARILI", "REVIZYON", "KRITIK_HATA"];
+
+export const RULE_VERDICT_LABELS: Record<RuleVerdict, string> = {
+  BASARILI: "BAŞARILI",
+  REVIZYON: "REVİZYON",
+  KRITIK_HATA: "KRİTİK HATA",
 };
 
-export type ScorePlan = {
-  declaredTotalScore: number | null;
-  groups: ScoreGroup[];
-  auditStatus: "matched" | "mismatch" | "not_declared";
-  auditMessage: string;
-};
+export function isRuleVerdict(value: unknown): value is RuleVerdict {
+  return typeof value === "string" && (RULE_VERDICTS as readonly string[]).includes(value);
+}
 
+export type CriterionOrigin = "document" | "manager";
+
+/**
+ * Şartnameden çıkarılan, yarışmanın PDF aşamasında kontrol edilecek tek kural.
+ * Puan, ağırlık, güven seviyesi veya değerlendirme yöntemi taşımaz; kriter ya
+ * zorunludur (ihlali KRİTİK_HATA) ya da "diğer"dir (ihlali REVİZYON).
+ */
 export type Criterion = {
   id: string;
   name: string;
-  type: CriterionType;
-  maxScore: number | null;
-  weight: number | null;
+  /** Kuralın hangi aşamada kontrol edileceği. */
+  stage: CheckStage;
+  /** true → Zorunlu; false → Diğer. Ekranda iki ayrı bölümde listelenir. */
   required: boolean;
+  /** Kuralın tek anlamlı açıklaması: koşul, raporda ne aranacağı ve sonucu. */
+  description: string;
+  /** Belgede yazan ihlal sonucu; yoksa "Belgede belirtilmemiş". */
   violationOutcome: string;
-  evaluationMethod: EvaluationMethod;
+  /** PDF dosyasındaki 1 tabanlı sayfa sırası; belgede dayanağı yoksa null. */
   sourcePage: number | null;
+  /** Kaynak sayfadan özgün dilde birebir kısa alıntı. */
   sourceText: string;
-  aiInterpretation: string;
-  confidence: Confidence;
   active: boolean;
   origin: CriterionOrigin;
-  /** Yeni analizlerde zorunludur; eski yerel taslaklarla uyumluluk için opsiyoneldir. */
-  effect?: CriterionEffect;
-  /** Kuralın ait olduğu rapor, video, teknik kontrol veya görev aşaması. */
-  scope?: string;
-  /** Kuralın PDF değerlendirmesinde uygulanıp uygulanamayacağını belirleyen kapsam sınıfı. */
-  applicability?: CriterionApplicability;
-  /**
-   * Kriterin bağlı olduğu puan grubunun kimliği (ScoreGroup.id).
-   * Hiçbir puan grubuna bağlı değilse null. Kapsam daraltma bu alanı kullanır.
-   */
-  groupId?: string | null;
-  issue?: string;
-  /** Bağımsız denetimde bulunan belirsiz maddelerin görevli kararını izler. */
-  reviewStatus?: CriterionReviewStatus;
-  /** İkinci, kaynak odaklı turda kuralın PDF dayanağının doğrulanma durumu. */
-  evidence?: {
-    status: EvidenceStatus;
-    reason: string;
-  };
 };
 
 /** Analiz çağrısının süre ve token gözlem verileri (maliyet takibi için). */
 export type AnalysisDiagnostics = {
   totalMs: number;
   modelMs: number;
-  auditMs: number;
   promptTokens: number;
   outputTokens: number;
   cached: boolean;
   /** Belgenin Files API'ye yüklenmesi için geçen süre; satır içi gönderimde 0. */
   uploadMs?: number;
-  /** Bu analizde modele yapılan üretim çağrısı sayısı (yükleme hariç). */
+  /** Bu analizde modele yapılan üretim çağrısı sayısı (yükleme hariç). Yeni prensipte 1. */
   apiCalls?: number;
-  /** PDF baytlarının ağ üzerinden kaç kez taşındığı. Files API ile 1, satır içi gönderimde çağrı sayısı kadar. */
+  /** PDF baytlarının ağ üzerinden kaç kez taşındığı. */
   documentTransfers?: number;
   /** Belge referansla mı gönderildi (Files API) yoksa satır içi mi? */
   documentDelivery?: "file_uri" | "inline";
-  /** Denetim turunun fiilen kullandığı model; yedeğe düşüldüyse birincilden farklıdır. */
-  auditModel?: string;
-  /** Belgeyi kapsamak için paralel çalıştırılan sayfa aralığı sayısı. */
-  extractionPasses?: number;
-  /** Kaynak doğrulamasından geçirilen kriter adedi. */
-  verifiedCriteria?: number;
 };
 
-export type AnalysisResult = {
-  /** Yarışma ve teslim bilgileri yalnızca organizatör PDF'sinden çıkarılır. */
-  setup: SetupData;
-  criteria: Criterion[];
-  skippedChecks: string[];
-  informationalNotes: string[];
-  pageCount: number;
-  provider: "demo" | "api";
-  model?: string;
-  analyzedAt: string;
-  scorePlan?: ScorePlan;
-  /** PDF yapısının sayfa aralıklarıyla çıkarılmış kısa haritası. */
-  documentMap?: DocumentSection[];
-  /** İkinci, kısa denetim turunun puan planı karşılaştırması. */
-  scoreAudit?: {
-    declaredTotalScore: number | null;
-    groupTotal: number;
-    agrees: boolean;
-    model?: string;
-  };
-  analysisWarnings?: string[];
-  diagnostics?: AnalysisDiagnostics;
-  /** Organizatör ayrıca resmî rapor şablonu yüklediyse ondan çıkarılan yapı. */
-  templateProfile?: TemplateProfile;
-};
-
+/** Organizatör ayrıca resmî rapor şablonu yüklediyse ondan çıkarılan yapı. */
 export type TemplateProfile = {
   provided: boolean;
   name: string;
   pages: number;
+  /** Şablonun ana bölüm başlıkları; zorunlu başlıklar ayrıca 2. aşama kriteri olarak listelenir. */
   requiredHeadings: string[];
   notes: string[];
 };
 
+/** POST /api/analyze cevabı: tek LLM çağrısıyla çıkarılan dört aşamalı kriter seti. */
+export type AnalysisResult = {
+  setup: SetupData;
+  templateProfile: TemplateProfile;
+  criteria: Criterion[];
+  pageCount: number;
+  provider: "api";
+  model?: string;
+  analyzedAt: string;
+  analysisWarnings: string[];
+  diagnostics?: AnalysisDiagnostics;
+};
+
 export type ProfileExport = {
-  version: "1.0";
+  /** 2.0: dört aşamalı, puansız kriter modeli. 1.0 profilleri okunurken bu şekle yükseltilir. */
+  version: "2.0";
   /**
    * Dışa aktarım dosyasının kendi bütünlük işareti: yarışma yöneticisi kriter
    * düzenlemesini bitirmiştir. Süreçteki YAŞAM DÖNGÜSÜ bu alan değildir;
-   * hakem doğrulaması `competition_profiles.status` sütununda tutulur
+   * yayın durumu `competition_profiles.status` sütununda tutulur
    * (bkz. workflow-types.ts · ProfileStatus).
    */
   status: "approved";
-  /** Onay anında üretilen benzersiz kimlik; değerlendirme sonuçlarını bu profile bağlar. Eski profillerde bulunmayabilir. */
+  /** Onay anında üretilen benzersiz kimlik; değerlendirme sonuçlarını bu profile bağlar. */
   profileId?: string;
   setup: SetupData;
   sourceDocument: {
@@ -173,65 +194,34 @@ export type ProfileExport = {
     pages: number;
     analyzedAt: string;
   };
-  /** İkinci AI aşamasındaki şablon ve zorunlu başlık kontrolünün kaynağı. */
   templateProfile?: TemplateProfile;
   criteria: Criterion[];
-  skippedChecks: string[];
-  scorePlan?: ScorePlan;
-  /** Puan kapsamı bilgisi. Alan adı eski profil dosyalarıyla uyumluluk için korunur. */
-  normalization?: {
-    /** Yarışma Yöneticisi bu PDF aşamasında sayısal puanlamayı kullanacak mı? */
-    scoringEnabled?: boolean;
-    /** Belgede ilan edilen genel toplam (ör. saha görevleri dahil 315). */
-    declaredTotal: number | null;
-    /**
-     * Bu profilde uygulanacak resmî azami puan. Birden çok aşama içeren
-     * şartnamelerde yalnızca kapsama alınan grupların toplamıdır.
-     */
-    evaluationTotal?: number | null;
-    /** Kapsama alınan puan gruplarının kimlikleri (ScoreGroup.id). */
-    includedGroupIds?: string[];
-    /** @deprecated İsim tabanlı kapsam; yalnızca eski profillerin okunabilmesi için tutulur. */
-    includedGroups?: string[];
-    /** Belgedeki grup toplamı ile kriter toplamı çelişiyorsa görevliye gösterilecek uyarı. */
-    scopeAnomaly?: string | null;
-    /** Eski profillerde bulunabilir; yeni profiller otomatik ölçek dönüşümü yapmaz. */
-    normalizedTo?: 100;
-    /** Eski profillerde bulunabilir; yalnızca bilgilendirme amaçlıdır. */
-    formula?: string;
-  };
-  /** Toplam puanın yanında ayrıca denetlenecek geçiş/baraj/ceza/eleme kuralları. */
-  decisionRules?: {
-    gates: Array<{ name: string; detail: string; sourcePage: number | null }>;
-    thresholds: Array<{ name: string; detail: string; sourcePage: number | null }>;
-    penalties: Array<{ name: string; detail: string; sourcePage: number | null }>;
-    eliminations: Array<{ name: string; detail: string; sourcePage: number | null }>;
-  };
 };
 
 /* ------------------------------------------------------------------------- *
- * Rapor Değerlendirme modülü veri sözleşmesi (P4 · sonraki aşama)
+ * Rapor Değerlendirme modülü veri sözleşmesi
  *
- * Girdi: onaylı ProfileExport JSON'u + katılımcı raporu PDF'si.
+ * Girdi: yayımlı ProfileExport JSON'u + katılımcı raporu PDF'si.
  * Çıktı: ReportEvaluation JSON'u. Analiz motoru bu şemaya üretir;
  * ekranlar bu şemadan okur. Ayrıntı: docs/RAPOR_DEGERLENDIRME_SOZLESMESI.md
  * ------------------------------------------------------------------------- */
 
-/** Havuzdaki bir katılımcı raporunun yaşam döngüsü durumu. */
-export type ReportStatus = "received" | "analyzing" | "analyzed" | "reviewed";
-
-/** Ön kontrol ve bulgu durumları; "skipped" motor bağlanmadan çalıştırılamayan kontroller içindir. */
+/** Deterministik ön kontrol durumları (dosya kapısı, benzerlik vb.). */
 export type CheckStatus = "passed" | "warning" | "flagged" | "failed" | "skipped";
+
+export type EvaluationMethod = "deterministic" | "ai" | "human" | "hybrid";
 
 /** Katılımcı raporu içindeki kanıt referansı. */
 export type EvidenceRef = {
   page: number | null;
-  /** Kanıtın bulunduğu bölüm/başlık; paragraf numarası güvenilir değilse bu alan kullanılır. */
+  /** Sayfa içindeki paragraf sırası (1 tabanlı); model veremediyse null. */
+  paragraph: number | null;
+  /** Kanıtın bulunduğu bölüm/başlık. */
   section?: string;
+  /** Rapordan doğrudan alıntı. */
   text: string;
 };
 
-/** MVP'nin zorunlu ön kontrol başlıkları: dosya kapısı, dil, şablon/başlık, kategori, benzerlik. */
 export type PreCheckKind =
   | "file_gate"
   | "language"
@@ -250,24 +240,60 @@ export type PreCheck = {
   evidence: EvidenceRef[];
 };
 
-/** Kriter bulgusunun sonucu. Sistem eleme kararı vermez; şüphede "needs_human" kullanılır. */
-export type FindingStatus = "met" | "partially_met" | "not_met" | "not_found" | "needs_human";
-
-/** Tek kriter için AI bulgusu ve puan önerisi. Nihai karar her zaman hakemdedir. */
+/** Tek kriter için AI bulgusu. Nihai karar her zaman hakemdedir. */
 export type CriterionFinding = {
   /** ProfileExport.criteria içindeki kriterin kimliği. */
   criterionId: string;
   /** Denetim kolaylığı için kriter adının kopyası. */
   criterionName: string;
-  status: FindingStatus;
-  /** Orijinal puan sisteminde öneri; belge desteklemiyorsa null. Asla uydurulmaz. */
-  proposedScore: number | null;
-  maxScore: number | null;
+  stage: CheckStage;
+  required: boolean;
+  verdict: RuleVerdict;
   rationale: string;
+  /** Rapordan sayfa/paragraf numaralı doğrudan alıntılar. */
   evidence: EvidenceRef[];
-  confidence: Confidence;
-  /** human/hybrid yöntemli veya eleme etkili kriterlerde her zaman true. */
-  requiresHuman: boolean;
+  /** Sistem alıntı gösteremedi; hakem kaynağı kendisi doğrulamalı. */
+  evidenceMissing: boolean;
+};
+
+/** 2. aşama: zorunlu başlığın raporda varlığı ve altındaki içeriğin doluluğu. */
+export type HeadingCheck = {
+  heading: string;
+  present: boolean;
+  contentFilled: boolean;
+  page: number | null;
+  note: string;
+};
+
+export type SimilarityResult = {
+  status: CheckStatus;
+  percent: number | null;
+  closestTeam: string | null;
+  detail: string;
+};
+
+/** Dört aşamadan birinin bütüncül sonucu. */
+export type StageResult = {
+  stage: CheckStage;
+  verdict: RuleVerdict;
+  summary: string;
+  /** 1. aşama */
+  detectedLanguage?: string | null;
+  expectedLanguage?: string | null;
+  /** 2. aşama */
+  headings?: HeadingCheck[];
+  /** 3. aşama: 0–100 kategori uygunluk skoru */
+  categoryScore?: number | null;
+  similarity?: SimilarityResult | null;
+  evidence: EvidenceRef[];
+};
+
+export type VerdictSummary = {
+  total: number;
+  basarili: number;
+  revizyon: number;
+  kritikHata: number;
+  overall: RuleVerdict;
 };
 
 /** Yarışmacıya gösterilecek gelişim odaklı geri bildirim. */
@@ -279,8 +305,8 @@ export type ParticipantFeedback = {
 
 /** Rapor analiz çıktısının tam şeması; POST /api/evaluate-report bu JSON'u döndürür. */
 export type ReportEvaluation = {
-  version: "1.0";
-  /** Sonucun hangi onaylı profile göre üretildiği. */
+  version: "2.0";
+  /** Sonucun hangi yayımlı profile göre üretildiği. */
   profileRef: {
     profileId: string | null;
     competition: string;
@@ -293,17 +319,13 @@ export type ReportEvaluation = {
     pages: number;
     sizeBytes: number;
   };
+  /** Dosya kapısı ve havuz benzerliği gibi deterministik kontroller. */
   preChecks: PreCheck[];
+  /** Dört aşamanın bütüncül sonuçları (her zaman 4 kayıt, aşama sırasıyla). */
+  stages: StageResult[];
   /** Profildeki her aktif kriter için tam olarak bir bulgu bulunur. */
   findings: CriterionFinding[];
-  proposedTotals: {
-    /** Puan önerilerinin toplamı (HAM PUAN); hiç öneri yoksa null. */
-    rawScore: number | null;
-    /** MAKSİMUM HAM PUAN: normalizasyonun paydası. */
-    declaredTotal: number | null;
-    scoredCriteria: number;
-    pendingCriteria: number;
-  };
+  summary: VerdictSummary;
   /** Hakem onayından geçmeden yarışmacıya gösterilmez. */
   feedbackDraft: ParticipantFeedback;
   analysisWarnings: string[];
@@ -313,13 +335,13 @@ export type ReportEvaluation = {
   diagnostics?: AnalysisDiagnostics;
 };
 
-/** Hakemin tek kriter üzerindeki nihai kararı; AI önerisinden ayrı saklanır. */
+/** Hakemin tek kriter üzerindeki nihai kararı; AI bulgusundan ayrı saklanır. */
 export type JudgeDecision = {
   criterionId: string;
+  /** pending: karar yok · accepted: AI kararı onaylandı · adjusted: hakem kararı değiştirdi. */
   verdict: "pending" | "accepted" | "adjusted";
-  finalScore: number | null;
-  /** Ceza etkili kriterde hakemin toplamdan düşülmesini onayladığı puan. */
-  penaltyPoints?: number | null;
+  /** Hakemin nihai kural durumu; pending iken null. */
+  finalVerdict: RuleVerdict | null;
   note: string;
 };
 
@@ -336,20 +358,4 @@ export type JudgeReview = {
   finalFeedback: ParticipantFeedback;
   feedbackApproved: boolean;
   completedAt: string | null;
-};
-
-/** Değerlendirme havuzundaki rapor kaydı; PDF dosyası IndexedDB'de kayıtla birlikte tutulur. */
-export type ReportRecord = {
-  id: string;
-  participant: string;
-  fileName: string;
-  mimeType: string;
-  sizeBytes: number;
-  pages: number | null;
-  uploadedAt: string;
-  status: ReportStatus;
-  /** Yükleme anında çalıştırılan dosya kapısı kontrolleri. */
-  gateChecks: PreCheck[];
-  evaluation: ReportEvaluation | null;
-  review: JudgeReview | null;
 };
