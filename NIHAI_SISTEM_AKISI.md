@@ -81,10 +81,8 @@ SQL sırası:
 
 ## Kontrol sonucu
 
-- TypeScript: başarılı
-- ESLint: başarılı
-- Güvenlik, regresyon ve puanlama testleri: 34/34 başarılı
-- Üretim derlemesi: başarılı
-- Repository secret taraması: başarılı
+Güncel test ve ölçüm sonuçları bu belgede tutulmaz; tek kaynak `PROJE_DURUMU.md`
+dosyasıdır. Bu belge sistemin **ne yaptığını** anlatır, **hangi durumda olduğunu**
+anlatmaz.
 
 Canlı uçtan uca test için Cloudflare D1 ve R2 bağlarının çalıştığı `vinext dev` veya dağıtım ortamı gerekir. Bu Windows cihazında `workerd.exe` işletim sistemi politikası tarafından engellendiği için yerel D1 oturum testi açılamamaktadır; bu durum üretim derlemesindeki kod hatası değildir.

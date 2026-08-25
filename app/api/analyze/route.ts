@@ -24,6 +24,15 @@ import type {
 
 const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
 const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite";
+// Birincil ve yedek modelin aynı anda "high demand" (503) döndüğü dalgalarda
+// analizin tamamen düşmemesi için isteğe bağlı üçüncü kademe.
+const THIRD_MODEL = process.env.GEMINI_THIRD_MODEL || "";
+// Model listesinin kaç kez baştan taranacağı: geçici 503/429 dalgası tek
+// turda bütün kademeleri tüketirse ikinci tur belgeyi kurtarır.
+const MODEL_SWEEPS = Math.min(4, Math.max(1, Number(process.env.GEMINI_MODEL_SWEEPS) || 2));
+// Yeniden denemeler için toplam duvar saati bütçesi: ek tur, isteği
+// süresiz uzatmasın. Bütçe dolduğunda yeni deneme başlatılmaz.
+const MODEL_RETRY_BUDGET_MS = Math.max(60_000, Number(process.env.GEMINI_RETRY_BUDGET_MS) || 300_000);
 
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
 const PROMPT_VERSION = "v18-pdf-integrity-file-uri-map-reduce-verify";
@@ -688,7 +697,11 @@ async function uploadPdfOnce(
         signal: AbortSignal.timeout(60_000),
       },
     );
-    if (!response.ok) return null;
+    if (!response.ok) {
+      const failure = await response.text().catch(() => "");
+      console.error("[gemini] files upload reddedildi", { httpStatus: response.status, detail: failure.slice(0, 400) });
+      return null;
+    }
     const payload = await response.json() as { file?: { uri?: string; name?: string; state?: string } };
     const file = payload.file;
     if (!file?.uri || !file.name) return null;
@@ -886,6 +899,11 @@ export async function POST(request: Request) {
     if (!apiKey) {
       return Response.json({ error: "AI servis anahtarı sunucu ortamında bulunamadı." }, { status: 503 });
     }
+    // Google AI Studio anahtarları "AIza" ile başlar. OAuth/geçici erişim
+    // jetonları bu uçta 401 döndürür; hata yanıltıcı olmasın diye uyarılır.
+    if (!apiKey.startsWith("AIza")) {
+      console.warn("[gemini] GEMINI_API_KEY beklenen 'AIza' ön ekiyle başlamıyor; Gemini API bu kimlik türünü reddedebilir.");
+    }
     cleanupApiKey = apiKey;
 
     const formData = await request.formData();
@@ -1011,19 +1029,31 @@ export async function POST(request: Request) {
       },
     }));
 
-    const allModels = [...new Set([PRIMARY_MODEL, FALLBACK_MODEL])];
+    const allModels = [...new Set([PRIMARY_MODEL, FALLBACK_MODEL, THIRD_MODEL].filter(Boolean))];
     const { models: attempts, skipped: skippedModels } = usableModels(allModels);
     let modelUsed = attempts[0];
 
     const failWith = (status: number, detail: string) => {
       console.error("AI analiz isteği başarısız:", { status, detail });
       recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true });
+      const upstreamAuthFailure = status === 401 || status === 403;
+      // Google tükenmiş bakiyeyi de 429 ile bildiriyor; "bir dakika sonra
+      // dene" yönlendirmesi bu durumda yanlış olduğu için mesaj ayrıştırılır.
+      const billingDepleted = /prepayment credits|billing|exceeded your current quota/i.test(detail);
       const publicMessage = status === 504
         ? "AI modeli zaman sınırı içinde yanıt vermedi. Lütfen yeniden deneyin."
+        : billingDepleted
+          ? "AI servisi isteği bakiye/kota nedeniyle reddetti: Google AI Studio projesinin ön ödemeli kredisi tükenmiş görünüyor. Anahtar geçerli; ai.dev/projects üzerinden faturalama bakiyesini yenileyin."
         : status === 429
           ? "AI servisinin geçici kullanım sınırına ulaşıldı. Yaklaşık bir dakika sonra yeniden deneyin."
+        : status === 503
+          ? "AI modeli şu anda yoğun ve yedek modeller de yanıt vermedi. Birkaç dakika sonra yeniden deneyin; sorun sürerse GEMINI_MODEL değerini erişilebilir başka bir modele alın."
+        : upstreamAuthFailure
+          ? "AI servisi anahtarı reddetti (kimlik doğrulama hatası). Bu bir kota sorunu değildir: GEMINI_API_KEY geçersiz, süresi dolmuş ya da Gemini API için yetkili değil. Google AI Studio'dan yeni bir API anahtarı alıp sunucu ortamını güncelleyin."
         : "AI belge analizi tamamlanamadı. Lütfen yeniden deneyin.";
-      return Response.json({ error: publicMessage }, { status });
+      // Uygulamanın kendi oturum katmanı 401'i "yeniden giriş yap" olarak
+      // yorumladığı için yukarı akış kimlik hatası 502 ile iletilir.
+      return Response.json({ error: publicMessage }, { status: upstreamAuthFailure || status === 503 ? 502 : status });
     };
 
     type GenerationOutcome =
@@ -1034,62 +1064,76 @@ export async function POST(request: Request) {
     const runGeneration = async (body: string, timeoutMs = 80_000): Promise<GenerationOutcome> => {
       let lastDetail = "AI belge analizi tamamlanamadı.";
       let lastStatus = 502;
-      for (let modelIndex = 0; modelIndex < attempts.length; modelIndex += 1) {
-        const model = attempts[modelIndex];
-        // Kota anlık dolduğunda daha yavaş/zayıf yedeğe hemen düşmek yerine
-        // birincil modeli kısa beklemeyle bir kez daha dene.
-        const requestCount = model === PRIMARY_MODEL ? 2 : 1;
-        for (let requestIndex = 0; requestIndex < requestCount; requestIndex += 1) {
-          let response: Response;
-          try {
-            response = await fetch(
-              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-              {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-                body,
-                signal: AbortSignal.timeout(model === PRIMARY_MODEL ? timeoutMs : Math.max(timeoutMs, 110_000)),
-              },
-            );
-          } catch {
-            markModelUnavailable(model);
-            lastDetail = "AI modeli zaman sınırı içinde yanıt vermedi.";
-            break;
-          }
-          if (response.ok) {
-            let payload: unknown;
-            try {
-              payload = await response.json();
-            } catch {
-              return { ok: false, status: 502, detail: "AI servisi geçerli JSON taşımayan bir yanıt döndürdü; aynı belge gereksiz yere ikinci modele gönderilmedi." };
-            }
-            markModelHealthy(model);
-            return { ok: true, payload, model };
-          }
-          const errorPayload = await response.json().catch(() => ({})) as {
-            error?: { message?: string; status?: string; details?: unknown[] };
-          };
-          // Google ayrıntılı alan/şema hatasını `details` içinde gönderir. API
-          // anahtarı ve PDF içeriği bu kayda dahil edilmez; yalnızca servis hata
-          // tanısı geliştirme günlüğüne yazılır.
-          console.error("[gemini] generateContent reddedildi", {
-            model,
-            httpStatus: response.status,
-            status: errorPayload.error?.status,
-            message: errorPayload.error?.message,
-            details: errorPayload.error?.details,
-          });
-          lastDetail = errorPayload.error?.message || `AI analiz isteği ${response.status} koduyla başarısız oldu.`;
-          lastStatus = response.status === 429 ? 429 : 502;
-          const retryable = [429, 500, 502, 503, 504].includes(response.status);
-          if (!retryable) return { ok: false, status: 502, detail: lastDetail };
-          if ([500, 502, 503, 504].includes(response.status)) markModelUnavailable(model);
-          if (requestIndex + 1 < requestCount) {
-            await delay(response.status === 429 ? 2_500 : 1_200);
-            continue;
-          }
+      // Sayfa aralıkları aynı anda çalıştığı için bir çağrının öğrendiği
+      // "bu model şu an 503" bilgisi kardeş çağrılara da yarar: soğumadaki
+      // model, denenecek başka kademe varken atlanır.
+      const plan: string[] = [];
+      for (let sweep = 0; sweep < MODEL_SWEEPS; sweep += 1) plan.push(...attempts);
+      for (let planIndex = 0; planIndex < plan.length; planIndex += 1) {
+        const model = plan[planIndex];
+        const alternativeAhead = plan.slice(planIndex + 1).some((candidate) => !isModelCooling(candidate));
+        if (isModelCooling(model) && alternativeAhead) continue;
+        // Bütçe dolduysa yeni model denemesi başlatmak yerine elde edilen
+        // en son hatayla dön: istek belirsiz süre askıda kalmasın.
+        if (planIndex > 0 && Date.now() - startedAt > MODEL_RETRY_BUDGET_MS) break;
+        let response: Response;
+        try {
+          response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
+              body,
+              signal: AbortSignal.timeout(model === PRIMARY_MODEL ? timeoutMs : Math.max(timeoutMs, 110_000)),
+            },
+          );
+        } catch {
+          markModelUnavailable(model);
+          lastDetail = "AI modeli zaman sınırı içinde yanıt vermedi.";
+          lastStatus = 504;
+          continue;
         }
-        if (modelIndex + 1 < attempts.length) await delay(1_200);
+        if (response.ok) {
+          let payload: unknown;
+          try {
+            payload = await response.json();
+          } catch {
+            return { ok: false, status: 502, detail: "AI servisi geçerli JSON taşımayan bir yanıt döndürdü; aynı belge gereksiz yere ikinci modele gönderilmedi." };
+          }
+          markModelHealthy(model);
+          return { ok: true, payload, model };
+        }
+        const errorPayload = await response.json().catch(() => ({})) as {
+          error?: { message?: string; status?: string; details?: unknown[] };
+        };
+        // Google ayrıntılı alan/şema hatasını `details` içinde gönderir. API
+        // anahtarı ve PDF içeriği bu kayda dahil edilmez; yalnızca servis hata
+        // tanısı geliştirme günlüğüne yazılır.
+        console.error("[gemini] generateContent reddedildi", {
+          model,
+          httpStatus: response.status,
+          status: errorPayload.error?.status,
+          message: errorPayload.error?.message,
+          details: errorPayload.error?.details,
+        });
+        lastDetail = errorPayload.error?.message || `AI analiz isteği ${response.status} koduyla başarısız oldu.`;
+        // Kimlik doğrulama hatası yeniden denemeyle veya yedek modelle
+        // çözülmez; durum kodu kotayla karışmasın diye korunur.
+        lastStatus = response.status === 429 || response.status === 503
+          ? response.status
+          : response.status === 401 || response.status === 403
+            ? response.status
+            : 502;
+        const retryable = [429, 500, 502, 503, 504].includes(response.status);
+        if (!retryable) return { ok: false, status: lastStatus, detail: lastDetail };
+        if ([500, 502, 503, 504].includes(response.status)) markModelUnavailable(model);
+        if (planIndex + 1 < plan.length) {
+          // Kademe değişiminde kısa, aynı kademenin tekrarında artan bekleme:
+          // "high demand" dalgaları genelde saniyeler içinde geçiyor.
+          const sweepIndex = Math.floor(planIndex / Math.max(1, attempts.length));
+          const base = lastStatus === 429 ? 2_500 : 1_200;
+          await delay(Math.min(12_000, base * 2 ** sweepIndex));
+        }
       }
       return { ok: false, status: /zaman sınırı/i.test(lastDetail) ? 504 : lastStatus, detail: lastDetail };
     };

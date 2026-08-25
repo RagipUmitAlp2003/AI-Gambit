@@ -100,10 +100,12 @@ Belgelerin tümü uygulamadaki “Hazır test belgeleri” bölümünden seçile
 - `app/lib/draft-store.ts`: adımlar arası ve sayfa yenileme sonrası taslak kalıcılığı
 - `app/lib/demo-analyzer.ts`: çevrimdışı karşılaştırma sağlayıcısı
 - `app/lib/types.ts`: kriter ve profil veri modeli
-- `migrations/0001_admin.sql`, `0002_competition_workflow.sql`, `0003_application_teams_and_history.sql`: D1 şema geçmişi
+- `migrations/0001_admin.sql` … `0005_final_workflow.sql`: D1 şema geçmişi (5 göç)
 - `tools/create_sample_pdf.py`: sentetik PDF üreticisi
 - `DESIGN.md`: arayüz tasarım sistemi
 - `PRODUCT.md`: ürün kapsamı ve değişmez ilkeler
+- `PROJE_DURUMU.md`: güncel durum, ölçüm sonuçları ve eksik iş listesi
+- `NIHAI_SISTEM_AKISI.md`: roller, akış ve veritabanı mimarisi
 
 ## Karşılaştırma testi
 

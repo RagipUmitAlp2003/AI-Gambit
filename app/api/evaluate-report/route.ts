@@ -533,7 +533,12 @@ ${profile.templateProfile?.provided
           signal: AbortSignal.timeout(150_000),
         });
         if (response.ok) { payload = await response.json(); break; }
-        lastStatus = response.status === 429 ? 429 : 502;
+        // 401/403 kota değil kimlik sorunudur; mesajı ayırt edilebilir kalsın.
+        lastStatus = response.status === 429
+          ? 429
+          : response.status === 401 || response.status === 403
+            ? response.status
+            : 502;
         const error = await response.json().catch(() => ({})) as { error?: { message?: string } };
         lastDetail = error.error?.message || `HTTP ${response.status}`;
         if (![429, 500, 502, 503, 504].includes(response.status)) break;
@@ -546,8 +551,16 @@ ${profile.templateProfile?.provided
     if (!payload) {
       console.error("Katılımcı raporu AI analizi başarısız:", { status: lastStatus, detail: lastDetail });
       recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true });
-      const message = lastStatus === 504 ? "AI modeli zaman sınırı içinde yanıt vermedi." : "AI rapor analizi tamamlanamadı. Lütfen yeniden deneyin.";
-      return Response.json({ error: message }, { status: lastStatus });
+      const upstreamAuthFailure = lastStatus === 401 || lastStatus === 403;
+      const message = lastStatus === 504
+        ? "AI modeli zaman sınırı içinde yanıt vermedi."
+        : lastStatus === 429
+          ? "AI servisinin geçici kullanım sınırına ulaşıldı. Yaklaşık bir dakika sonra yeniden deneyin."
+        : upstreamAuthFailure
+          ? "AI servisi anahtarı reddetti (kimlik doğrulama hatası). Bu bir kota sorunu değildir: GEMINI_API_KEY geçersiz, süresi dolmuş ya da Gemini API için yetkili değil."
+        : "AI rapor analizi tamamlanamadı. Lütfen yeniden deneyin.";
+      // Oturum katmanı 401'i "yeniden giriş yap" saydığı için 502 ile iletilir.
+      return Response.json({ error: message }, { status: upstreamAuthFailure ? 502 : lastStatus });
     }
 
     const rawText = extractGeminiText(payload);

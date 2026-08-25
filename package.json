@@ -13,6 +13,7 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "test": "npm run check:repo-safety && npm run test:regressions && npm run test:scoring",
     "check:repo-safety": "node tools/check_repo_safety.mjs",
+    "check:gemini": "node tools/check_gemini_access.mjs",
     "test:regressions": "node --experimental-strip-types tools/regression-tests.mjs",
     "test:scoring": "node --test tools/*.test.ts",
     "test:quality:saved": "node tools/verify_saved_quality.mjs",
