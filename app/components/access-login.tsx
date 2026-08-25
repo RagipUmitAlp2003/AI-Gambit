@@ -3,14 +3,15 @@
 import { useEffect, useState } from "react";
 import { adminApi } from "../lib/admin-client";
 import type { BootstrapStatus } from "../lib/admin-client";
-import { ROLES } from "../lib/admin-roles";
+import { PARTICIPANT_ROLE, ROLES } from "../lib/admin-roles";
 import type { AdminAccount, RoleCode } from "../lib/admin-types";
 import { workflowApi } from "../lib/workflow-client";
 
 type Props = { onSignedIn: (account: AdminAccount) => void | Promise<void> };
 type Audience = "admin" | "participant";
 
-const QUICK_ROLES = ROLES.filter((role) => role.code !== "03");
+/** Yarışmacı yönetim girişinde listelenmez; kendi sekmesinden girer. */
+const QUICK_ROLES = ROLES.filter((role) => role.code !== PARTICIPANT_ROLE);
 
 export default function AccessLogin({ onSignedIn }: Props) {
   const [audience, setAudience] = useState<Audience>("admin");
@@ -67,7 +68,7 @@ export default function AccessLogin({ onSignedIn }: Props) {
     setError("");
     try {
       const result = await adminApi.login(email.trim(), password);
-      if (result.account.roleCode !== "03") {
+      if (result.account.roleCode !== PARTICIPANT_ROLE) {
         await adminApi.logout();
         throw new Error("Bu hesap yarışmacı hesabı değil. Yönetici girişini kullanın.");
       }
@@ -92,7 +93,7 @@ export default function AccessLogin({ onSignedIn }: Props) {
   async function participantQuickLogin() {
     setBusy(true);
     setError("");
-    try { await onSignedIn((await adminApi.devLogin("03")).account); }
+    try { await onSignedIn((await adminApi.devLogin(PARTICIPANT_ROLE)).account); }
     catch (caught) { setError(caught instanceof Error ? caught.message : "Deneme girişi tamamlanamadı."); }
     finally { setBusy(false); }
   }
@@ -108,7 +109,7 @@ export default function AccessLogin({ onSignedIn }: Props) {
         fullName: bootstrap.fullName.trim(),
         email: bootstrap.email.trim(),
       });
-      setNotice(`Baş Yönetici hesabı oluşturuldu. Tek kullanımlık şifre: ${result.oneTimePassword}`);
+      setNotice(`Moderatör hesabı oluşturuldu. Tek kullanımlık şifre: ${result.oneTimePassword}`);
       setStatus((current) => current ? { ...current, required: false } : current);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "İlk hesap oluşturulamadı.");
@@ -242,7 +243,7 @@ export default function AccessLogin({ onSignedIn }: Props) {
 
             {status?.required && status.tokenConfigured ? (
               <details className="real-login-disclosure setup-disclosure">
-                <summary>İlk Baş Yönetici hesabını oluştur</summary>
+                <summary>İlk Moderatör hesabını oluştur</summary>
                 <form onSubmit={createFirstAdmin}>
                   <label className="field">
                     <span className="field-label">Kurulum anahtarı</span>

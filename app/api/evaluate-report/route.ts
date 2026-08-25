@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { requireRoles } from "../../lib/admin-guard";
+import { requirePermission } from "../../lib/admin-guard";
 import { criterionEffectOf, criterionEliminates, maxRawScoreOf } from "../../lib/evaluation-summary";
 import { validateProfileExport } from "../../lib/profile-loader";
 import { acquireAnalysisPermit, requestBodyTooLarge } from "../../lib/request-guard";
@@ -403,7 +403,7 @@ function cachedResponse(cached: CachedEvaluation, file: File, totalMs: number): 
 }
 
 export async function POST(request: Request) {
-  const auth = await requireRoles(request, ["00", "02"]);
+  const auth = await requirePermission(request, "run_ai_prescreen");
   if (!auth.ok) return auth.response;
 
   const startedAt = Date.now();

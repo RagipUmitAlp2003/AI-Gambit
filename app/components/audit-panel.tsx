@@ -18,10 +18,17 @@ const ACTION_LABELS: Record<string, string> = {
   account_revoked: "Rol kaldırıldı",
   account_restored: "Hesap yeniden aktifleştirildi",
   account_purged: "Hesap kalıcı silindi",
-  flow_created: "Belge akışı oluşturuldu",
-  flow_updated: "Belge akışı güncellendi",
-  flow_handoff_added: "Belge devri eklendi",
-  flow_deleted: "Belge akışı silindi",
+  participant_registered: "Yarışmacı hesabı açıldı",
+  // Aşama A · profil hazırlama ve ikinci doğrulama
+  profile_submitted_for_review: "Profil hakem incelemesine gönderildi",
+  profile_approved: "Profil hakem tarafından onaylandı",
+  profile_changes_requested: "Hakem profil için düzeltme istedi",
+  // Aşama B–D · başvuru, AI ön değerlendirmesi ve nihai karar
+  application_submitted: "Yarışmacı başvurusu alındı",
+  start_analysis: "AI ön değerlendirmesi başlatıldı",
+  save_evaluation: "AI ön değerlendirmesi kaydedildi",
+  analysis_failed: "AI analizi başarısız oldu",
+  save_review: "Hakem değerlendirmesi kaydedildi",
 };
 
 export default function AuditPanel({ entries }: { entries: AuditEntryView[] }) {
@@ -32,7 +39,7 @@ export default function AuditPanel({ entries }: { entries: AuditEntryView[] }) {
           <span className="section-kicker">Denetim izi</span>
           <h1 id="audit-title">Yönetim işlem kaydı</h1>
           <p>
-            Hesap ve belge akışı üzerindeki kritik işlemler; işlemi yapan, hedef kayıt ve zaman damgasıyla birlikte
+            Hesap yönetimi ve değerlendirme süreci üzerindeki kritik işlemler; işlemi yapan, hedef kayıt ve zaman damgasıyla birlikte
             tutulur. Kayıtlarda şifre, oturum jetonu veya API anahtarı bulunmaz.
           </p>
         </div>

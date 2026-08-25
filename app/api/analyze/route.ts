@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { requireRoles } from "../../lib/admin-guard";
+import { requirePermission } from "../../lib/admin-guard";
 import { acquireAnalysisPermit, requestBodyTooLarge } from "../../lib/request-guard";
 import { sameCriterionCandidate } from "../../lib/criterion-dedupe";
 import { makePageWindows } from "../../lib/document-analysis-strategy";
@@ -809,7 +809,7 @@ function buildResult(extraction: CachedExtraction, diagnostics: AnalysisDiagnost
 }
 
 export async function POST(request: Request) {
-  const auth = await requireRoles(request, ["00", "01"]);
+  const auth = await requirePermission(request, "author_criteria");
   if (!auth.ok) return auth.response;
 
   const startedAt = Date.now();

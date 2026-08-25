@@ -1,16 +1,15 @@
 import { env } from "cloudflare:workers";
-import { isFlowActorRole, isRoleCode } from "./admin-roles";
+import { isRoleCode } from "./admin-roles";
 import type {
   AdminAccount,
-  DocumentFlow,
-  DocumentFlowInput,
-  FlowActorRole,
-  Handoff,
-  HandoffInput,
   MailDelivery,
   MailProvider,
   MailStatus,
   RoleCode,
+  WorkflowEvent,
+  WorkflowEventInput,
+  WorkflowEventName,
+  WorkflowSubject,
 } from "./admin-types";
 import type { PasswordRecord } from "./password";
 
@@ -91,7 +90,65 @@ const SCHEMA = [
     created_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_log (created_at DESC)`,
+  // Olay bazlı süreç zaman çizelgesi; sıralı belge devri modelinin yerini aldı.
+  `CREATE TABLE IF NOT EXISTS workflow_events (
+    id TEXT PRIMARY KEY,
+    subject_type TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    event TEXT NOT NULL,
+    actor_id TEXT,
+    actor_name TEXT NOT NULL DEFAULT 'sistem',
+    actor_role TEXT,
+    detail TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_workflow_events_subject
+   ON workflow_events (subject_type, subject_id, created_at ASC)`,
+  `CREATE INDEX IF NOT EXISTS idx_workflow_events_created
+   ON workflow_events (created_at DESC)`,
+  // Bir kez çalışan veri düzeltmelerinin izi; aynı migration iki kez uygulanmaz.
+  `CREATE TABLE IF NOT EXISTS schema_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+  )`,
 ];
+
+/**
+ * Rol numaralandırması v2 (nihai rol modeli).
+ *
+ * Eski dizilim 03 = Yarışmacı, 04 = Değerlendirme Yöneticisi idi. Nihai modelde
+ * 03 = Değerlendirme Yöneticisi, 04 = Yarışmacı. Kodlar takas edilir; hesaplar,
+ * yarışmalar, kriterler ve değerlendirme kayıtları silinmez.
+ *
+ * Denetim izindeki `actor_role` da aynı takasla düzeltilir: kişi değişmedi,
+ * yalnızca rolün kodu değişti; düzeltilmezse geçmiş kayıtlar yanlış rolü
+ * gösterirdi. Referans SQL: migrations/0004_roles_v2.sql
+ */
+const ROLE_SWAP_MIGRATION = "0004_roles_v2_swap_03_04";
+
+function roleSwapStatements(database: D1Database, table: string, column: string) {
+  return [
+    database.prepare(`UPDATE ${table} SET ${column} = '03__' WHERE ${column} = '03'`),
+    database.prepare(`UPDATE ${table} SET ${column} = '03' WHERE ${column} = '04'`),
+    database.prepare(`UPDATE ${table} SET ${column} = '04' WHERE ${column} = '03__'`),
+  ];
+}
+
+async function applyRoleMigration(database: D1Database): Promise<void> {
+  const applied = await database
+    .prepare(`SELECT name FROM schema_migrations WHERE name = ?`)
+    .bind(ROLE_SWAP_MIGRATION)
+    .first<{ name: string }>();
+  if (applied) return;
+  await database.batch([
+    ...roleSwapStatements(database, "admin_accounts", "role_code"),
+    ...roleSwapStatements(database, "admin_audit_log", "actor_role"),
+    database
+      .prepare(`INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, ?)`)
+      .bind(ROLE_SWAP_MIGRATION, new Date().toISOString()),
+  ]);
+  console.info(`[migration] ${ROLE_SWAP_MIGRATION} uygulandı: rol 03 ve 04 kodları takas edildi.`);
+}
 
 let schemaPromise: Promise<void> | null = null;
 
@@ -106,7 +163,7 @@ export async function getDatabase(): Promise<D1Database> {
   if (!schemaPromise) {
     schemaPromise = database
       .batch(SCHEMA.map((statement) => database.prepare(statement)))
-      .then(() => undefined)
+      .then(() => applyRoleMigration(database))
       .catch((error: unknown) => {
         // Sonraki istek yeniden denesin; kalıcı hata bırakma.
         schemaPromise = null;
@@ -572,209 +629,100 @@ export async function listMail(limit = 30): Promise<MailDelivery[]> {
   return (result.results ?? []).map(toMail);
 }
 
-type FlowRow = {
+/* ------------------------------------------------------------------------- *
+ * Süreç zaman çizelgesi (olay bazlı)
+ *
+ * Eski tasarımdaki `document_flows` / `document_handoffs` zinciri, belgeyi
+ * 01 → 02 → 03 → 04 sırasıyla devreden bir modeldi ve yeni rol mantığıyla
+ * çelişiyordu. Yerini, her rolün kendi görevini yaptığında düşen olay kaydı
+ * aldı. Tarihsel kayıtlar silinmez; eski tablolar yalnızca okunmaz duruma
+ * gelir (bkz. migrations/0004_roles_v2.sql).
+ * ------------------------------------------------------------------------- */
+
+type WorkflowEventRow = {
   id: string;
-  competition: string;
-  title: string;
-  author_name: string;
-  summary: string;
-  status: string;
-  final_note: string;
-  final_document: string;
-  final_updated_at: string | null;
+  subject_type: string;
+  subject_id: string;
+  event: string;
+  actor_id: string | null;
+  actor_name: string;
+  actor_role: string | null;
+  detail: string;
   created_at: string;
-  updated_at: string;
 };
 
-type HandoffRow = {
-  id: string;
-  flow_id: string;
-  step_order: number;
-  from_role: string;
-  from_name: string;
-  to_role: string;
-  to_name: string;
-  note: string;
-  handed_at: string;
-};
-
-function toHandoff(row: HandoffRow): Handoff {
+function toWorkflowEvent(row: WorkflowEventRow): WorkflowEvent {
   return {
     id: row.id,
-    order: row.step_order,
-    fromRole: (isFlowActorRole(row.from_role) ? row.from_role : "author") as FlowActorRole,
-    fromName: row.from_name,
-    toRole: (isRoleCode(row.to_role) ? row.to_role : "01") as RoleCode,
-    toName: row.to_name,
-    note: row.note,
-    handedAt: row.handed_at,
-  };
-}
-
-function toFlow(row: FlowRow, handoffs: Handoff[]): DocumentFlow {
-  return {
-    id: row.id,
-    competition: row.competition,
-    title: row.title,
-    authorName: row.author_name,
-    summary: row.summary,
-    status: row.status === "completed" ? "completed" : "in_progress",
-    finalNote: row.final_note,
-    finalDocument: row.final_document,
-    finalUpdatedAt: row.final_updated_at,
+    subjectType: row.subject_type === "profile" ? "profile" : "application",
+    subjectId: row.subject_id,
+    event: row.event as WorkflowEventName,
+    actorId: row.actor_id,
+    actorName: row.actor_name,
+    actorRole: isRoleCode(row.actor_role) ? row.actor_role : null,
+    detail: row.detail,
     createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    handoffs,
   };
 }
 
-export async function listFlows(): Promise<DocumentFlow[]> {
-  const database = await getDatabase();
-  const [flowResult, handoffResult] = await database.batch<FlowRow | HandoffRow>([
-    database.prepare(`SELECT * FROM document_flows ORDER BY competition ASC, created_at DESC`),
-    database.prepare(`SELECT * FROM document_handoffs ORDER BY flow_id ASC, step_order ASC`),
-  ]);
-
-  const grouped = new Map<string, Handoff[]>();
-  for (const row of (handoffResult.results ?? []) as HandoffRow[]) {
-    const list = grouped.get(row.flow_id) ?? [];
-    list.push(toHandoff(row));
-    grouped.set(row.flow_id, list);
-  }
-
-  return ((flowResult.results ?? []) as FlowRow[]).map((row) => toFlow(row, grouped.get(row.id) ?? []));
-}
-
-export async function findFlow(id: string): Promise<DocumentFlow | null> {
-  const database = await getDatabase();
-  const row = await database.prepare(`SELECT * FROM document_flows WHERE id = ?`).bind(id).first<FlowRow>();
-  if (!row) return null;
-  const handoffs = await database
-    .prepare(`SELECT * FROM document_handoffs WHERE flow_id = ? ORDER BY step_order ASC`)
-    .bind(id)
-    .all<HandoffRow>();
-  return toFlow(row, (handoffs.results ?? []).map(toHandoff));
-}
-
-function handoffStatements(
-  database: D1Database,
-  flowId: string,
-  handoffs: HandoffInput[],
-  startOrder: number,
-) {
-  return handoffs.map((handoff, index) =>
-    database
+/**
+ * Süreç olayını yazar. Zaman çizelgesi bu kayıtlardan üretilir; hakemin AI
+ * puanını değiştirmesi gibi manuel müdahaleler `detail` alanında gerekçesiyle
+ * saklanır. Olay yazımı asla ana işlemi düşürmez.
+ */
+export async function recordWorkflowEvent(input: WorkflowEventInput): Promise<void> {
+  try {
+    const database = await getDatabase();
+    await database
       .prepare(
-        `INSERT INTO document_handoffs (id, flow_id, step_order, from_role, from_name, to_role, to_name, note, handed_at)
+        `INSERT INTO workflow_events (id, subject_type, subject_id, event, actor_id, actor_name, actor_role, detail, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         crypto.randomUUID(),
-        flowId,
-        startOrder + index,
-        handoff.fromRole,
-        handoff.fromName.trim(),
-        handoff.toRole,
-        handoff.toName.trim(),
-        (handoff.note ?? "").trim(),
-        handoff.handedAt || nowIso(),
-      ),
-  );
-}
-
-export async function insertFlow(input: DocumentFlowInput): Promise<DocumentFlow> {
-  const database = await getDatabase();
-  const id = crypto.randomUUID();
-  const timestamp = nowIso();
-  const finalDocument = (input.finalDocument ?? "").trim();
-
-  await database.batch([
-    database
-      .prepare(
-        `INSERT INTO document_flows
-          (id, competition, title, author_name, summary, status, final_note, final_document, final_updated_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        input.subjectType,
+        input.subjectId,
+        input.event,
+        input.actor?.id ?? null,
+        input.actor?.fullName ?? "sistem",
+        input.actor?.roleCode ?? null,
+        (input.detail ?? "").slice(0, 1_000),
+        nowIso(),
       )
-      .bind(
-        id,
-        input.competition.trim(),
-        (input.title ?? "").trim(),
-        input.authorName.trim(),
-        input.summary.trim(),
-        input.status ?? "in_progress",
-        (input.finalNote ?? "").trim(),
-        finalDocument,
-        finalDocument ? timestamp : null,
-        timestamp,
-        timestamp,
-      ),
-    ...handoffStatements(database, id, input.handoffs ?? [], 1),
-  ]);
-
-  const flow = await findFlow(id);
-  if (!flow) throw new Error("Belge akışı kaydedildi ancak geri okunamadı.");
-  return flow;
+      .run();
+  } catch (error) {
+    console.error("[timeline] olay yazılamadı", error);
+  }
 }
 
-/**
- * Belge künyesini günceller ve YALNIZCA yeni devirleri ekler.
- * Kayıtlı devir geçmişi değiştirilemez veya silinemez; `input.handoffs`
- * içindeki kimliği olan satırlar yok sayılır.
- */
-export async function updateFlow(id: string, input: DocumentFlowInput): Promise<DocumentFlow | null> {
-  const database = await getDatabase();
-  const current = await database
-    .prepare(`SELECT final_document, final_updated_at FROM document_flows WHERE id = ?`)
-    .bind(id)
-    .first<{ final_document: string; final_updated_at: string | null }>();
-  if (!current) return null;
-
-  const orderRow = await database
-    .prepare(`SELECT COALESCE(MAX(step_order), 0) AS last FROM document_handoffs WHERE flow_id = ?`)
-    .bind(id)
-    .first<{ last: number }>();
-  const appended = (input.handoffs ?? []).filter((handoff) => !handoff.id);
-
-  const timestamp = nowIso();
-  const finalDocument = (input.finalDocument ?? "").trim();
-  // Nihai belge değişmediyse "son güncelleme" damgası korunur.
-  const finalUpdatedAt = !finalDocument
-    ? null
-    : finalDocument === current.final_document
-      ? (current.final_updated_at ?? timestamp)
-      : timestamp;
-
-  await database.batch([
-    database
-      .prepare(
-        `UPDATE document_flows
-         SET competition = ?, title = ?, author_name = ?, summary = ?, status = ?,
-             final_note = ?, final_document = ?, final_updated_at = ?, updated_at = ?
-         WHERE id = ?`,
-      )
-      .bind(
-        input.competition.trim(),
-        (input.title ?? "").trim(),
-        input.authorName.trim(),
-        input.summary.trim(),
-        input.status ?? "in_progress",
-        (input.finalNote ?? "").trim(),
-        finalDocument,
-        finalUpdatedAt,
-        timestamp,
-        id,
-      ),
-    ...handoffStatements(database, id, appended, (orderRow?.last ?? 0) + 1),
-  ]);
-
-  return findFlow(id);
+/** Birden çok olayı tek turda yazar (ör. hakem kararı + puan düzeltmeleri). */
+export async function recordWorkflowEvents(inputs: WorkflowEventInput[]): Promise<void> {
+  for (const input of inputs) await recordWorkflowEvent(input);
 }
 
-export async function deleteFlow(id: string): Promise<boolean> {
+export async function listWorkflowEvents(
+  subjectType: WorkflowSubject,
+  subjectId: string,
+  limit = 200,
+): Promise<WorkflowEvent[]> {
   const database = await getDatabase();
-  const [, flowResult] = await database.batch([
-    database.prepare(`DELETE FROM document_handoffs WHERE flow_id = ?`).bind(id),
-    database.prepare(`DELETE FROM document_flows WHERE id = ?`).bind(id),
-  ]);
-  return Boolean(flowResult.meta.changes);
+  const result = await database
+    .prepare(
+      `SELECT * FROM workflow_events
+       WHERE subject_type = ? AND subject_id = ?
+       ORDER BY created_at ASC LIMIT ?`,
+    )
+    .bind(subjectType, subjectId, limit)
+    .all<WorkflowEventRow>();
+  return (result.results ?? []).map(toWorkflowEvent);
+}
+
+/** Operasyon panosunun "son hareketler" akışı. */
+export async function listRecentWorkflowEvents(limit = 60): Promise<WorkflowEvent[]> {
+  const database = await getDatabase();
+  const result = await database
+    .prepare(`SELECT * FROM workflow_events ORDER BY created_at DESC LIMIT ?`)
+    .bind(limit)
+    .all<WorkflowEventRow>();
+  return (result.results ?? []).map(toWorkflowEvent);
 }

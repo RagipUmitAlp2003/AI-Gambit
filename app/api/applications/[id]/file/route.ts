@@ -1,10 +1,10 @@
-import { handleError, jsonError, requireRoles } from "../../../../lib/admin-guard";
+import { handleError, jsonError, requirePermission } from "../../../../lib/admin-guard";
 import { applicationFileKey, findApplication, reportBucket } from "../../../../lib/workflow-db";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
 export async function GET(request: Request, context: RouteContext): Promise<Response> {
-  const auth = await requireRoles(request, ["00", "02", "03"]);
+  const auth = await requirePermission(request, "read_application_file");
   if (!auth.ok) return auth.response;
   try {
     const id = (await context.params).id;

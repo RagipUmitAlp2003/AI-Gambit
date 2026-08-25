@@ -1,5 +1,6 @@
 import { ConflictError, DatabaseUnavailableError, findSessionAccount } from "./admin-db";
-import { isRoleCode } from "./admin-roles";
+import { ASSIGNABLE_ROLE_CODES, isRoleCode } from "./admin-roles";
+import { PERMISSIONS, type Permission } from "./authorization";
 import type { AdminAccount, RoleCode } from "./admin-types";
 import { AuthConfigError, authConfigured, hashToken, readSignedToken } from "./session";
 
@@ -85,9 +86,17 @@ export async function requireRoles(request: Request, roles: RoleCode[]): Promise
   return result;
 }
 
-/** Yönetim işlemleri yalnızca aktif Rol 00 hesabına açıktır. */
+/**
+ * İzin adı üzerinden yetki kontrolü. Rol listeleri route dosyalarında
+ * tekrarlanmaz; tek kaynak `app/lib/authorization.ts` içindeki matristir.
+ */
+export function requirePermission(request: Request, permission: Permission): Promise<AuthResult> {
+  return requireRoles(request, [...PERMISSIONS[permission]]);
+}
+
+/** Hesap ve rol yönetimi yalnızca aktif Rol 00 (Moderatör) hesabına açıktır. */
 export function requireModerator(request: Request): Promise<AuthResult> {
-  return requireRoles(request, ["00"]);
+  return requirePermission(request, "manage_accounts");
 }
 
 export function handleError(error: unknown): Response {
@@ -152,10 +161,13 @@ export function assertEmail(value: string): string {
   return email;
 }
 
-/** Rol kodu allowlist kontrolü; 05, admin, -1 gibi değerler reddedilir. */
+/**
+ * Rol kodu allowlist kontrolü; 05, admin, -1 gibi değerler reddedilir.
+ * Yarışmacı (04) moderatör tarafından atanmaz; kendi kaydını açar.
+ */
 export function assertRoleCode(value: unknown, label = "Rol numarası"): RoleCode {
-  if (!isRoleCode(value) || value === "03") {
-    throw new ValidationError(`${label} geçersiz. İzin verilen yönetici rolleri: 00, 01, 02, 04.`);
+  if (!isRoleCode(value) || !ASSIGNABLE_ROLE_CODES.includes(value)) {
+    throw new ValidationError(`${label} geçersiz. İzin verilen yönetici rolleri: ${ASSIGNABLE_ROLE_CODES.join(", ")}.`);
   }
   return value;
 }

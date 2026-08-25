@@ -7,15 +7,24 @@ import { COMPETITIONS } from "../lib/competitions";
 import type { AdminAccount } from "../lib/admin-types";
 import { formatDateTime } from "../lib/admin-client";
 import { workflowApi } from "../lib/workflow-client";
-import type { CompetitionApplication } from "../lib/workflow-types";
+import { APPLICATION_STATUS_LABELS, type CompetitionApplication } from "../lib/workflow-types";
 
 type ParticipantView = "competitions" | "applications";
 
+/**
+ * Yarışmacı (Rol 04) portalı.
+ *
+ * Yapabileceği tek işlem: yarışmayı seçmek, raporunu yüklemek, başvurmak ve
+ * kendi başvurusunun durumunu izlemek. Kriter, şartname, AI ön değerlendirmesi
+ * ve hakem kararı bu ekrandan değiştirilemez; başka yarışmacının başvurusu
+ * sunucu tarafında da bu hesaba hiç gönderilmez.
+ */
+
 const OUTCOME_LABELS: Record<CompetitionApplication["outcome"], string> = {
   pending: "Sonuç henüz açıklanmadı",
-  accepted: "İncelendi ve kabul edildi",
-  rejected: "İncelendi ve reddedildi",
-  revision_required: "İncelendi; hatalar düzeltilmeli",
+  accepted: "Hakem inceledi ve kabul etti",
+  rejected: "Hakem inceledi ve reddetti",
+  revision_required: "Hakem inceledi; hatalar düzeltilmeli",
 };
 
 export default function ParticipantPortal({ account, onSignOut }: { account: AdminAccount; onSignOut: () => void | Promise<void> }) {
@@ -61,7 +70,7 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
       setTeamMembers([""]);
       setFile(null);
       if (inputRef.current) inputRef.current.value = "";
-      setNotice("Başvurunuz alındı. AI analizi yalnızca hakem başlattığında çalışacak.");
+      setNotice("Başvurunuz alındı. AI ön değerlendirmesi hakem tarafından başlatılır; nihai kararı hakem verir.");
       setView("applications");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Başvuru gönderilemedi.");
@@ -84,7 +93,7 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
 
       {view === "competitions" ? (
         <section className="participant-workspace" aria-labelledby="competition-apply-title">
-          <header><span className="section-kicker">Yeni başvuru</span><h1 id="competition-apply-title">Yarışmanı seç, raporunu gönder</h1><p>PDF yalnızca başvuru havuzuna alınır. Değerlendirmeyi hakem istediği zaman başlatır.</p></header>
+          <header><span className="section-kicker">Yeni başvuru</span><h1 id="competition-apply-title">Yarışmanı seç, raporunu gönder</h1><p>PDF yalnızca başvuru havuzuna alınır. AI ön değerlendirmesini hakem başlatır, nihai kararı yine hakem verir.</p></header>
           <div className="participant-apply-form">
             <div className="participant-identity-grid">
               <label className="field"><span className="field-label">Başvuru sahibi adı soyadı</span><input value={applicantFullName} maxLength={120} onChange={(event) => setApplicantFullName(event.target.value)} autoComplete="name" /></label>
@@ -114,11 +123,11 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
         </section>
       ) : (
         <section className="participant-workspace" aria-labelledby="my-applications-title">
-          <header><span className="section-kicker">İşlemlerim</span><h1 id="my-applications-title">Başvurularım</h1><p>Gönderdiğiniz PDF&apos;leri, değerlendirme durumunu ve hakem onaylı geri bildirimi burada izleyin.</p></header>
+          <header><span className="section-kicker">İşlemlerim</span><h1 id="my-applications-title">Başvurularım</h1><p>Gönderdiğiniz PDF&apos;leri, başvuru durumunu ve hakem onaylı geri bildirimi burada izleyin.</p></header>
           <div className="participant-application-list">
             {applications.map((application) => (
               <article key={application.id}>
-                <div className="application-line"><div><span>{application.status === "completed" ? "İnceleme sonucu" : "Gönderildi"}</span><h2>{application.competitionName}</h2><p>{application.teamName} · {application.fileName ?? "Başvuru PDF'i"} · {formatDateTime(application.submittedAt)}</p>{application.status === "completed" ? <strong className={`application-outcome ${application.outcome}`}>{OUTCOME_LABELS[application.outcome]}</strong> : null}</div><a href={`/api/applications/${application.id}/file`} target="_blank" rel="noreferrer" className="secondary-button">PDF&apos;i aç</a></div>
+                <div className="application-line"><div><span>{APPLICATION_STATUS_LABELS[application.status]}</span><h2>{application.competitionName}</h2><p>{application.teamName} · {application.fileName ?? "Başvuru PDF'i"} · {formatDateTime(application.submittedAt)}</p>{application.status === "completed" ? <strong className={`application-outcome ${application.outcome}`}>{OUTCOME_LABELS[application.outcome]}</strong> : null}</div><a href={`/api/applications/${application.id}/file`} target="_blank" rel="noreferrer" className="secondary-button">PDF&apos;i aç</a></div>
                 {application.status === "completed" && application.outcomeNote ? <p className="participant-outcome-note">{application.outcomeNote}</p> : null}
                 {application.status === "completed" && application.review?.feedbackApproved ? (
                   <div className="participant-result">
@@ -126,7 +135,7 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
                     <section><strong>Gelişime açık alanlar</strong><ul>{application.review.finalFeedback.improvements.map((item) => <li key={item}>{item}</li>)}</ul></section>
                     <section><strong>Öneriler</strong><ul>{application.review.finalFeedback.suggestions.map((item) => <li key={item}>{item}</li>)}</ul></section>
                   </div>
-                ) : <p className="application-wait-note">Sonuç, hakem değerlendirmeyi tamamlayıp geri bildirimi onayladığında burada açılır.</p>}
+                ) : <p className="application-wait-note">Sonuç, hakem nihai değerlendirmeyi tamamlayıp geri bildirimi onayladığında burada açılır. AI ön değerlendirmesi tek başına sonuç değildir.</p>}
               </article>
             ))}
             {!applications.length ? <div className="participant-empty"><strong>Henüz başvurunuz yok</strong><p>Yarışmalar sekmesinden ilk başvurunuzu oluşturabilirsiniz.</p></div> : null}

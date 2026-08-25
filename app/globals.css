@@ -255,9 +255,9 @@
 .participant-result ul { margin: 9px 0 0; padding-left: 17px; }
 .participant-result li { margin: 4px 0; color: var(--ink-soft); font-size: 10.5px; line-height: 1.5; }
 .application-outcome { display: inline-flex; width: fit-content; margin-top: 9px; padding: 5px 8px; border-radius: 999px; color: var(--ink); background: #eaf0f1; font-size: 10px; }
-.application-outcome.accepted { color: var(--success); background: #e5f5ed; }
-.application-outcome.rejected { color: var(--danger); background: #f8e9e7; }
-.application-outcome.revision_required { color: var(--warning); background: #fff3d8; }
+.application-outcome.accepted { color: var(--success); background: var(--success-soft); }
+.application-outcome.rejected { color: var(--danger); background: var(--danger-soft); }
+.application-outcome.revision_required { color: var(--amber); background: var(--amber-soft); }
 .participant-outcome-note { margin: 14px 0 0; padding: 12px 14px; border-radius: 12px; background: #f4f8f8; color: var(--ink-soft); font-size: 11px; line-height: 1.6; }
 .application-wait-note { margin-top: 12px; }
 .participant-empty { margin: 0; padding: 28px 2px; color: var(--muted); }
@@ -324,7 +324,7 @@
 .history-detail p { margin: 0 0 12px; color: var(--ink-soft); font-size: 10.5px; }
 .history-detail ul { display: grid; gap: 0; margin: 0; padding: 0; border-top: 1px solid var(--line); list-style: none; }
 .history-detail li { display: grid; grid-template-columns: 52px minmax(0,1fr) auto; gap: 12px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); }
-.history-status { width: fit-content; padding: 4px 7px; border-radius: 999px; background: #fff3d8; color: var(--warning) !important; font-weight: 800; }
+.history-status { width: fit-content; padding: 4px 7px; border-radius: 999px; background: var(--amber-soft); color: var(--amber) !important; font-weight: 800; }
 .history-status.approved { background: #e5f5ed; color: var(--success) !important; }
 
 .judge-project-layout { display: grid; grid-template-columns: minmax(220px,.7fr) minmax(0,1.8fr); gap: 24px; align-items: start; }
@@ -505,6 +505,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .status-chip { display: inline-flex; align-items: center; min-height: 26px; padding: 4px 9px; border-radius: 999px; font-size: 10px; font-weight: 700; white-space: nowrap; }
 .status-chip.neutral { color: var(--ink-soft); background: #e9eff1; }
 .status-chip.success { color: var(--success); background: var(--success-soft); }
+.status-chip.danger { color: var(--danger); background: var(--danger-soft); }
+.status-chip.warning { color: var(--amber); background: var(--amber-soft); }
 .context-line { max-width: 1280px; margin: 22px auto 0; padding: 0 clamp(24px,4vw,56px); color: #78909a; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; }
 
 .workspace { width: min(1280px,calc(100% - 48px)); margin: 12px auto 48px; border-radius: var(--radius-lg); background: var(--paper); box-shadow: var(--shadow); overflow: hidden; }
@@ -759,6 +761,22 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 .ready-hero .section-kicker { text-align: center; }
 .ready-hero h1 { max-width: 760px; margin-left: auto; margin-right: auto; }
 .ready-hero p { max-width: 680px; margin: 0 auto; color: var(--muted); font-size: 13px; line-height: 1.65; }
+.ready-hero .ready-outcome-line { max-width: none; margin: 0 auto 16px; }
+.outcome-badge { display: inline-flex; align-items: center; gap: 8px; min-height: 30px; padding: 6px 16px; border: 1px solid; border-radius: 999px; font-size: 11.5px; font-weight: 800; letter-spacing: .02em; }
+.ready-hero .ready-outcome-note { max-width: 640px; margin: 18px auto 0; padding: 13px 18px; border-radius: var(--radius-md); background: #f4f8f8; color: var(--ink-soft); font-size: 11.5px; line-height: 1.65; }
+.outcome-accepted .ready-hero .section-kicker { color: var(--success); }
+.outcome-rejected .ready-hero .section-kicker { color: var(--danger); }
+.outcome-revision_required .ready-hero .section-kicker { color: var(--amber); }
+.outcome-pending .ready-hero .section-kicker { color: var(--ink-soft); }
+.outcome-accepted .approval-seal { border-color: #86bea3; color: var(--success); background: var(--success-soft); box-shadow: 0 10px 24px rgba(24,118,77,.12); }
+.outcome-accepted .outcome-badge { border-color: #86bea3; color: var(--success); background: var(--success-soft); }
+.outcome-rejected .approval-seal { border-color: #d6a6a1; color: var(--danger); background: var(--danger-soft); box-shadow: 0 10px 24px rgba(165,58,50,.14); }
+.outcome-rejected .outcome-badge { border-color: #d6a6a1; color: var(--danger); background: var(--danger-soft); }
+.outcome-revision_required .approval-seal { border-color: #e0bb72; color: var(--amber); background: var(--amber-soft); box-shadow: 0 10px 24px rgba(154,91,0,.14); }
+.outcome-revision_required .outcome-badge { border-color: #e0bb72; color: var(--amber); background: var(--amber-soft); }
+.outcome-pending .approval-seal { border-color: var(--line-strong); color: var(--ink-soft); background: #eef3f5; box-shadow: none; }
+.outcome-pending .outcome-badge { border-color: var(--line-strong); color: var(--ink-soft); background: #eef3f5; }
+.ready-workspace .eval-record-picker { width: min(860px,calc(100% - 48px)); margin: 0 auto 18px; }
 .ready-actions { display: flex; justify-content: center; gap: 10px; margin-top: 26px; }
 .profile-sheet { width: min(860px,calc(100% - 48px)); margin: 0 auto; border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; }
 .profile-sheet-header { display: flex; justify-content: space-between; gap: 20px; align-items: center; padding: 18px 22px; background: var(--ink); color: #fff; }
@@ -775,7 +793,8 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 .profile-metrics div { display: grid; gap: 3px; padding: 18px; border-right: 1px solid var(--line); text-align: center; }
 .profile-metrics div:last-child { border-right: 0; }
 .profile-metrics strong { color: var(--teal-deep); font-size: 22px; font-variant-numeric: tabular-nums; }
-.profile-metrics span { color: var(--muted); font-size: 8.5px; }
+.profile-metrics strong small { color: var(--muted); font-size: 13px; font-weight: 600; }
+.profile-metrics span { color: var(--muted); font-size: 9.5px; line-height: 1.4; }
 .profile-footer-note { display: grid; grid-template-columns: 90px minmax(0,1fr); gap: 14px; padding: 16px 22px; }
 .profile-footer-note span { color: var(--teal); font-size: 9px; font-weight: 800; }
 .profile-footer-note p { margin: 0; color: var(--muted); font-size: 10px; }
@@ -1093,3 +1112,85 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
   .profile-metrics div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
   .profile-footer-note { grid-template-columns: 1fr; }
 }
+
+/* ---------------------------------------------------------------------------
+   Nihai rol modeli · yeni süreç ekranları
+   Aşama A hakem doğrulaması, hakem kuyruğu ve olay bazlı zaman çizelgesi.
+   --------------------------------------------------------------------------- */
+
+.application-status.judge_in_review { background: #e6eefb; color: #2c5aa8; }
+.application-status.analyzing { background: #eef1f2; color: var(--ink-soft); }
+
+.sr-only-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* Hakem profil doğrulama */
+.profile-review-workspace { width: min(1080px,100%); margin-top: 34px; padding-top: 30px; border-top: 1px solid var(--line); text-align: left; }
+.role-action-list + .profile-review-workspace { margin-top: 28px; }
+.profile-review-workspace > header { max-width: 760px; }
+.profile-review-workspace h1 { margin: 8px 0 10px; font-size: clamp(24px,2.6vw,34px); letter-spacing: -.03em; }
+.profile-review-workspace > header p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+.profile-review-list { margin-top: 24px; border-top: 1px solid var(--line); }
+.profile-review-list article { border-bottom: 1px solid var(--line); }
+.profile-review-list article.open { background: #fbfdfd; }
+.profile-review-line { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 2px; }
+.profile-review-line > div { display: grid; gap: 5px; min-width: 0; }
+.profile-review-line strong { font-size: 13px; }
+.profile-review-line p { margin: 0; color: var(--ink-soft); font-size: 10.5px; }
+.profile-review-line small { color: var(--muted); font-size: 9.5px; }
+.profile-review-line .status-chip { justify-self: start; }
+
+.profile-review-detail { display: grid; gap: 18px; padding: 4px 2px 24px; }
+.profile-review-criteria { border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+.profile-review-head, .profile-review-row { display: grid; grid-template-columns: minmax(0,1fr) 120px 150px 80px; align-items: center; gap: 12px; padding: 9px 12px; }
+.profile-review-head { background: #f2f6f7; color: var(--muted); font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+.profile-review-row { border-top: 1px solid var(--line); }
+.profile-review-row.inactive { opacity: .55; }
+.profile-review-row input { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; font: inherit; font-size: 11px; }
+.profile-review-row small { color: var(--muted); font-size: 9.5px; }
+.profile-review-row .text-button { justify-self: end; }
+
+.profile-review-add { display: grid; grid-template-columns: minmax(0,1fr) 150px auto; align-items: end; gap: 12px; }
+.profile-review-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+
+/* Hakem kuyruğu */
+.judge-queue { margin-top: 30px; padding-top: 28px; border-top: 1px solid var(--line); text-align: left; }
+.role-action-list + .judge-queue { margin-top: 26px; }
+.judge-queue > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+.judge-queue h2 { margin: 8px 0 6px; font-size: 20px; letter-spacing: -.02em; }
+.judge-queue > header p { margin: 0; max-width: 620px; color: var(--muted); font-size: 11.5px; line-height: 1.6; }
+.judge-queue-list { border-top: 1px solid var(--line); }
+.judge-queue-list article { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px 2px; border-bottom: 1px solid var(--line); }
+.judge-queue-list article > div { display: grid; gap: 5px; min-width: 0; }
+.judge-queue-list strong { font-size: 12px; }
+.judge-queue-list p { margin: 0; color: var(--ink-soft); font-size: 10.5px; }
+.judge-queue-list small { color: var(--muted); font-size: 9.5px; }
+
+/* Operasyon uyarıları ve olay bazlı zaman çizelgesi */
+.operations-alerts { margin-top: 26px; padding: 16px 18px; border-radius: 13px; background: #fdf6ec; }
+.operations-alerts h2 { margin: 0 0 8px; font-size: 13px; }
+.operations-alerts ul { display: grid; gap: 6px; margin: 0; padding-left: 18px; }
+.operations-alerts li { color: var(--ink-soft); font-size: 11px; line-height: 1.55; }
+.operations-alerts .page-note { margin: 0; }
+
+.operations-timeline { margin-top: 32px; padding-top: 28px; border-top: 1px solid var(--line); }
+.operations-timeline h2 { margin: 0 0 4px; font-size: 18px; }
+.operations-timeline > div p { margin: 0 0 14px; color: var(--muted); font-size: 10.5px; }
+.timeline-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.timeline-list li { display: grid; grid-template-columns: 150px minmax(0,1fr); gap: 16px; padding: 11px 2px; border-bottom: 1px solid var(--line); }
+.timeline-time { color: var(--muted); font-size: 9.5px; font-variant-numeric: tabular-nums; }
+.timeline-list li > div { display: grid; gap: 3px; min-width: 0; }
+.timeline-list strong { font-size: 11.5px; }
+.timeline-list small { color: var(--muted); font-size: 9.5px; }
+.timeline-list p { margin: 0; color: var(--ink-soft); font-size: 10.5px; line-height: 1.5; }
+
+@media (max-width: 860px) {
+  .profile-review-head { display: none; }
+  .profile-review-row { grid-template-columns: 1fr; gap: 8px; }
+  .profile-review-row .text-button { justify-self: start; }
+  .profile-review-add { grid-template-columns: 1fr; }
+  .timeline-list li { grid-template-columns: 1fr; gap: 4px; }
+}
+
+/* Bos zaman cizelgesi placeholder'i tek sutuna yayilir. */
+.timeline-list li.page-note { display: block; grid-column: 1 / -1; margin: 0; padding: 14px 2px; }

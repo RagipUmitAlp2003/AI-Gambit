@@ -13,7 +13,7 @@ import { buildFileGateChecks, gateBlocksUpload, type SimilarityPeer } from "../l
 import { evaluateReport } from "../lib/report-evaluator";
 import { workflowApi } from "../lib/workflow-client";
 import { fold } from "../lib/competitions";
-import type { CompetitionApplication } from "../lib/workflow-types";
+import { APPLICATION_STATUS_LABELS, type CompetitionApplication } from "../lib/workflow-types";
 import type {
   CheckStatus,
   FindingStatus,
@@ -35,18 +35,10 @@ const VIEWS = [
 ] as const;
 
 const REPORT_STATUS_LABELS: Record<ReportStatus, string> = {
-  received: "Havuzda · analiz bekliyor",
-  analyzing: "Analiz ediliyor",
-  analyzed: "Analiz edildi · hakem bekliyor",
-  reviewed: "Değerlendirme tamamlandı",
-};
-
-const APPLICATION_STATUS_LABELS: Record<CompetitionApplication["status"], string> = {
-  submitted: "AI analizi bekliyor",
-  analyzing: "AI analizi yapılıyor",
-  awaiting_judge: "Hakem kararı bekliyor",
-  completed: "Değerlendirme tamamlandı",
-  analysis_failed: "Analiz yeniden denenmeli",
+  received: "Havuzda · AI ön değerlendirmesi bekliyor",
+  analyzing: "AI ön değerlendirmesi yapılıyor",
+  analyzed: "AI ön değerlendirmesi tamam · hakem bekliyor",
+  reviewed: "Nihai değerlendirme tamamlandı",
 };
 
 const CHECK_STATUS_LABELS: Record<CheckStatus, string> = {
@@ -63,6 +55,34 @@ const FINDING_STATUS_LABELS: Record<FindingStatus, string> = {
   not_met: "Karşılanmadı",
   not_found: "Raporda bulunamadı",
   needs_human: "Görevli kararı bekliyor",
+};
+
+/** Hakem sonucunun yarışmacıya gösterilen rozet, mühür ve renk karşılığı. */
+const OUTCOME_VIEW: Record<JudgeReview["outcome"], { label: string; seal: string; chip: string; summary: string }> = {
+  accepted: {
+    label: "Kabul edildi",
+    seal: "✓",
+    chip: "success",
+    summary: "Başvuru, uzman hakem tarafından incelendi ve kabul edildi.",
+  },
+  rejected: {
+    label: "Reddedildi",
+    seal: "✕",
+    chip: "danger",
+    summary: "Başvuru, uzman hakem tarafından incelendi ve reddedildi.",
+  },
+  revision_required: {
+    label: "Hatalar düzeltilmeli",
+    seal: "!",
+    chip: "warning",
+    summary: "Başvuru incelendi; aşağıdaki maddeler düzeltilerek yeniden gönderilmelidir.",
+  },
+  pending: {
+    label: "Sonuç bekliyor",
+    seal: "…",
+    chip: "neutral",
+    summary: "Değerlendirme tamamlandı; sonuç henüz kesinleştirilmedi.",
+  },
 };
 
 const VERDICT_LABELS: Record<JudgeDecision["verdict"], string> = {
@@ -1141,16 +1161,22 @@ function ParticipantView({ profile, records, selectedId, onSelect }: {
     ? normalizeFeedback(review.finalFeedback)
     : null;
 
+  const outcome = OUTCOME_VIEW[review.outcome] ?? OUTCOME_VIEW.pending;
+
   return (
-    <section className="workspace ready-workspace" aria-labelledby="participant-title">
+    <section className={`workspace ready-workspace outcome-${review.outcome ?? "pending"}`} aria-labelledby="participant-title">
       <div className="ready-hero">
-        <span className="approval-seal" aria-hidden="true">✓</span>
+        <span className="approval-seal" aria-hidden="true">{outcome.seal}</span>
         <span className="section-kicker">Değerlendirme sonucu</span>
         <h1 id="participant-title">{record.participant}</h1>
+        <p className="ready-outcome-line">
+          <span className="outcome-badge">{outcome.label}</span>
+        </p>
         <p>
           {evaluation.profileRef.competition} · {evaluation.profileRef.reportType} · {evaluation.profileRef.year}.
-          Değerlendirme, uzman hakem tarafından incelenip onaylandı.
+          {" "}{outcome.summary}
         </p>
+        {review.outcomeNote ? <p className="ready-outcome-note">{review.outcomeNote}</p> : null}
       </div>
 
       {completed.length > 1 ? (
@@ -1167,7 +1193,7 @@ function ParticipantView({ profile, records, selectedId, onSelect }: {
       <div className="profile-sheet">
         <div className="profile-sheet-header">
           <div><span>Sonuç</span><strong>{record.fileName}</strong></div>
-          <span className="status-chip success">Hakem onaylı</span>
+          <span className={`status-chip ${outcome.chip}`}>{outcome.label}</span>
         </div>
         <div className="profile-metrics">
           <div>
@@ -1178,15 +1204,8 @@ function ParticipantView({ profile, records, selectedId, onSelect }: {
             <strong>{declaredTotal ?? "—"}</strong>
             <span>resmî azami puan</span>
           </div>
-        </div>
-        {normalized.anomaly ? (
-          <div className="inline-error" role="alert">
-            <strong>Puan anomalisi</strong><span>{normalized.anomaly}</span>
-          </div>
-        ) : null}
-        <div className="profile-metrics">
           <div>
-            <strong>{findings.filter((finding) => finding.status === "met").length}</strong>
+            <strong>{findings.filter((finding) => finding.status === "met").length}<small> / {findings.length}</small></strong>
             <span>karşılanan kriter</span>
           </div>
           <div>
@@ -1194,6 +1213,11 @@ function ParticipantView({ profile, records, selectedId, onSelect }: {
             <span>rapor sayfası</span>
           </div>
         </div>
+        {normalized.anomaly ? (
+          <div className="inline-error" role="alert">
+            <strong>Puan anomalisi</strong><span>{normalized.anomaly}</span>
+          </div>
+        ) : null}
         {feedback ? (
           <div className="eval-participant-feedback">
             <section>
@@ -1282,7 +1306,8 @@ export default function EvaluationApp() {
 
   const counts = useMemo(() => ({
     pool: applications.length,
-    analyzed: applications.filter((item) => item.status === "awaiting_judge" || item.status === "completed").length,
+    // AI ön değerlendirmesi tamamlanan her başvuru; hakem incelemesi sürenler dahil.
+    analyzed: applications.filter((item) => ["awaiting_judge", "judge_in_review", "completed"].includes(item.status)).length,
     completed: applications.filter((item) => item.status === "completed").length,
   }), [applications]);
 

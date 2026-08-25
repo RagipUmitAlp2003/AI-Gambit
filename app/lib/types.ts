@@ -145,6 +145,12 @@ export type AnalysisResult = {
 
 export type ProfileExport = {
   version: "1.0";
+  /**
+   * Dışa aktarım dosyasının kendi bütünlük işareti: yarışma yöneticisi kriter
+   * düzenlemesini bitirmiştir. Süreçteki YAŞAM DÖNGÜSÜ bu alan değildir;
+   * hakem doğrulaması `competition_profiles.status` sütununda tutulur
+   * (bkz. workflow-types.ts · ProfileStatus).
+   */
   status: "approved";
   /** Onay anında üretilen benzersiz kimlik; değerlendirme sonuçlarını bu profile bağlar. Eski profillerde bulunmayabilir. */
   profileId?: string;

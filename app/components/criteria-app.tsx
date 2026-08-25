@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import DocumentLibraryModal from "./document-library-modal";
 import FileBadge from "./file-badge";
@@ -44,7 +45,7 @@ const DEFAULT_SETUP: SetupData = {
 const STEPS = [
   { id: 1, title: "Kaynak belge", short: "Resmî kriter PDF'si" },
   { id: 2, title: "Kriter inceleme", short: "Belgeden çıkan kuralları doğrula" },
-  { id: 3, title: "Profil onayı", short: "Sürümü kaydet" },
+  { id: 3, title: "Hakem onayına gönder", short: "İkinci doğrulama" },
 ] as const;
 
 const TYPE_LABELS: Record<CriterionType, string> = {
@@ -614,7 +615,7 @@ function CriteriaReview({
             <div className="review-queue" role="status">
               <div>
                 <strong>{pendingReview.length} bulgu görevli kararı bekliyor</strong>
-                <p>Bu maddelerde eksik kanıt, anlam farkı, çelişki veya tamamlanmamış doğrulama var. Profili onaylamadan önce kaynak sayfayı kontrol edin.</p>
+                <p>Bu maddelerde eksik kanıt, anlam farkı, çelişki veya tamamlanmamış doğrulama var. Hakem incelemesine göndermeden önce kaynak sayfayı kontrol edin.</p>
               </div>
               <button
                 type="button"
@@ -867,7 +868,7 @@ function CriteriaReview({
           ) : <small className="ready-note">Profil onaya hazır.</small>}
           {approvalError ? <small className="approval-error" role="alert">{approvalError}</small> : null}
         </div>
-        <button type="button" className="primary-button" disabled={!canApprove} onClick={onApprove}>Profili onayla <span>→</span></button>
+        <button type="button" className="primary-button" disabled={!canApprove} onClick={onApprove}>Hakem incelemesine gönder <span>→</span></button>
       </div>
     </section>
   );
@@ -908,12 +909,13 @@ function ProfileReady({
   return (
     <section className="workspace ready-workspace" aria-labelledby="ready-title">
       <div className="ready-hero">
-        <span className="approval-seal" aria-hidden="true">✓</span>
-        <span className="section-kicker">Onaylı değerlendirme profili</span>
-        <h1 id="ready-title">Kurallar artık tek ve izlenebilir bir profilde</h1>
+        <span className="approval-seal" aria-hidden="true">⏳</span>
+        <span className="section-kicker">Hakem onayı bekleniyor</span>
+        <h1 id="ready-title">Profil ikinci doğrulamaya gönderildi</h1>
         <p>
-          {profile.setup.competition} · {profile.setup.reportType} için kriterler yönetici tarafından doğrulandı.
-          Bu profil sonraki aşamada katılımcı raporlarını değerlendirmek için kullanılabilir.
+          {profile.setup.competition} · {profile.setup.reportType} için hazırladığınız kriter ve puan yapısı hakeme iletildi.
+          Hakem şartname uyumunu kontrol edip onayladığında profil değerlendirmede kullanılabilir hâle gelir;
+          düzeltme isterse notu &quot;Profillerim&quot; bölümünde görürsünüz.
         </p>
         <div className="ready-actions">
           <button type="button" className="primary-button" onClick={downloadProfile}>Profil JSON’unu indir</button>
@@ -924,7 +926,7 @@ function ProfileReady({
       <div className="profile-sheet">
         <div className="profile-sheet-header">
           <div><span>Profil kimliği</span><strong>{profile.setup.year} / {profile.setup.stage} / v1.0</strong></div>
-          <span className="status-chip success">Onaylandı</span>
+          <span className="status-chip warning">Hakem onayı bekliyor</span>
         </div>
         <dl className="profile-facts">
           <div><dt>Yarışma</dt><dd>{profile.setup.competition}</dd></div>
@@ -958,10 +960,11 @@ function ProfileReady({
           </p>
         </div>
         <div className="profile-footer-note">
-          <span>Sonraki modül</span>
+          <span>Sonraki adım</span>
           <p>
-            Katılımcı raporundaki kanıtları bu onaylı kriterlerle eşleştirme ve gerekçeli puan önerisi.{" "}
-            <a className="next-module-link" href="/degerlendirme">Değerlendirme Atölyesi’ni aç →</a>
+            Hakem bu profili ikinci aşamada doğrular: eksik kriteri ekleyebilir, yanlışı düzeltebilir,
+            puanlama hatasını giderebilir. Onaydan sonra yarışmacı raporları bu profile göre değerlendirilir.{" "}
+            <Link className="next-module-link" href="/">Onay durumunu izle →</Link>
           </p>
         </div>
       </div>
@@ -1144,12 +1147,12 @@ export default function CriteriaApp() {
       decisionRules: deriveDecisionRules(scopedCriteria, result.scorePlan),
     };
     try {
-      const published = await workflowApi.publishProfile(nextProfile);
+      const published = await workflowApi.submitProfileForReview(nextProfile);
       localStorage.setItem("kriter-atolyesi:last-profile", JSON.stringify(published.profile.profile));
       setProfile(published.profile.profile);
       setStep(3);
     } catch (caught) {
-      setApprovalError(caught instanceof Error ? caught.message : "Profil yayınlanamadı. Bağlantıyı kontrol edip yeniden deneyin.");
+      setApprovalError(caught instanceof Error ? caught.message : "Profil hakem incelemesine gönderilemedi. Bağlantıyı kontrol edip yeniden deneyin.");
     }
   }
 

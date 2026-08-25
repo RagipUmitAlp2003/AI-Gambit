@@ -309,23 +309,33 @@ export default function AdminAccountsPanel({ accounts, roles, mailReady, mail, v
                     {account.createdBy ? <small>Atayan: {account.createdBy}</small> : null}
                   </span>
                   <span role="cell">
-                    <select
-                      value={account.roleCode}
-                      disabled={busy}
-                      onChange={(event) =>
-                        runRowAction(account.id, () => adminApi.changeRole(account.id, event.target.value as RoleCode))
-                      }
-                      aria-label={`${account.fullName} rolü`}
-                    >
-                      {roles.filter((role) => role.assignable).map((role) => (
-                        <option key={role.code} value={role.code}>
-                          {role.code} · {role.title}
-                        </option>
-                      ))}
-                    </select>
-                    {account.status === "revoked" ? (
-                      <small>Rol seçimi hesabı yeniden aktifleştirir.</small>
-                    ) : null}
+                    {roles.find((role) => role.code === account.roleCode)?.assignable === false ? (
+                      // Yarışmacı hesabı yönetici rolüne çevrilmez; kendi kaydıyla açılır.
+                      <>
+                        <span className="fixed-value"><span>{account.roleCode}</span><small>{roleTitle(roles, account.roleCode)}</small></span>
+                        <small>Yarışmacı rolü yönetici rolüne çevrilemez.</small>
+                      </>
+                    ) : (
+                      <>
+                        <select
+                          value={account.roleCode}
+                          disabled={busy}
+                          onChange={(event) =>
+                            runRowAction(account.id, () => adminApi.changeRole(account.id, event.target.value as RoleCode))
+                          }
+                          aria-label={`${account.fullName} rolü`}
+                        >
+                          {roles.filter((role) => role.assignable).map((role) => (
+                            <option key={role.code} value={role.code}>
+                              {role.code} · {role.title}
+                            </option>
+                          ))}
+                        </select>
+                        {account.status === "revoked" ? (
+                          <small>Rol seçimi hesabı yeniden aktifleştirir.</small>
+                        ) : null}
+                      </>
+                    )}
                   </span>
                   <span role="cell">
                     <span className={`status-chip ${account.status === "active" ? "success" : "neutral"}`}>

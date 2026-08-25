@@ -1,5 +1,5 @@
 import { usageSnapshot } from "../../lib/usage-metrics";
-import { requireRoles } from "../../lib/admin-guard";
+import { requirePermission } from "../../lib/admin-guard";
 
 /**
  * Yerel API kullanım özeti: istek sayısı, giriş/çıkış token toplamları,
@@ -7,7 +7,7 @@ import { requireRoles } from "../../lib/admin-guard";
  * üzerinden yapılır; bu uç nokta geliştirme sırasındaki gözlem içindir.
  */
 export async function GET(request: Request) {
-  const auth = await requireRoles(request, ["00", "04"]);
+  const auth = await requirePermission(request, "operations_dashboard");
   if (!auth.ok) return auth.response;
   if (process.env.NODE_ENV === "production" && (process.env.ENABLE_USAGE_METRICS || "off").toLowerCase() !== "on") {
     return Response.json({ error: "Bulunamadı." }, { status: 404 });

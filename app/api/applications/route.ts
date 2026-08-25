@@ -1,5 +1,5 @@
 import { COMPETITIONS } from "../../lib/competitions";
-import { handleError, json, jsonError, requireRoles, ValidationError } from "../../lib/admin-guard";
+import { handleError, json, jsonError, requirePermission, ValidationError } from "../../lib/admin-guard";
 import { createApplication, findLatestProfileForCompetition, listApplications, reportBucket } from "../../lib/workflow-db";
 import { recordAudit } from "../../lib/admin-db";
 
@@ -28,14 +28,14 @@ function readTeamMembers(form: FormData): string[] {
 }
 
 export async function GET(request: Request): Promise<Response> {
-  const auth = await requireRoles(request, ["00", "02", "03", "04"]);
+  const auth = await requirePermission(request, "read_applications");
   if (!auth.ok) return auth.response;
   try { return json({ applications: await listApplications(auth.account) }); }
   catch (error) { return handleError(error); }
 }
 
 export async function POST(request: Request): Promise<Response> {
-  const auth = await requireRoles(request, ["03"]);
+  const auth = await requirePermission(request, "submit_application");
   if (!auth.ok) return auth.response;
   let objectKey = "";
   try {
@@ -71,7 +71,7 @@ export async function POST(request: Request): Promise<Response> {
       mimeType: "application/pdf",
       sizeBytes: file.size,
     });
-    await recordAudit({ actorId: auth.account.id, actorEmail: auth.account.email, actorRole: "03", action: "application_submitted", targetType: "competition_application", targetId: application.id, detail: competitionName }).catch((auditError) => console.error("[audit] application_submitted", auditError));
+    await recordAudit({ actorId: auth.account.id, actorEmail: auth.account.email, actorRole: auth.account.roleCode, action: "application_submitted", targetType: "competition_application", targetId: application.id, detail: competitionName }).catch((auditError) => console.error("[audit] application_submitted", auditError));
     return json({ application }, 201);
   } catch (error) {
     if (objectKey) { try { await reportBucket().delete(objectKey); } catch { /* Asıl hata korunur. */ } }

@@ -5,15 +5,18 @@ import { useCallback, useEffect, useState } from "react";
 import AccessLogin from "./access-login";
 import AdminAccountsPanel from "./admin-accounts-panel";
 import AuditPanel from "./audit-panel";
+import JudgeQueuePanel from "./judge-queue-panel";
 import OperationsPanel from "./operations-panel";
 import ParticipantPortal from "./participant-portal";
+import ProfileReviewPanel from "./profile-review-panel";
 import ManagerProfileHistory from "./manager-profile-history";
 import { AdminApiError, adminApi } from "../lib/admin-client";
 import type { AuditEntryView } from "../lib/admin-client";
-import { ROLES, roleByCode } from "../lib/admin-roles";
-import type { AdminAccount, MailDelivery } from "../lib/admin-types";
+import { PARTICIPANT_ROLE, ROLES, roleByCode } from "../lib/admin-roles";
+import type { AdminAccount, MailDelivery, RoleCode } from "../lib/admin-types";
+import { can } from "../lib/authorization";
 
-type Section = "overview" | "extractions" | "approved" | "accounts" | "audit";
+type Section = "overview" | "profile-review" | "extractions" | "profiles" | "accounts" | "audit";
 
 type AdminData = {
   accounts: AdminAccount[];
@@ -25,28 +28,32 @@ type AdminData = {
 
 const EMPTY: AdminData = { accounts: [], mail: [], audit: [], mailReady: false, production: false };
 
-const ROLE_WORKSPACES = {
+/**
+ * Rol çalışma alanları. Başlıklar merkezi rol katalogundan (admin-roles.ts)
+ * beslenir; bu tablo yalnızca o rolün ekranda ne yaptığını anlatır.
+ */
+const ROLE_WORKSPACES: Record<RoleCode, { title: string; intro: string }> = {
   "00": {
-    title: "Baş yönetim merkezi",
-    intro: "Hesap ve yetki yönetimini yürütün; yarışma hazırlığı ile değerlendirme alanlarına kontrollü geçiş yapın.",
+    title: "Sistem yönetimi",
+    intro: "Kullanıcı hesabı açın, rol atayın veya kaldırın, hesapları pasife alın. Değerlendirme kararları bu alandan verilmez.",
   },
   "01": {
     title: "Yarışma hazırlık alanı",
-    intro: "Güncel kriter PDF'sini yükleyin, çıkarımları kaynaklarıyla doğrulayın ve onaylı değerlendirme profilini oluşturun.",
+    intro: "Şartnameyi ve rapor şablonunu yükleyin, kriterleri ve puan yapısını oluşturun, hazırladığınız profili hakem incelemesine gönderin.",
   },
   "02": {
     title: "Hakem çalışma alanı",
-    intro: "Katılımcı raporundaki AI bulgularını ve kanıtları inceleyin; nihai uzman kararını siz verin.",
+    intro: "Yarışma yöneticisinin hazırladığı profili ikinci aşamada doğrulayın; AI ön değerlendirmesini inceleyip nihai kararı siz verin.",
   },
   "03": {
-    title: "Yarışmacı alanı",
-    intro: "Bu rol yönetici panelinde kullanılmaz.",
+    title: "Değerlendirme operasyonları",
+    intro: "AI analiz durumlarını, hakem kuyruğunu ve tamamlanma oranını izleyin. Bu alandan kriter, puan veya karar değiştirilemez.",
   },
   "04": {
-    title: "Değerlendirme operasyonları",
-    intro: "Analizlerin ve hakem akışının durumunu izleyin; geciken veya insan incelemesi bekleyen işleri takip edin.",
+    title: "Yarışmacı alanı",
+    intro: "Bu rol yönetim panelinde kullanılmaz; yarışmacı kendi portalını görür.",
   },
-} as const;
+};
 
 export default function ManagementApp() {
   const [session, setSession] = useState<AdminAccount | null>(null);
@@ -56,7 +63,7 @@ export default function ManagementApp() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const isHeadAdmin = session?.roleCode === "00";
+  const isModerator = session?.roleCode === "00";
 
   const loadAdminData = useCallback(async (account: AdminAccount) => {
     if (account.roleCode !== "00") {
@@ -124,18 +131,28 @@ export default function ManagementApp() {
     return <main className="session-check"><span className="session-spinner" /><p>Güvenli oturum denetleniyor…</p></main>;
   }
   if (!session) return <AccessLogin onSignedIn={signedIn} />;
-  if (session.roleCode === "03") return <ParticipantPortal account={session} onSignOut={signOut} />;
+  if (session.roleCode === PARTICIPANT_ROLE) return <ParticipantPortal account={session} onSignOut={signOut} />;
 
   const role = roleByCode(session.roleCode);
   const workspace = ROLE_WORKSPACES[session.roleCode];
+  const canAuthorProfile = can(session, "author_profile");
+  const canReviewProfile = can(session, "review_profile");
+  const canJudge = can(session, "final_judgement");
+  const canOpenEvaluation = can(session, "run_ai_prescreen");
+  const canOperate = can(session, "operations_dashboard");
+
+  // Bölümler yetki matrisinden türetilir; hiçbir rol adı burada sabitlenmez.
   const sections: Array<{ id: Section; label: string; detail: string }> = [
     { id: "overview", label: "Çalışma alanım", detail: role?.area ?? "Rol görünümü" },
-    ...(session.roleCode === "00" || session.roleCode === "01" ? [
-      { id: "extractions" as const, label: "Geçmiş ayıklamalar", detail: "Analiz edilen kriter PDF'leri" },
-      { id: "approved" as const, label: "Onayladığı projeler", detail: "Kesinleşen kriter profilleri" },
+    ...(canReviewProfile ? [
+      { id: "profile-review" as const, label: "Profil doğrulama", detail: "Hakem onayı bekleyen değerlendirme profilleri" },
     ] : []),
-    ...(isHeadAdmin ? [
-      { id: "accounts" as const, label: "Hesap ve yetkiler", detail: "Yönetici hesaplarını yönet" },
+    ...(canAuthorProfile ? [
+      { id: "extractions" as const, label: "Geçmiş ayıklamalar", detail: "Analiz edilen şartname PDF'leri" },
+      { id: "profiles" as const, label: "Profillerim", detail: "Hakem onay durumu" },
+    ] : []),
+    ...(isModerator ? [
+      { id: "accounts" as const, label: "Hesap ve yetkiler", detail: "Kullanıcı hesaplarını yönet" },
       { id: "audit" as const, label: "İşlem geçmişi", detail: "Yönetim hareketlerini izle" },
     ] : []),
   ];
@@ -145,7 +162,7 @@ export default function ManagementApp() {
       <aside className="management-sidebar">
         <Link href="/" className="management-brand">
           <span>T3</span>
-          <div><strong>Kriter Atölyesi</strong><small>Yönetim sistemi</small></div>
+          <div><strong>Kriter Atölyesi</strong><small>Değerlendirme karar destek sistemi</small></div>
         </Link>
         <nav aria-label="Yönetim bölümleri">
           {sections.map((item) => (
@@ -170,7 +187,7 @@ export default function ManagementApp() {
           </div>
         </header>
 
-        {data.production && !data.mailReady && isHeadAdmin ? (
+        {data.production && !data.mailReady && isModerator ? (
           <p className="access-warning">Üretim ortamında e-posta sağlayıcısı tanımlı değil; yeni hesap bildirimleri gönderilemez.</p>
         ) : null}
         {error ? <p className="admin-error page-error">{error}</p> : null}
@@ -184,47 +201,52 @@ export default function ManagementApp() {
               <p>{workspace.intro}</p>
             </header>
 
-            <div className="role-action-list">
-              {(session.roleCode === "00" || session.roleCode === "01") ? (
-                <Link href="/kriter-atolyesi" className="role-action primary">
-                  <span>01</span>
-                  <div><strong>Kriter Atölyesi&apos;ni aç</strong><p>Resmî PDF&apos;yi analiz et, kriterleri doğrula ve profili onayla.</p></div>
-                  <b aria-hidden="true">→</b>
-                </Link>
-              ) : null}
-              {(session.roleCode === "00" || session.roleCode === "02") ? (
-                <Link href="/degerlendirme" className="role-action">
-                  <span>02</span>
-                  <div><strong>Değerlendirme Atölyesi&apos;ni aç</strong><p>Katılımcı raporunu, AI bulgularını ve kaynak kanıtlarını incele.</p></div>
-                  <b aria-hidden="true">→</b>
-                </Link>
-              ) : null}
-              {session.roleCode === "04" ? (
-                <OperationsPanel />
-              ) : null}
-            </div>
+            {/* Atölye kısayolları yalnızca o alanda işlem yapabilen rollere gösterilir. */}
+            {canAuthorProfile || canOpenEvaluation ? (
+              <div className="role-action-list">
+                {canAuthorProfile ? (
+                  <Link href="/kriter-atolyesi" className="role-action primary">
+                    <span>01</span>
+                    <div><strong>Kriter Atölyesi&apos;ni aç</strong><p>Şartnameyi analiz et, kriterleri ve puan yapısını doğrula, profili hakem incelemesine gönder.</p></div>
+                    <b aria-hidden="true">→</b>
+                  </Link>
+                ) : null}
+                {canOpenEvaluation ? (
+                  <Link href="/degerlendirme" className="role-action">
+                    <span>02</span>
+                    <div><strong>Değerlendirme Atölyesi&apos;ni aç</strong><p>AI ön değerlendirmesini, kanıtları ve kriter bazlı bulguları inceleyip nihai kararı ver.</p></div>
+                    <b aria-hidden="true">→</b>
+                  </Link>
+                ) : null}
+              </div>
+            ) : null}
+
+            {canReviewProfile ? <ProfileReviewPanel compact onChanged={refresh} /> : null}
+            {canJudge ? <JudgeQueuePanel /> : null}
+            {canOperate ? <OperationsPanel /> : null}
+            {canAuthorProfile ? <ManagerProfileHistory mode="profiles" compact /> : null}
 
             <div className="role-boundary">
               <strong>Bu rolün karar sınırı</strong>
               <p>{role?.summary}</p>
-              {session.roleCode === "02" ? <small>AI sonucu öneridir; nihai değerlendirme hakeme aittir.</small> : null}
-              {session.roleCode === "04" ? <small>Hakem puanı ve nihai karar bu rolden değiştirilemez.</small> : null}
+              {role?.boundary ? <small>{role.boundary}</small> : null}
             </div>
 
-            {isHeadAdmin ? (
-              <>
-                <div className="admin-snapshot">
-                  <div><strong>{data.accounts.filter((item) => item.status === "active").length}</strong><span>aktif yönetici</span></div>
-                  <div><strong>{data.accounts.filter((item) => item.status === "revoked").length}</strong><span>pasif hesap</span></div>
-                  <div><strong>{data.audit.length}</strong><span>yakın işlem kaydı</span></div>
-                </div>
-                <OperationsPanel />
-              </>
+            {isModerator ? (
+              <div className="admin-snapshot">
+                <div><strong>{data.accounts.filter((item) => item.status === "active").length}</strong><span>aktif hesap</span></div>
+                <div><strong>{data.accounts.filter((item) => item.status === "revoked").length}</strong><span>pasif hesap</span></div>
+                <div><strong>{data.audit.length}</strong><span>yakın işlem kaydı</span></div>
+              </div>
             ) : null}
           </section>
         ) : null}
 
-        {!loading && section === "accounts" && isHeadAdmin ? (
+        {!loading && section === "profile-review" && canReviewProfile ? <ProfileReviewPanel onChanged={refresh} /> : null}
+        {!loading && section === "extractions" && canAuthorProfile ? <ManagerProfileHistory mode="extractions" /> : null}
+        {!loading && section === "profiles" && canAuthorProfile ? <ManagerProfileHistory mode="profiles" /> : null}
+
+        {!loading && section === "accounts" && isModerator ? (
           <AdminAccountsPanel
             accounts={data.accounts}
             roles={ROLES}
@@ -235,10 +257,7 @@ export default function ManagementApp() {
           />
         ) : null}
 
-        {!loading && section === "extractions" && (session.roleCode === "00" || session.roleCode === "01") ? <ManagerProfileHistory mode="extractions" /> : null}
-        {!loading && section === "approved" && (session.roleCode === "00" || session.roleCode === "01") ? <ManagerProfileHistory mode="approved" /> : null}
-
-        {!loading && section === "audit" && isHeadAdmin ? <AuditPanel entries={data.audit} /> : null}
+        {!loading && section === "audit" && isModerator ? <AuditPanel entries={data.audit} /> : null}
       </div>
     </div>
   );

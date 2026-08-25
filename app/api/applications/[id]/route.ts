@@ -1,4 +1,4 @@
-import { handleError, json, jsonError, readJson, requireRoles } from "../../../lib/admin-guard";
+import { handleError, json, jsonError, readJson, requirePermission } from "../../../lib/admin-guard";
 import { findApplication, markApplicationAnalyzing, saveApplicationEvaluation, saveApplicationReview } from "../../../lib/workflow-db";
 import type { JudgeReview, ReportEvaluation } from "../../../lib/types";
 import { recordAudit } from "../../../lib/admin-db";
@@ -20,7 +20,7 @@ function validReview(review: JudgeReview): boolean {
 }
 
 export async function GET(request: Request, context: RouteContext): Promise<Response> {
-  const auth = await requireRoles(request, ["00", "02", "03", "04"]);
+  const auth = await requirePermission(request, "read_applications");
   if (!auth.ok) return auth.response;
   try {
     const application = await findApplication((await context.params).id, auth.account);
@@ -28,16 +28,27 @@ export async function GET(request: Request, context: RouteContext): Promise<Resp
   } catch (error) { return handleError(error); }
 }
 
+/**
+ * Başvuru üzerindeki işlemler iki ayrı yetkiye bölünür:
+ *   AI ön değerlendirmesi  (start_analysis / save_evaluation / analysis_failed) → 00, 02
+ *   Nihai uzman kararı     (save_review)                                        → yalnızca 02
+ *
+ * Nihai karar hakem dışında hiçbir role açık değildir; moderatör de veremez.
+ */
 export async function PATCH(request: Request, context: RouteContext): Promise<Response> {
-  const auth = await requireRoles(request, ["00", "02"]);
-  if (!auth.ok) return auth.response;
+  const preflight = await requirePermission(request, "run_ai_prescreen");
+  if (!preflight.ok) return preflight.response;
   try {
     const id = (await context.params).id;
-    if (!await findApplication(id, auth.account)) return jsonError(404, "Başvuru bulunamadı.");
     const body = await readJson(request);
+    const auth = body.action === "save_review"
+      ? await requirePermission(request, "final_judgement")
+      : preflight;
+    if (!auth.ok) return auth.response;
+    if (!await findApplication(id, auth.account)) return jsonError(404, "Başvuru bulunamadı.");
     if (body.action === "start_analysis") {
       const start = await markApplicationAnalyzing(id, auth.account);
-      if (start === "profile_missing") return jsonError(409, "Bu yarışma için henüz onaylanmış kriter profili yok. Önce yarışma yöneticisi profili yayınlamalı.");
+      if (start === "profile_missing") return jsonError(409, "Bu yarışma için hakem onaylı değerlendirme profili yok. Yarışma yöneticisi profili hazırlayıp hakem incelemesine göndermeli, hakem de onaylamalıdır.");
       if (start === "conflict") return jsonError(409, "Bu başvuru başka bir işlemde veya zaten analiz edilmiş.");
     } else if (body.action === "save_evaluation") {
       const evaluation = body.evaluation as ReportEvaluation | undefined;

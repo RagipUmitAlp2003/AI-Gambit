@@ -2,7 +2,14 @@
 
 import type { AdminAccount } from "./admin-types";
 import type { JudgeReview, ProfileExport, ReportEvaluation } from "./types";
-import type { CompetitionApplication, CriteriaExtractionRun, PublishedProfile } from "./workflow-types";
+import type {
+  CompetitionApplication,
+  CompetitionProfile,
+  CriteriaExtractionRun,
+  OperationsSummary,
+  ProfileReviewDecision,
+  TimelineEntry,
+} from "./workflow-types";
 
 export class WorkflowApiError extends Error {
   status: number;
@@ -55,13 +62,23 @@ export const workflowApi = {
       method: "PATCH",
       body: JSON.stringify({ action, ...value }),
     }),
-  profiles: () => jsonRequest<{ profiles: PublishedProfile[] }>("/api/profiles"),
+  profiles: () => jsonRequest<{ profiles: CompetitionProfile[] }>("/api/profiles"),
   extractions: () => jsonRequest<{ extractions: CriteriaExtractionRun[] }>("/api/extractions"),
-  profile: (id: string) => jsonRequest<{ profile: PublishedProfile }>(`/api/profiles?id=${encodeURIComponent(id)}`),
-  publishProfile: (profile: ProfileExport) => jsonRequest<{ profile: PublishedProfile }>("/api/profiles", {
+  profile: (id: string) => jsonRequest<{ profile: CompetitionProfile }>(`/api/profiles?id=${encodeURIComponent(id)}`),
+  /** Yarışma yöneticisi profili hakem incelemesine gönderir; profil bu adımda yürürlüğe girmez. */
+  submitProfileForReview: (profile: ProfileExport) => jsonRequest<{ profile: CompetitionProfile }>("/api/profiles", {
     method: "POST",
     body: JSON.stringify({ profile }),
   }),
+  /** Hakemin ikinci aşama doğrulaması: onay veya düzeltme talebi. */
+  reviewProfile: (input: { id: string; decision: ProfileReviewDecision; note: string; profile?: ProfileExport }) =>
+    jsonRequest<{ profile: CompetitionProfile }>("/api/profiles", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  timeline: (subject: "application" | "profile", id: string) =>
+    jsonRequest<{ timeline: TimelineEntry[] }>(`/api/timeline?subject=${subject}&id=${encodeURIComponent(id)}`),
+  operations: () => jsonRequest<{ summary: OperationsSummary; recent: TimelineEntry[] }>("/api/operations"),
   registerParticipant: (fullName: string, email: string, password: string) =>
     jsonRequest<{ account: AdminAccount; expiresAt: string }>("/api/participant/register", {
       method: "POST",
