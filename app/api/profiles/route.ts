@@ -97,16 +97,39 @@ export async function POST(request: Request): Promise<Response> {
         sourceDocument: { ...profileExport.sourceDocument, fileKey: uploadedKey },
       };
     }
-    const profile = await submitProfileForReview(profileExport, auth.account)
+    const published = await submitProfileForReview(profileExport, auth.account)
       .catch((caught) => {
         if (caught instanceof ProfileOwnershipError) return "forbidden" as const;
         throw caught;
       });
-    if (profile === "forbidden") {
+    if (published === "forbidden") {
       return jsonError(403, "Bu kriter profilini yalnızca onu hazırlayan Yarışma Yöneticisi güncelleyebilir.");
     }
-    await recordAudit({ actorId: auth.account.id, actorEmail: auth.account.email, actorRole: auth.account.roleCode, action: "profile_published", targetType: "competition_profile", targetId: profile.id, detail: profile.competitionName }).catch((auditError) => console.error("[audit] profile_published", auditError));
-    return json({ profile }, 201);
+    const { profile, criteriaVersion, versionCreated, sourceLockReverted } = published;
+    await recordAudit({
+      actorId: auth.account.id,
+      actorEmail: auth.account.email,
+      actorRole: auth.account.roleCode,
+      action: "profile_published",
+      targetType: "competition_profile",
+      targetId: profile.id,
+      detail: `${profile.competitionName} · kriter sürümü v${criteriaVersion.criteriaVersion}`
+        + ` (${criteriaVersion.criteriaCount} kriter, özet ${criteriaVersion.criteriaHash.slice(0, 12)})`
+        + `${versionCreated ? "" : " · içerik değişmedi, sürüm korundu"}`
+        + `${sourceLockReverted.length ? ` · ${sourceLockReverted.length} kriterde kaynak değişikliği reddedildi` : ""}`,
+    }).catch((auditError) => console.error("[audit] profile_published", auditError));
+    return json({
+      profile,
+      criteriaVersion,
+      versionCreated,
+      // İstemci bu uyarıyı gösterir: kaynak alanları salt okunurdur, sunucu
+      // elle yapılan değişiklikleri kabul etmez (madde 12).
+      ...(sourceLockReverted.length ? {
+        sourceLockWarning: `${sourceLockReverted.length} kriterin kaynak sayfası/alıntısı değiştirilemez ve `
+          + `ilk yayımdaki değerine geri alındı: ${sourceLockReverted.slice(0, 5).join(", ")}`
+          + `${sourceLockReverted.length > 5 ? ` ve ${sourceLockReverted.length - 5} kriter daha` : ""}.`,
+      } : {}),
+    }, 201);
   } catch (error) {
     // Profil kaydedilemediyse yüklenen şartname nesnesi geri alınır.
     if (uploadedKey) { try { await reportBucket().delete(uploadedKey); } catch { /* Asıl hata korunur. */ } }

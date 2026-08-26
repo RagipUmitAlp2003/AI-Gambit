@@ -32,6 +32,7 @@ function criterion(patch: Partial<Criterion> = {}): Criterion {
     violationOutcome: "Değerlendirmeye alınmaz.",
     sourcePage: 3,
     sourceText: "Rapor Giriş bölümü ile başlar.",
+    verifiability: "PDF_DENETLENEBILIR",
     active: true,
     origin: "document",
     ...patch,
@@ -161,6 +162,8 @@ test("upgradeLegacyCriterion boş kayıt için güvenli yedekler üretir", () =>
     required: false,
     description: "Kuralın nasıl kontrol edileceğini açıklayın.",
     violationOutcome: "Belgede belirtilmemiş",
+    // Kanıt yeri belirtilmemiş boş kayıt PDF denetlenebilir sayılır (madde 4).
+    verifiability: "PDF_DENETLENEBILIR",
     sourcePage: null,
     sourceText: "",
     active: false,

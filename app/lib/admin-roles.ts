@@ -128,4 +128,11 @@ export const WORKFLOW_EVENT_LABELS: Record<WorkflowEventName, string> = {
   judge_score_adjusted: "Hakem AI kural kararını değiştirdi",
   judge_decision_completed: "Nihai değerlendirme tamamlandı",
   competition_stage_changed: "Yarışma süreci güncellendi",
+  criteria_version_published: "Yeni kriter sürümü yayımlandı",
+  criteria_source_locked: "Kaynak sayfa/alıntı değişikliği reddedildi",
+  competition_activated: "Yarışma aktifleştirildi",
+  competition_deactivated: "Yarışma pasifleştirildi",
+  competition_archived: "Yarışma arşivlendi",
+  application_archived: "Başvuru aktif listeden kaldırıldı",
+  application_restored: "Başvuru aktif listeye geri alındı",
 };

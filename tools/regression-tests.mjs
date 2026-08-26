@@ -306,13 +306,33 @@ console.log("Media resolution regression tests: PASS");
     /\(current_profile_id IS NOT NULL\) DESC/.test(finderBody),
     "Profili olan satır öncelikli seçilmelidir.",
   );
-  assert(/\(status = 'open'\) DESC/.test(finderBody), "Başvuruya açık satır öncelikli seçilmelidir.");
+  // Aktif/pasif anahtarı eklendikten sonra "başvuruya açık" ölçütü hem süreç
+  // durumunu hem AKTİFLİĞİ kapsar; arşivlenmiş satır en sona düşer.
+  assert(
+    /\(status = 'open' AND is_active = 1\) DESC/.test(finderBody),
+    "Başvuruya açık ve aktif satır öncelikli seçilmelidir.",
+  );
+  assert(/\(deleted_at IS NULL\) DESC/.test(finderBody), "Arşivlenmiş satır öncelikli seçilmemelidir.");
 
   const accepts = source.slice(source.indexOf("export async function competitionAcceptsApplications"));
   const acceptsBody = accepts.slice(0, accepts.indexOf("\n/**"));
   assert(
     /status = 'open' AND current_profile_id IS NOT NULL/.test(acceptsBody),
     "Başvuru kabulü, adla eşleşen HERHANGİ bir açık ve profilli satıra bakmalıdır.",
+  );
+  // PASİF yarışma yeni başvuru KABUL ETMEZ (madde 6).
+  assert(
+    /is_active = 1 AND deleted_at IS NULL/.test(acceptsBody),
+    "Pasif veya arşivlenmiş yarışma yeni başvuru kabul etmemelidir.",
+  );
+
+  // Yarışmacının seçim listesi de aynı ölçütü kullanır; ikisi ayrışırsa
+  // yarışmacı listede görüp başvuramaz.
+  const openList = source.slice(source.indexOf("export async function listOpenCompetitions"));
+  const openBody = openList.slice(0, openList.indexOf("\nexport "));
+  assert(
+    /c\.is_active = 1 AND c\.deleted_at IS NULL/.test(openBody),
+    "Pasif yarışma yarışmacının listesinde görünmemelidir.",
   );
 
   // Kök neden: analiz her koşuda yeni yarışma satırı açmamalı.
@@ -325,3 +345,209 @@ console.log("Media resolution regression tests: PASS");
 }
 
 console.log("Language and competition lookup regression tests: PASS");
+
+/*
+ * DEĞERLENDİRME BÜTÜNLÜĞÜ (madde 3)
+ *
+ * İstemci modele profil ya da PDF gönderemez; sunucu zinciri kendisi kurar ve
+ * sonucu kaydetmeden önce kriter sürümünü ve PDF özetini doğrular.
+ */
+{
+  const { readFileSync } = await import("node:fs");
+  const route = readFileSync("app/api/evaluate-report/route.ts", "utf8");
+
+  assert(/formData\.get\("applicationId"\)/.test(route), "Analiz isteği başvuru kimliğine bağlanmalıdır.");
+  assert(/resolveEvaluationContext\(applicationId, auth\.account\)/.test(route), "Bağlam sunucuda çözülmelidir.");
+  assert(/reportBucket\(\)\.get\(context\.fileKey\)/.test(route), "Rapor PDF'i R2'den okunmalıdır.");
+  assert(
+    !/formData\.get\("profile"\)/.test(route),
+    "İstemciden profil ALINMAMALIDIR; kriterler sunucudaki son sürümden gelir.",
+  );
+  assert(
+    !/const file = formData\.get\("file"\)/.test(route),
+    "İstemciden PDF ALINMAMALIDIR; belge R2'deki geçerli sürümdür.",
+  );
+  // Önbellek anahtarı kriter sürümünü ve özetini içermeli: kriterler değişince
+  // eski hakem analizi yeniden kullanılamaz.
+  const cacheBlock = route.slice(route.indexOf("const cacheContext"), route.indexOf("const cacheKey"));
+  assert(/context\.criteriaVersion\.criteriaHash/.test(cacheBlock), "Önbellek anahtarı kriter özetini içermelidir.");
+  assert(/criteriaVersion\.criteriaVersion/.test(cacheBlock), "Önbellek anahtarı kriter sürümünü içermelidir.");
+  assert(/reportHash/.test(cacheBlock), "Önbellek anahtarı katılımcı PDF özetini içermelidir.");
+  assert(/PROMPT_VERSION/.test(cacheBlock), "Önbellek anahtarı istem sürümünü içermelidir.");
+  assert(/PRIMARY_MODEL/.test(cacheBlock), "Önbellek anahtarı modeli içermelidir.");
+
+  const applicationRoute = readFileSync("app/api/applications/[id]/route.ts", "utf8");
+  // Dal gövdesi: yetki ternary'sindeki ilk eşleşme değil, GERÇEK dal aranır.
+  const saveStart = applicationRoute.indexOf('} else if (body.action === "save_evaluation")');
+  const saveBlock = applicationRoute.slice(
+    saveStart,
+    applicationRoute.indexOf('} else if (body.action === "archive_application")', saveStart),
+  );
+  assert(saveStart > 0 && saveBlock.length > 0, "save_evaluation dalı bulunmalı.");
+  assert(/resolveEvaluationContext\(id, auth\.account\)/.test(saveBlock), "Kayıt öncesi bağlam yeniden çözülmelidir.");
+  assert(/criteriaHash !== context\.criteriaVersion\.criteriaHash/.test(saveBlock), "Kriter özeti eşleşmelidir.");
+  assert(/pdfHash !== expectedHash/.test(saveBlock), "PDF özeti eşleşmelidir.");
+  assert(/Kriterler güncellendi, yeniden analiz gerekli/.test(saveBlock), "Uyumsuzlukta açık hata dönmelidir.");
+}
+
+/*
+ * KRİTER SÜRÜMLERİ DEĞİŞMEZDİR (madde 2)
+ *
+ * Yayımlama var olan sürümü GÜNCELLEMEZ; yeni satır açar. Geçmiş
+ * değerlendirmeler kendi sürümüyle korunur.
+ */
+{
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync("app/lib/workflow-db.ts", "utf8");
+  const publish = source.slice(source.indexOf("async function publishCriteriaVersion"));
+  const body = publish.slice(0, publish.indexOf("\nexport "));
+  assert(/INSERT INTO criteria_profile_versions/.test(body), "Yeni sürüm INSERT ile açılmalıdır.");
+  assert(
+    !/UPDATE criteria_profile_versions/.test(source),
+    "Var olan kriter sürümü hiçbir yerde GÜNCELLENMEMELİDİR.",
+  );
+  assert(
+    !/DELETE FROM criteria_profile_versions/.test(source),
+    "Kriter sürümü silinmemelidir; geçmiş denetlenebilir kalmalıdır.",
+  );
+  assert(/criteria_version DESC LIMIT 1/.test(source), "Analiz SON sürümü kullanmalıdır.");
+
+  // Nihai karar, eskimiş analiz üzerine verilemez.
+  const review = source.slice(source.indexOf("export async function saveApplicationReview"));
+  const reviewBody = review.slice(0, review.indexOf("\nexport "));
+  assert(
+    /Kriterler güncellendi, yeniden analiz gerekli/.test(reviewBody),
+    "Kriterler değiştiyse nihai karar reddedilmelidir.",
+  );
+}
+
+/*
+ * KAYNAK SAYFA / ALINTI KİLİDİ (madde 12)
+ *
+ * Alanlar arayüzde salt okunurdur; sunucu istek elle düzenlense bile ilk
+ * yayımdaki değeri geri koyar.
+ */
+{
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync("app/lib/workflow-db.ts", "utf8");
+  const lock = source.slice(source.indexOf("export function applySourceLock"));
+  const body = lock.slice(0, lock.indexOf("\n/**"));
+  assert(/sourcePage: locked\.sourcePage/.test(body), "Kaynak sayfa ilk değerine geri konmalıdır.");
+  assert(/sourceText: locked\.sourceText/.test(body), "Kaynak alıntı ilk değerine geri konmalıdır.");
+  assert(
+    /const locked = applySourceLock\(profile\.criteria, lock\)/.test(source),
+    "Yayımlama akışı kaynak kilidini uygulamalıdır.",
+  );
+
+  const app = readFileSync("app/components/criteria-app.tsx", "utf8");
+  assert(/locked-evidence-grid/.test(app), "Kaynak alanları salt okunur gösterilmelidir.");
+  assert(
+    !/update\(\{ sourcePage:/.test(app) && !/update\(\{ sourceText:/.test(app),
+    "Arayüzde kaynak sayfa/alıntı düzenlenememelidir.",
+  );
+  assert(/Manuel kriter/.test(app), "Elle eklenen kriterde kaynak 'Manuel kriter' olarak işaretlenmelidir.");
+}
+
+/*
+ * YAPAY ZEKÂ UYARISI (madde 10)
+ * AI sonucunun gösterildiği her ekranda, sonucun HEMEN ALTINDA bulunur.
+ */
+{
+  const { readFileSync } = await import("node:fs");
+  const { AI_DISCLAIMER } = await import("../app/lib/types.ts");
+  assert(/hata içerebilir/.test(AI_DISCLAIMER), "Uyarı metni hataya değinmelidir.");
+  assert(/yetkili hakeme aittir/.test(AI_DISCLAIMER), "Uyarı metni nihai kararı hakeme bağlamalıdır.");
+  for (const file of ["app/components/evaluation-app.tsx", "app/components/participant-portal.tsx"]) {
+    const source = readFileSync(file, "utf8");
+    assert(/<AiDisclaimer/.test(source), `${file} AI uyarısını göstermelidir.`);
+  }
+  const disclaimer = readFileSync("app/components/ai-disclaimer.tsx", "utf8");
+  assert(/AI_DISCLAIMER/.test(disclaimer), "Uyarı metni tek kaynaktan okunmalıdır.");
+}
+
+/*
+ * GİRİŞ SİSTEMİ (madde 7)
+ * Rol seçimli şifresiz kısayol kaldırıldı; tek giriş formu vardır.
+ */
+{
+  const { readFileSync, existsSync } = await import("node:fs");
+  assert(
+    !existsSync("app/api/admin/dev-session/route.ts"),
+    "Şifresiz rol kısayolu ucu kaldırılmalıdır.",
+  );
+  const login = readFileSync("app/components/access-login.tsx", "utf8");
+  assert(!/devLogin/.test(login), "Giriş ekranında şifresiz rol kısayolu olmamalıdır.");
+  assert(!/QUICK_ROLES/.test(login), "Giriş ekranında rol seçimi olmamalıdır.");
+  assert(/Kullanıcı adı veya e-posta/.test(login), "Tek giriş formu kullanıcı adı kabul etmelidir.");
+
+  const client = readFileSync("app/lib/admin-client.ts", "utf8");
+  assert(!/dev-session/.test(client), "İstemci artık rol kısayolu ucunu çağırmamalıdır.");
+
+  const session = readFileSync("app/api/admin/session/route.ts", "utf8");
+  assert(/findCredentialsByIdentifier/.test(session), "Giriş kullanıcı adı veya e-posta ile yapılmalıdır.");
+  // Rol İSTEK GÖVDESİNDEN okunmamalı; yalnızca hesabın kaydından gelmeli.
+  assert(
+    !/body\.roleCode|body\["roleCode"\]/.test(session),
+    "Giriş isteğinde rol GÖNDERİLMEMELİDİR; rol veri tabanından okunur.",
+  );
+  assert(
+    /credentials\.account\.roleCode/.test(session),
+    "Rol, doğrulanan hesabın kaydından okunmalıdır.",
+  );
+
+  const bootstrap = readFileSync("app/api/admin/bootstrap/route.ts", "utf8");
+  assert(/username: "admin"/.test(bootstrap), "Bootstrap hesabının kullanıcı adı 'admin' olmalıdır.");
+  assert(/password: "1234"/.test(bootstrap), "Bootstrap hesabının geçici şifresi '1234' olmalıdır.");
+  assert(/hashPassword\(DEV_ADMIN\.password\)/.test(bootstrap), "Şifre düz metin saklanmamalı, hash'lenmelidir.");
+  assert(/if \(existing\)/.test(bootstrap), "İkinci çağrı ikinci Admin üretmemelidir (idempotent).");
+  assert(/isProduction\(\)/.test(bootstrap), "Geliştirme kurulumu üretimde kapalı olmalıdır.");
+  assert(/GELİŞTİRME\/DEMO/.test(bootstrap), "Hesabın yalnızca geliştirme/demo için olduğu belirtilmelidir.");
+}
+
+/*
+ * KATILIMCI SONUCU (madde 9)
+ * ONAY ve RED aynı kaynaktan, aynı anda görünür.
+ */
+{
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync("app/lib/workflow-db.ts", "utf8");
+  assert(
+    /const participantResultHidden = view === "participant" && !reviewCompleted;/.test(source),
+    "Karar görünürlüğü yalnızca hakemin kararı kesinleştirmesine bağlı olmalıdır.",
+  );
+  assert(
+    !/results_published", "archived"\]\.includes\(row\.competition_status/.test(source),
+    "ONAY sonucu yarışma sonuçları yayımlanana kadar gizlenmemelidir.",
+  );
+  const portal = readFileSync("app/components/participant-portal.tsx", "utf8");
+  assert(/participant-approval/.test(portal), "Onay sonucu için ayrı bir kutu gösterilmelidir.");
+  assert(/Karar tarihi/.test(portal), "Onay sonucunda karar tarihi gösterilmelidir.");
+  assert(/participant-decision-facts/.test(portal), "Yarışma, takım ve hakem bilgisi gösterilmelidir.");
+}
+
+/*
+ * SOFT DELETE (maddeler 8 ve 11)
+ * Arayüzdeki silme işlemleri kaydı yok etmez.
+ */
+{
+  const { readFileSync } = await import("node:fs");
+  const source = readFileSync("app/lib/workflow-db.ts", "utf8");
+  for (const fn of ["archiveApplication", "archiveCompetition"]) {
+    const start = source.indexOf(`export async function ${fn}`);
+    assert(start > 0, `${fn} bulunmalı.`);
+    const body = source.slice(start, source.indexOf("\n/**", start + 10));
+    assert(/SET deleted_at = \?/.test(body), `${fn} soft delete uygulamalıdır.`);
+    assert(/deleted_by = \?/.test(body), `${fn} işlemi yapanı kaydetmelidir.`);
+    assert(!/DELETE FROM/.test(body), `${fn} fiziksel silme YAPMAMALIDIR.`);
+    assert(/recordWorkflowEvent/.test(body), `${fn} denetim kaydı yazmalıdır.`);
+  }
+
+  const reset = readFileSync("tools/dev_reset.mjs", "utf8");
+  assert(/assertNotProduction/.test(reset), "Sıfırlama üretim ortamını reddetmelidir.");
+  assert(/\.wrangler\/state\/v3\/d1/.test(reset), "Sıfırlama yalnızca yerel veri tabanına uygulanmalıdır.");
+  assert(!/--remote/.test(reset), "Sıfırlama betiğinde uzak veri tabanı seçeneği bulunmamalıdır.");
+  assert(/const apply = process\.argv\.includes\("--apply"\)/.test(reset), "Öntanımlı mod kuru çalıştırma olmalıdır.");
+  assert(/BEGIN TRANSACTION/.test(reset) && /ROLLBACK/.test(reset), "Sıfırlama transaction içinde olmalıdır.");
+}
+
+console.log("Integrity, lifecycle and login regression tests: PASS");

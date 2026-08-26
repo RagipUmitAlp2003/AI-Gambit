@@ -1,33 +1,31 @@
-import { evaluateReportOffline } from "./demo-report-evaluator";
-import {
-  applySimilarity,
-  buildFileGateChecks,
-  buildHeadingsCheck,
-  buildLanguageCheck,
-  buildSimilarityCheck,
-  buildTemplateCheck,
-  type SimilarityPeer,
-} from "./report-prechecks";
-import type { EvidenceRef, PreCheck, ProfileExport, ReportEvaluation } from "./types";
+import type { EvidenceRef, ReportEvaluation } from "./types";
 
 /**
- * Rapor analizi istemci sarmalayıcısı. Önce sunucudaki AI analiz motorunu
- * (POST /api/evaluate-report) dener; motor henüz bağlı değilse (501) veya uç
- * nokta yoksa (404) çevrimdışı deterministik kontrollere düşer. Ağa hiç
- * ulaşılamadığında da çevrimdışı sonuç üretilir ve sonucun uyarı listesine bu
- * durum yazılır. Motorun bildirdiği diğer hatalar gizlenmez; çağırana iletilir.
+ * Rapor analizi istemci sarmalayıcısı.
+ *
+ * BÜTÜNLÜK (madde 3): istemci artık modele profil ya da PDF GÖNDERMEZ.
+ * Sunucuya yalnızca `applicationId` gider; kriter seti (son yayımlanan sürüm)
+ * ve rapor PDF'i (R2'deki geçerli sürüm) sunucuda çözülür. Böylece istemci
+ * başka bir belge veya eski bir kriter seti göndererek sonucu yanlış
+ * başvuruya yazdıramaz.
+ *
+ * `pages` alanı YARDIMCIDIR: sunucudaki deterministik dil tespiti ve başlık
+ * yedeği için gönderilir. Sunucu, sayfa sayısı kendi ölçümüyle tutmuyorsa bu
+ * metni tamamen yok sayar.
  *
  * İstek/cevap sözleşmesi: docs/RAPOR_DEGERLENDIRME_SOZLESMESI.md
  */
 
-/** Sunucunun bildirdiği hata; çevrimdışı yedeğe düşülmez, kullanıcıya gösterilir. */
+/** Sunucunun bildirdiği hata; `retryable` "Yeniden dene" düğmesini açar. */
 export class ReportEngineError extends Error {
-  /** Geçici model yokluğu mu? Arayüz bu durumda "Yeniden dene" gösterir. */
   retryable: boolean;
-  constructor(message: string, retryable = false) {
+  /** Motor bu ortamda hiç yapılandırılmamış (anahtar yok). */
+  engineUnavailable: boolean;
+  constructor(message: string, retryable = false, engineUnavailable = false) {
     super(message);
     this.name = "ReportEngineError";
     this.retryable = retryable;
+    this.engineUnavailable = engineUnavailable;
   }
 }
 
@@ -42,8 +40,11 @@ function evidenceNeedle(value: string) {
 /**
  * AI alıntısı gerçekten gösterdiği PDF sayfasında yoksa kanıt listesinden
  * düşer. Kural kararı (verdict) DEĞİŞMEZ; bulgunun bütün kanıtı düştüyse
- * evidenceMissing işaretlenir ve hakemin kaynağı kendisinin doğrulaması gerektiği
- * gerekçeye eklenir.
+ * evidenceMissing işaretlenir ve hakemin kaynağı kendisinin doğrulaması
+ * gerektiği gerekçeye eklenir.
+ *
+ * PDF'den değerlendirilemeyen kurallarda zaten kanıt aranmaz; bu kontrol
+ * onlara dokunmaz.
  */
 function verifyEvidenceQuotes(evaluation: ReportEvaluation, pages: string[]): ReportEvaluation {
   let removed = 0;
@@ -56,6 +57,7 @@ function verifyEvidenceQuotes(evaluation: ReportEvaluation, pages: string[]): Re
     return valid;
   });
   const findings = evaluation.findings.map((finding) => {
+    if (finding.verdict === "DEGERLENDIRILEMEDI") return finding;
     const evidence = validEvidence(finding.evidence);
     if (evidence.length === finding.evidence.length) return { ...finding, evidence };
     const lost = evidence.length === 0;
@@ -69,15 +71,10 @@ function verifyEvidenceQuotes(evaluation: ReportEvaluation, pages: string[]): Re
     };
   });
   const stages = evaluation.stages.map((stage) => ({ ...stage, evidence: validEvidence(stage.evidence) }));
-  const preChecks = evaluation.preChecks.map((check) => (
-    // Şablon kontrolünün kanıtı şartname metnidir; rapor sayfalarında aranmaz.
-    check.kind === "template" ? check : { ...check, evidence: validEvidence(check.evidence) }
-  ));
   return {
     ...evaluation,
     findings,
     stages,
-    preChecks,
     analysisWarnings: removed
       ? [...evaluation.analysisWarnings, `${removed} AI alıntısı belirtilen PDF sayfasında birebir doğrulanamadı ve kanıt listesinden çıkarıldı.`]
       : evaluation.analysisWarnings,
@@ -90,76 +87,47 @@ function pagesPayload(pages: string[]): string | null {
 }
 
 export async function evaluateReport(input: {
-  profile: ProfileExport;
-  file: File;
+  /** Değerlendirilecek başvuru. Kriter ve PDF sunucuda buradan çözülür. */
+  applicationId: string;
+  /** Kanıt doğrulaması için istemcide çıkarılmış sayfa metinleri. */
   pages: string[];
   pageCount: number;
-  peers: SimilarityPeer[];
-  gateChecks?: PreCheck[];
+  /** "Analizi yenile": kayıtlı sonuç atlanır, model yeniden çalışır. */
+  force?: boolean;
 }): Promise<ReportEvaluation> {
-  const { profile, file, pages, pageCount, peers, gateChecks } = input;
-  let offlineReason = "";
+  const { applicationId, pages, pageCount, force } = input;
 
+  const formData = new FormData();
+  formData.append("applicationId", applicationId);
+  formData.append("pageCount", String(pageCount));
+  if (force) formData.append("force", "1");
+  const pagesJson = pagesPayload(pages);
+  if (pagesJson) formData.append("pages", pagesJson);
+
+  let response: Response;
   try {
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("profile", JSON.stringify(profile));
-    formData.append("pageCount", String(pageCount));
-    // Sayfa metni yalnızca sunucudaki deterministik kontroller (dil, başlık
-    // yedeği) için gönderilir; modele PDF'nin kendisi gider.
-    const pagesJson = pagesPayload(pages);
-    if (pagesJson) formData.append("pages", pagesJson);
-
-    const response = await fetch("/api/evaluate-report", { method: "POST", body: formData });
-    const contentType = response.headers.get("content-type") || "";
-    // Gövde en fazla bir kez okunur; ikinci okuma her zaman başarısız olurdu.
-    const payload = contentType.includes("application/json")
-      ? await response.json().catch(() => null) as (Partial<ReportEvaluation> & { error?: string; retryable?: boolean; engineUnavailable?: boolean }) | null
-      : null;
-
-    if (response.ok && payload && !payload.error && payload.version === "2.0" && Array.isArray(payload.findings) && Array.isArray(payload.stages)) {
-      const verified = verifyEvidenceQuotes(payload as ReportEvaluation, pages);
-      // Dosya biçimi/boyutu/adedi istemcide gerçek dosya üzerinden ölçülür;
-      // model bu kesin kontrollerin yerine geçmez. Aynı kimlikli sunucu satırı
-      // varsa yerel ölçüm önceliklidir.
-      const localChecks = [
-        ...(gateChecks ?? buildFileGateChecks(file, profile.setup)),
-        buildLanguageCheck(pages, profile.setup.reportLanguage),
-        buildTemplateCheck(profile, pageCount),
-        buildHeadingsCheck(profile, pages),
-      ];
-      const localIds = new Set(localChecks.map((check) => check.id));
-      const merged: ReportEvaluation = {
-        ...verified,
-        preChecks: [
-          ...localChecks,
-          ...verified.preChecks.filter((check) => check.kind !== "file_gate" && !localIds.has(check.id)),
-        ],
-      };
-      // Benzerlik havuzu sunucuda yoktur; istemci kendi sonucuyla 3. aşamayı tamamlar.
-      return applySimilarity(merged, buildSimilarityCheck(pages.join(" "), peers));
-    }
-
-    // Motor bu ortamda HİÇ yapılandırılmamışsa (uç yok / anahtar yok) deterministik
-    // yedeğe düşülür. Geçici model hatası (429/503 · `retryable`) yedeğe DÜŞMEZ:
-    // hakem sonucu "yapılmış" sanmasın, açık hatayı görüp yeniden denesin.
-    if (response.status === 501 || response.status === 404 || payload?.engineUnavailable === true) {
-      offlineReason = payload?.engineUnavailable === true
-        ? "AI servis anahtarı bu ortamda kullanılamıyor; yalnızca deterministik kontroller çalıştırıldı."
-        : "AI analiz motoru bu ortamda bağlı değil; yalnızca deterministik kontroller çalıştırıldı.";
-    } else {
-      throw new ReportEngineError(
-        payload?.error || `Analiz motoru beklenmedik bir cevap döndürdü (HTTP ${response.status}).`,
-        payload?.retryable === true,
-      );
-    }
-  } catch (error) {
-    if (error instanceof ReportEngineError) throw error;
-    // Yalnızca ağ/istek hatası buraya düşer; kullanıcı sonucu uyarı listesinden görür.
-    offlineReason = "Analiz motoruna ulaşılamadı; yalnızca deterministik kontroller çalıştırıldı.";
+    response = await fetch("/api/evaluate-report", { method: "POST", body: formData, credentials: "same-origin" });
+  } catch {
+    throw new ReportEngineError(
+      "Analiz motoruna ulaşılamadı. İnternet bağlantınızı kontrol edip yeniden deneyin.",
+      true,
+    );
   }
 
-  const evaluation = evaluateReportOffline({ profile, file, pages, pageCount, peers, gateChecks });
-  if (offlineReason) evaluation.analysisWarnings = [offlineReason, ...evaluation.analysisWarnings];
-  return evaluation;
+  const contentType = response.headers.get("content-type") || "";
+  // Gövde en fazla bir kez okunur; ikinci okuma her zaman başarısız olurdu.
+  const payload = contentType.includes("application/json")
+    ? await response.json().catch(() => null) as (Partial<ReportEvaluation> & { error?: string; retryable?: boolean; engineUnavailable?: boolean }) | null
+    : null;
+
+  if (response.ok && payload && !payload.error && payload.version === "2.0"
+    && Array.isArray(payload.findings) && Array.isArray(payload.stages)) {
+    return verifyEvidenceQuotes(payload as ReportEvaluation, pages);
+  }
+
+  throw new ReportEngineError(
+    payload?.error || `Analiz motoru beklenmedik bir cevap döndürdü (HTTP ${response.status}).`,
+    payload?.retryable === true,
+    payload?.engineUnavailable === true,
+  );
 }

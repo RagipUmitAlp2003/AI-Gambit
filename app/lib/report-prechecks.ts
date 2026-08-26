@@ -535,7 +535,14 @@ export function similarityResultOf(check: PreCheck | null | undefined): Similari
 
 /* ------------------------ Dört aşamalı sonuç birleştirme ------------------------ */
 
-const VERDICT_RANK: Record<RuleVerdict, number> = { BASARILI: 0, REVIZYON: 1, KRITIK_HATA: 2 };
+/**
+ * `DEGERLENDIRILEMEDI` bir İHLAL DEĞİLDİR: PDF'den doğrulanamayan kural
+ * (video, saha teslimi, kurul kararı) hiçbir aşamayı kötüleştirmez ve genel
+ * durumu belirlemez. Bu yüzden sıralamada BAŞARILI'nın da altındadır.
+ */
+const VERDICT_RANK: Record<RuleVerdict, number> = {
+  DEGERLENDIRILEMEDI: -1, BASARILI: 0, REVIZYON: 1, KRITIK_HATA: 2,
+};
 
 /** Listedeki en kötü durum; boş listede BAŞARILI. */
 export function worstVerdict(verdicts: readonly RuleVerdict[]): RuleVerdict {
@@ -544,13 +551,22 @@ export function worstVerdict(verdicts: readonly RuleVerdict[]): RuleVerdict {
   return worst;
 }
 
-/** Sayaçlar bulgulardan; genel durum bulgular ve aşama sonuçlarının en kötüsünden. */
+/** PDF'den değerlendirilemeyen (harici kanıt / hakem kontrolü) bulgu mu? */
+export function isOutsidePdfFinding(finding: Pick<CriterionFinding, "verdict">): boolean {
+  return finding.verdict === "DEGERLENDIRILEMEDI";
+}
+
+/**
+ * Sayaçlar bulgulardan; genel durum bulgular ve aşama sonuçlarının en kötüsünden.
+ * PDF'den değerlendirilemeyen kurallar ayrı sayılır ve hata sayaçlarına girmez.
+ */
 export function summarizeFindings(findings: CriterionFinding[], stages: StageResult[] = []): VerdictSummary {
   return {
     total: findings.length,
     basarili: findings.filter((item) => item.verdict === "BASARILI").length,
     revizyon: findings.filter((item) => item.verdict === "REVIZYON").length,
     kritikHata: findings.filter((item) => item.verdict === "KRITIK_HATA").length,
+    disiKanit: findings.filter(isOutsidePdfFinding).length,
     overall: worstVerdict([...findings.map((item) => item.verdict), ...stages.map((item) => item.verdict)]),
   };
 }
@@ -560,7 +576,9 @@ export function stageSummaryOf(stage: CheckStage, findings: CriterionFinding[]):
   const own = findings.filter((item) => item.stage === stage);
   if (!own.length) return `${checkStageOf(stage).title}: bu aşamaya bağlı aktif kriter yok.`;
   const counts = summarizeFindings(own);
-  return `${own.length} kural kontrol edildi: ${counts.basarili} ${RULE_VERDICT_LABELS.BASARILI}, ${counts.revizyon} ${RULE_VERDICT_LABELS.REVIZYON}, ${counts.kritikHata} ${RULE_VERDICT_LABELS.KRITIK_HATA}.`;
+  const outside = counts.disiKanit ?? 0;
+  return `${own.length} kural kontrol edildi: ${counts.basarili} ${RULE_VERDICT_LABELS.BASARILI}, ${counts.revizyon} ${RULE_VERDICT_LABELS.REVIZYON}, ${counts.kritikHata} ${RULE_VERDICT_LABELS.KRITIK_HATA}`
+    + `${outside ? `, ${outside} kural PDF dışı kanıt gerektiriyor` : ""}.`;
 }
 
 /**
@@ -580,7 +598,9 @@ export function deriveStageResult(stage: CheckStage, findings: CriterionFinding[
 
 /** Aşamada zorunlu kural yoksa aşama en fazla REVİZYON olur ("diğer" kurallar kritik hata doğurmaz). */
 export function capStageVerdict(stage: CheckStage, verdict: RuleVerdict, findings: CriterionFinding[]): RuleVerdict {
-  const hasRequired = findings.some((item) => item.stage === stage && item.required);
+  // PDF'den değerlendirilemeyen kurallar zorunlu olsalar bile aşamayı kritik
+  // hataya çeviremez; kanıtları raporun dışındadır.
+  const hasRequired = findings.some((item) => item.stage === stage && item.required && !isOutsidePdfFinding(item));
   return verdict === "KRITIK_HATA" && !hasRequired ? "REVIZYON" : verdict;
 }
 
@@ -620,12 +640,14 @@ export function feedbackOf(findings: CriterionFinding[]): ParticipantFeedback {
     .filter((item) => item.verdict === "BASARILI")
     .slice(0, 6)
     .map((item) => `${item.criterionName}: ${item.rationale}`);
+  // PDF'den doğrulanamayan kurallar "gelişime açık yön" olarak yazılmaz:
+  // yarışmacı raporda olmayan bir eksikle suçlanmamalıdır.
   const improvements = findings
-    .filter((item) => item.verdict !== "BASARILI")
+    .filter((item) => item.verdict !== "BASARILI" && !isOutsidePdfFinding(item))
     .slice(0, 8)
     .map((item) => `${item.criterionName} (${RULE_VERDICT_LABELS[item.verdict]}): ${item.rationale}`);
   const suggestions = findings
-    .filter((item) => item.verdict !== "BASARILI")
+    .filter((item) => item.verdict !== "BASARILI" && !isOutsidePdfFinding(item))
     .slice(0, 6)
     .map((item) => item.verdict === "KRITIK_HATA"
       ? `“${item.criterionName}” zorunlu kuralı için şartnamedeki koşulu karşılayan, kanıtlanabilir bir bölüm ekleyin.`

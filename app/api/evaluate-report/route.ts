@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
-import { requirePermission } from "../../lib/admin-guard";
-import { validateProfileExport } from "../../lib/profile-loader";
+import { handleError, requirePermission } from "../../lib/admin-guard";
 import { acquireAnalysisPermit, requestBodyTooLarge } from "../../lib/request-guard";
 import { pdfIntegrityError } from "../../lib/pdf-integrity";
+import { reportBucket, resolveEvaluationContext, type EvaluationContext } from "../../lib/workflow-db";
 import {
   buildHeadingChecks,
   capStageVerdict,
@@ -20,8 +20,11 @@ import {
 } from "../../lib/report-prechecks";
 import {
   CHECK_STAGE_IDS,
+  PDF_RULE_VERDICTS,
   RULE_VERDICTS,
+  VERIFIABILITY_LABELS,
   isCheckStage,
+  verifiedOutsidePdf,
   type AnalysisDiagnostics,
   type Criterion,
   type CriterionFinding,
@@ -37,8 +40,20 @@ import { countPdfPages } from "../../lib/pdf-page-count";
 import { recordUsage } from "../../lib/usage-metrics";
 
 /**
- * POST /api/evaluate-report — katılımcı raporunu yayımlı profile göre TEK model
- * çağrısıyla dört aşamada kontrol eder. Puan üretmez, güven seviyesi taşımaz;
+ * POST /api/evaluate-report — katılımcı raporunu SUNUCUDAN kurulan bağlamla
+ * dört aşamada, TEK model çağrısıyla kontrol eder.
+ *
+ * BÜTÜNLÜK (madde 3): istek gövdesinde YALNIZCA `applicationId` bulunur.
+ * Kriter seti, profil künyesi ve rapor PDF'i istemciden ALINMAZ; sunucu
+ * `application_id → competition_key → current_pdf_version (R2)` ve
+ * `→ latest_published_criteria_version (D1)` zincirini kendisi kurar. Böylece
+ * istemci başka bir PDF, başka bir kriter seti ya da eski bir profil
+ * göndererek sonucu yanlış başvuruya yazdıramaz.
+ *
+ * `pages` alanı YARDIMCIDIR: yalnızca deterministik dil tespiti ve başlık
+ * yedeği için kullanılır ve sayfa sayısı sunucunun ölçümüyle tutmuyorsa
+ * tamamen yok sayılır. Kural kararlarının kaynağı sunucunun R2'den okuduğu
+ * PDF'in kendisidir. Puan üretmez, güven seviyesi taşımaz;
  * her aktif kriter için BAŞARILI / REVİZYON / KRİTİK_HATA kararı ve rapordan
  * sayfa+paragraf numaralı alıntı ister. Model çıktısı doğrudan güvenilir kabul
  * edilmez: bulgular profile göre yeniden kurulur, "diğer" kurallar kritik hata
@@ -56,12 +71,13 @@ const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
 /** Modele verilen tek isteğin zaman sınırı. */
 const GENERATION_TIMEOUT_MS = 150_000;
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
-const PROMPT_VERSION = "report-v4-four-stage-language-normalized";
+const PROMPT_VERSION = "report-v5-server-bound-verifiability";
 const MAX_REPORT_BYTES = 50 * 1024 * 1024;
 const MAX_INLINE_REPORT_BYTES = 18 * 1024 * 1024;
 /** İstemcinin deterministik kontroller için gönderdiği sayfa metni üst sınırı. */
 const MAX_PAGES_TEXT_CHARS = 2_000_000;
-const MAX_MULTIPART_BYTES = MAX_REPORT_BYTES + 4 * 1024 * 1024;
+/** İstek gövdesi PDF taşımaz; yalnızca kimlik ve yardımcı sayfa metni gelir. */
+const MAX_MULTIPART_BYTES = 8 * 1024 * 1024;
 const CACHE_LIMIT = 12;
 
 const EVIDENCE_SCHEMA = {
@@ -85,7 +101,7 @@ const RESPONSE_SCHEMA = {
         type: "object",
         properties: {
           stage: { type: "string", enum: [...CHECK_STAGE_IDS] },
-          verdict: { type: "string", enum: [...RULE_VERDICTS] },
+          verdict: { type: "string", enum: [...PDF_RULE_VERDICTS] },
           summary: { type: "string", description: "Aşamanın kısa Türkçe özeti." },
           detectedLanguage: { type: ["string", "null"], description: "1. aşama: raporda tespit edilen dil; diğer aşamalarda null." },
           expectedLanguage: { type: ["string", "null"], description: "1. aşama: şartnamenin beklediği dil; diğer aşamalarda null." },
@@ -117,7 +133,7 @@ const RESPONSE_SCHEMA = {
         type: "object",
         properties: {
           criterionId: { type: "string" },
-          verdict: { type: "string", enum: [...RULE_VERDICTS] },
+          verdict: { type: "string", enum: [...PDF_RULE_VERDICTS] },
           rationale: { type: "string", description: "Kararın Türkçe gerekçesi; alıntıya atıf yapar." },
           evidence: { type: "array", items: EVIDENCE_SCHEMA },
         },
@@ -150,6 +166,10 @@ DEĞİŞMEZ KURALLAR:
 7. Benzerlik/intihal kararı verme; karşılaştırma havuzu sistemde ayrıca uygulanır.
 8. Bütün metinler Türkçe, kısa ve somut olsun. Gerekçe, alıntının kuralı neden karşıladığını veya karşılamadığını açıkça söylesin.
 9. stages dizisinde dört aşamanın her biri tam bir kez, aşama sırasıyla bulunsun.
+10. Sana verilen kriter listesinde bazı kurallar "PDF DIŞI KANIT" olarak işaretlidir
+    (tanıtım/saha videosu, ayrı portal yüklemesi, fiziksel teslim, kurul kararı).
+    Bu kurallar için bulgu ÜRETME; listede yer almazlar. Raporda video, bağlantı veya
+    fiziksel teslim bulunmamasını ASLA ihlal sayma.
 `;
 
 type RawEvidence = { page?: unknown; paragraph?: unknown; section?: unknown; text?: unknown };
@@ -224,10 +244,36 @@ const MISSING_FINDING_RATIONALE = "Sistem bu kural için bulgu üretemedi; hakem
  * olmayan her bulgu evidenceMissing taşır.
  */
 function normalizeFinding(raw: RawFinding | undefined, criterion: Criterion, pageCount: number): CriterionFinding {
-  const base = { criterionId: criterion.id, criterionName: criterion.name, stage: criterion.stage, required: criterion.required };
+  const base = {
+    criterionId: criterion.id,
+    criterionName: criterion.name,
+    stage: criterion.stage,
+    required: criterion.required,
+    verifiability: criterion.verifiability,
+  };
+  /*
+   * PDF DIŞI KANIT (madde 4)
+   *
+   * Video, saha teslimi, portal yüklemesi veya kurul kararı gerektiren kurallar
+   * rapor PDF'inden doğrulanamaz. Bunlar HİÇBİR koşulda hatalı, reddedilmiş ya
+   * da eksik sayılmaz: sonuç deterministik olarak DEGERLENDIRILEMEDI'dir ve
+   * modelin bu kural hakkında ne söylediğine bakılmaz.
+   */
+  if (verifiedOutsidePdf(criterion.verifiability)) {
+    return {
+      ...base,
+      verdict: "DEGERLENDIRILEMEDI",
+      rationale: criterion.verifiability === "HARICI_KANIT_GEREKLI"
+        ? "PDF üzerinden değerlendirilemez; harici kanıt kontrol edilmeli (video, portal yüklemesi veya fiziksel teslim)."
+        : "PDF üzerinden değerlendirilemez; kural hakem kontrolü gerektiriyor.",
+      evidence: [],
+      // Kanıt zaten raporda aranmaz; "kanıt eksik" uyarısı gösterilmez.
+      evidenceMissing: false,
+    };
+  }
   if (!raw) return { ...base, verdict: "REVIZYON", rationale: MISSING_FINDING_RATIONALE, evidence: [], evidenceMissing: true };
   const evidence = normalizeEvidence(raw.evidence, pageCount);
-  let verdict = enumValue<RuleVerdict>(raw.verdict, RULE_VERDICTS, "REVIZYON");
+  let verdict = enumValue<RuleVerdict>(raw.verdict, PDF_RULE_VERDICTS, "REVIZYON");
   let rationale = cleanText(raw.rationale, "Model gerekçe yazmadı; hakem kaynağı doğrulamalı.");
   if (!criterion.required && verdict === "KRITIK_HATA") {
     verdict = "REVIZYON";
@@ -374,16 +420,24 @@ async function uploadPdf(apiKey: string, bytes: ArrayBuffer, displayName: string
 }
 
 function buildPrompt(profile: ProfileExport, pageCount: number): string {
-  const activeCriteria = profile.criteria.filter((item) => item.active).map((item) => ({
-    id: item.id,
-    name: item.name,
-    stage: item.stage,
-    required: item.required,
-    description: item.description,
-    violationOutcome: item.violationOutcome,
-    sourcePage: item.sourcePage,
-    sourceText: item.sourceText,
-  }));
+  // Modele YALNIZCA PDF'den denetlenebilir kurallar verilir. Harici kanıt ve
+  // hakem kontrolü gerektiren kurallar listeye hiç girmez; model onlar için
+  // bulgu üretemez, dolayısıyla "PDF'de video yok" gibi bir ihlal doğamaz.
+  const activeCriteria = profile.criteria
+    .filter((item) => item.active && !verifiedOutsidePdf(item.verifiability))
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      stage: item.stage,
+      required: item.required,
+      description: item.description,
+      violationOutcome: item.violationOutcome,
+      sourcePage: item.sourcePage,
+      sourceText: item.sourceText,
+    }));
+  const outsideCriteria = profile.criteria
+    .filter((item) => item.active && verifiedOutsidePdf(item.verifiability))
+    .map((item) => `${item.name} (${VERIFIABILITY_LABELS[item.verifiability]})`);
   const headings = requiredHeadingsOf(profile);
   const template = profile.templateProfile?.provided
     ? `RESMÎ RAPOR ŞABLONU: ${profile.templateProfile.name || "şablon"} (${profile.templateProfile.pages} sayfa). Biçim notları: ${profile.templateProfile.notes.join(" · ") || "yok"}.`
@@ -402,6 +456,10 @@ Sunucunun doğruladığı sayfa sayısı: ${pageCount}
 AKTİF KRİTERLER (her biri için tam bir bulgu döndür; required=true zorunlu, false diğer):
 ${JSON.stringify(activeCriteria)}
 
+PDF DIŞI KANIT GEREKTİREN KURALLAR (bunlar için bulgu ÜRETME, listede yoklar; raporda
+karşılıklarının bulunmaması ihlal DEĞİLDİR):
+${outsideCriteria.length ? outsideCriteria.join(" · ") : "yok"}
+
 ZORUNLU BAŞLIK LİSTESİ (2. aşama; her başlık için var/dolu/sayfa bilgisi döndür):
 ${headings.length ? JSON.stringify(headings) : "Zorunlu başlık tanımlı değil; headings boş dönebilir."}
 
@@ -413,7 +471,9 @@ Dosya biçimi/boyutu ve başvurular arası benzerlik sistemde ayrıca denetlenir
 function buildEvaluation(input: {
   raw: RawEvaluation;
   profile: ProfileExport;
-  file: File;
+  report: { name: string; sizeBytes: number; pdfHash: string; submissionVersionId: string | null };
+  criteriaVersion: number;
+  criteriaHash: string;
   pages: string[] | null;
   pageCount: number;
   pageCountTrusted: boolean;
@@ -421,17 +481,28 @@ function buildEvaluation(input: {
   model: string;
   diagnostics: AnalysisDiagnostics;
 }): ReportEvaluation {
-  const { raw, profile, file, pages, pageCount, pageCountTrusted, clientPageCount, model, diagnostics } = input;
+  const { raw, profile, report, criteriaVersion, criteriaHash, pages, pageCount, pageCountTrusted, clientPageCount, model, diagnostics } = input;
   const warnings = list(raw.analysisWarnings, 8);
   const rawFindings = Array.isArray(raw.findings) ? raw.findings as RawFinding[] : [];
   const byId = new Map(rawFindings.map((item) => [cleanText(item.criterionId, "", 160), item]));
   const active = profile.criteria.filter((item) => item.active);
   const findings = active.map((criterion) => normalizeFinding(byId.get(criterion.id), criterion, pageCount));
-  const missingCount = active.filter((criterion) => !byId.has(criterion.id)).length;
+  // Eksik bulgu sayımı yalnızca PDF'den denetlenebilir kurallar içindir:
+  // harici kanıt kuralları modele hiç gönderilmez, bulgu döndürmemeleri normaldir.
+  const missingCount = active.filter(
+    (criterion) => !verifiedOutsidePdf(criterion.verifiability) && !byId.has(criterion.id),
+  ).length;
   if (missingCount) warnings.push(`${missingCount} kriter için model bulgu döndürmedi; bu kurallar REVİZYON olarak hakeme bırakıldı.`);
+  const outsideCount = findings.filter((item) => item.verdict === "DEGERLENDIRILEMEDI").length;
+  if (outsideCount) {
+    warnings.push(
+      `${outsideCount} kural PDF üzerinden değerlendirilemez (video, harici yükleme veya kurul kararı). `
+      + "Bu kurallar hata sayılmadı; hakem kanıtı rapor dışından kontrol etmelidir.",
+    );
+  }
 
   // Deterministik sayfa sınırı: ihlalde bulgu kesin olarak sabitlenir.
-  for (const { rule, limit } of pageLimitRules(profile)) {
+  for (const { rule, limit } of pageLimitRules(profile).filter((entry) => !verifiedOutsidePdf(entry.rule.verifiability))) {
     const index = findings.findIndex((item) => item.criterionId === rule.id);
     if (index < 0) continue;
     const current = findings[index];
@@ -493,8 +564,16 @@ function buildEvaluation(input: {
       year: profile.setup.year,
       stage: profile.setup.stage,
       reportType: profile.setup.reportType,
+      criteriaVersion,
+      criteriaHash,
     },
-    report: { name: file.name, pages: pageCount, sizeBytes: file.size },
+    report: {
+      name: report.name,
+      pages: pageCount,
+      sizeBytes: report.sizeBytes,
+      pdfHash: report.pdfHash,
+      submissionVersionId: report.submissionVersionId,
+    },
     // Dosya kapısı ve benzerlik istemcide; sunucu yalnızca aşama sonuçlarını ve bulguları üretir.
     preChecks: [],
     stages,
@@ -509,15 +588,31 @@ function buildEvaluation(input: {
   };
 }
 
-function cachedResponse(cached: CachedEvaluation, file: File, totalMs: number): ReportEvaluation {
+/**
+ * Önbellekten dönen sonuç, taze sonuçla BİREBİR aynı veri şemasını kullanır:
+ * yalnızca tanılama alanları (süre, token, cached) değişir. Kimlik alanları
+ * (pdfHash, criteriaVersion) zaten anahtarın parçasıdır, bu yüzden korunur.
+ */
+function cachedResponse(cached: CachedEvaluation, totalMs: number): ReportEvaluation {
   const { diagnosticsBase, ...evaluation } = cached;
   return {
     ...evaluation,
-    report: { ...evaluation.report, name: file.name, sizeBytes: file.size },
     analyzedAt: new Date().toISOString(),
     diagnostics: { ...diagnosticsBase, totalMs, modelMs: 0, promptTokens: 0, outputTokens: 0, cached: true, uploadMs: 0 },
   };
 }
+
+/** Bağlam çözümlemesi başarısız olduğunda kullanıcıya dönen açık hata. */
+const CONTEXT_ERRORS: Record<string, { status: number; message: string }> = {
+  not_found: { status: 404, message: "Başvuru bulunamadı." },
+  forbidden: { status: 403, message: "Bu başvuru size atanmadı; yalnızca atanan hakem analiz başlatabilir." },
+  criteria_missing: {
+    status: 409,
+    message: "Bu yarışmanın yayımlanmış kriter sürümü yok. Yarışma Yöneticisi kriter profilini yayımlamalıdır.",
+  },
+  document_missing: { status: 409, message: "Başvurunun geçerli rapor sürümü bulunamadı." },
+  competition_archived: { status: 409, message: "Bu yarışma arşivlendi; yeni analiz başlatılamaz." },
+};
 
 export async function POST(request: Request) {
   const auth = await requirePermission(request, "run_ai_prescreen");
@@ -535,69 +630,133 @@ export async function POST(request: Request) {
   let uploadedName = "";
   let cleanupKey = "";
   try {
+    // İstek gövdesi artık PDF taşımaz; yalnızca kimlik ve yardımcı sayfa metni.
     if (requestBodyTooLarge(request, MAX_MULTIPART_BYTES)) {
-      return Response.json({ error: "Katılımcı raporu izin verilen boyutu aşıyor." }, { status: 413 });
+      return Response.json({ error: "Gönderilen analiz isteği izin verilen boyutu aşıyor." }, { status: 413 });
     }
+    /*
+     * Motor bu ortamda hiç yapılandırılmamışsa (anahtar yok) istek DÜŞMEZ:
+     * analiz yalnızca deterministik kontrollerle üretilir (sayfa sınırı, dil,
+     * başlık) ve her kural hakeme REVİZYON olarak bırakılır. Sonuç yine
+     * sunucudan kurulan bağlama (kriter sürümü + PDF özeti) bağlıdır.
+     * Geçici model hataları (429/503) bundan ayrıdır ve "Yeniden dene" olarak
+     * gösterilir.
+     */
     const apiKey = process.env.GEMINI_API_KEY;
-    // `engineUnavailable` motorun bu ortamda HİÇ yapılandırılmadığını söyler;
-    // istemci bu durumda deterministik kontrollere düşer. Geçici model hataları
-    // (429/503) bundan ayrıdır ve hakeme "Yeniden dene" olarak gösterilir.
-    if (!apiKey) {
-      return Response.json(
-        { error: "AI servis anahtarı sunucu ortamında bulunamadı; yalnızca deterministik kontroller çalıştırılabilir.", engineUnavailable: true },
-        { status: 503 },
-      );
-    }
-    cleanupKey = apiKey;
+    cleanupKey = apiKey ?? "";
 
     let formData: FormData;
     try { formData = await request.formData(); }
     catch { return Response.json({ error: "İstek multipart/form-data biçiminde olmalıdır." }, { status: 400 }); }
 
-    const file = formData.get("file");
-    if (!(file instanceof File)) return Response.json({ error: "Katılımcı raporu 'file' alanında gönderilmelidir." }, { status: 400 });
-    if (file.type !== "application/pdf" && !file.name.toLocaleLowerCase("tr-TR").endsWith(".pdf")) {
-      return Response.json({ error: "Katılımcı raporu PDF biçiminde olmalıdır." }, { status: 415 });
+    /* ------------------------------------------------------------------ *
+     * BÜTÜNLÜK ZİNCİRİ — istemciden yalnızca başvuru kimliği alınır.
+     * Kriter seti, profil künyesi ve PDF sunucudan çözülür (madde 3).
+     * ------------------------------------------------------------------ */
+    const applicationId = String(formData.get("applicationId") ?? "").trim();
+    if (!applicationId) {
+      return Response.json({ error: "Analiz için başvuru kimliği (applicationId) gereklidir." }, { status: 400 });
     }
-    if (file.size > MAX_REPORT_BYTES) return Response.json({ error: "Bu sürümde analiz edilebilen katılımcı raporu en fazla 50 MB olabilir." }, { status: 413 });
-
-    const profileRaw = formData.get("profile");
-    if (typeof profileRaw !== "string") return Response.json({ error: "Yayımlı profil eksik." }, { status: 400 });
-    let profile: ProfileExport;
-    try {
-      const validated = validateProfileExport(JSON.parse(profileRaw));
-      if (!validated.profile) return Response.json({ error: validated.error }, { status: 400 });
-      profile = validated.profile;
-    } catch {
-      return Response.json({ error: "Profil alanı geçerli bir JSON değil." }, { status: 400 });
+    const resolved = await resolveEvaluationContext(applicationId, auth.account);
+    if (typeof resolved === "string") {
+      const failure = CONTEXT_ERRORS[resolved] ?? { status: 409, message: "Değerlendirme bağlamı çözümlenemedi." };
+      return Response.json({ error: failure.message }, { status: failure.status });
     }
+    const context: EvaluationContext = resolved;
+    const profile = context.profile;
     if (!profile.criteria.some((item) => item.active)) {
-      return Response.json({ error: "Profilde aktif kriter yok; değerlendirme yapılamaz." }, { status: 400 });
+      return Response.json(
+        { error: "Yürürlükteki kriter sürümünde aktif kriter yok; değerlendirme yapılamaz." },
+        { status: 409 },
+      );
     }
 
-    const bytes = await file.arrayBuffer();
+    // Rapor PDF'i R2'den, başvurunun GEÇERLİ sürümünden okunur.
+    const object = await reportBucket().get(context.fileKey);
+    if (!object) {
+      return Response.json(
+        { error: "Başvuru PDF'i saklama alanında bulunamadı; katılımcıdan yeni belge istenmelidir." },
+        { status: 409 },
+      );
+    }
+    const bytes = await object.arrayBuffer();
+    if (bytes.byteLength > MAX_REPORT_BYTES) {
+      return Response.json({ error: "Bu sürümde analiz edilebilen katılımcı raporu en fazla 50 MB olabilir." }, { status: 413 });
+    }
     const integrityError = pdfIntegrityError(bytes);
     if (integrityError) return Response.json({ error: integrityError }, { status: 422 });
+
     const rawClientPages = Number(formData.get("pageCount"));
     const clientPageCount = Number.isInteger(rawClientPages) && rawClientPages > 0 ? Math.min(1000, rawClientPages) : 1;
     const counted = countPdfPages(bytes, clientPageCount);
-    const pages = parsePagesField(formData.get("pages"));
-    const profileHash = await hash(new TextEncoder().encode(profileRaw).buffer);
+    // İstemcinin çıkardığı sayfa metni YALNIZCA deterministik dil/başlık
+    // kontrolleri içindir ve sayfa sayısı sunucunun ölçümüyle tutmazsa
+    // tamamen yok sayılır: başka bir belgeden gelmiş olabilir.
+    const rawPages = parsePagesField(formData.get("pages"));
+    const pagesMismatch = Boolean(rawPages) && counted.trusted && rawPages!.length !== counted.pages;
+    const pages = pagesMismatch ? null : rawPages;
+
     const reportHash = await hash(bytes);
-    const cacheContext = `${PROMPT_VERSION}:${reportHash}:${profile.profileId || profileHash}:${PRIMARY_MODEL}:${MEDIA_RESOLUTION}`;
+    const fileName = context.fileName || "rapor.pdf";
+    /*
+     * ÖNBELLEK ANAHTARI (madde 2): katılımcı PDF özeti + yürürlükteki kriter
+     * setinin özeti + kriter sürümü + model + değerlendirme istem sürümü.
+     * Kriterler değişince anahtar da değişir; eski hakem analizi yeni
+     * kriterler için ASLA yeniden kullanılamaz.
+     */
+    const cacheContext = [
+      PROMPT_VERSION,
+      reportHash,
+      context.criteriaVersion.criteriaHash,
+      `v${context.criteriaVersion.criteriaVersion}`,
+      PRIMARY_MODEL,
+      MEDIA_RESOLUTION,
+    ].join(":");
     const cacheKey = await hash(new TextEncoder().encode(cacheContext).buffer);
-    const cached = evaluationCache().get(cacheKey);
+    // Hakem "Analizi yenile" dediğinde kayıtlı sonuç atlanır ve model
+    // yeniden çalıştırılır.
+    const forceRefresh = String(formData.get("force") ?? "") === "1";
+    const cached = forceRefresh ? undefined : evaluationCache().get(cacheKey);
     if (cached) {
       const totalMs = Date.now() - startedAt;
       recordUsage({ model: cached.model || PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: totalMs, cached: true, error: false, apiCalls: 0 });
-      return Response.json(cachedResponse(cached, file, totalMs));
+      return Response.json(cachedResponse(cached, totalMs));
+    }
+
+    if (!apiKey) {
+      const totalMs = Date.now() - startedAt;
+      const offline = buildEvaluation({
+        raw: { stages: [], findings: [], analysisWarnings: [] },
+        profile,
+        report: {
+          name: fileName,
+          sizeBytes: bytes.byteLength,
+          pdfHash: reportHash,
+          submissionVersionId: context.submissionVersionId,
+        },
+        criteriaVersion: context.criteriaVersion.criteriaVersion,
+        criteriaHash: context.criteriaVersion.criteriaHash,
+        pages,
+        pageCount: counted.pages,
+        pageCountTrusted: counted.trusted,
+        clientPageCount,
+        model: "",
+        diagnostics: { totalMs, modelMs: 0, promptTokens: 0, outputTokens: 0, cached: false, apiCalls: 0, documentTransfers: 0 },
+      });
+      offline.provider = "demo";
+      offline.analysisWarnings.unshift(
+        "AI servis anahtarı sunucu ortamında bulunamadı; yalnızca deterministik kontroller çalıştırıldı. "
+        + "Kural kararları hakeme bırakıldı.",
+      );
+      recordUsage({ model: "", promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: totalMs, cached: false, error: false, apiCalls: 0 });
+      return Response.json(offline);
     }
 
     const uploadStarted = Date.now();
-    const uploaded = await uploadPdf(apiKey, bytes, file.name);
+    const uploaded = await uploadPdf(apiKey, bytes, fileName);
     uploadedName = uploaded?.name || "";
     const uploadMs = Date.now() - uploadStarted;
-    if (!uploaded && file.size > MAX_INLINE_REPORT_BYTES) {
+    if (!uploaded && bytes.byteLength > MAX_INLINE_REPORT_BYTES) {
       return Response.json({
         error: "Büyük rapor geçici dosya aktarım servisine yüklenemedi. Dosya yarışma sınırına uygun olabilir; analizi yeniden deneyin veya PDF'yi sıkıştırın.",
       }, { status: 502 });
@@ -663,7 +822,14 @@ export async function POST(request: Request) {
     const result = buildEvaluation({
       raw,
       profile,
-      file,
+      report: {
+        name: fileName,
+        sizeBytes: bytes.byteLength,
+        pdfHash: reportHash,
+        submissionVersionId: context.submissionVersionId,
+      },
+      criteriaVersion: context.criteriaVersion.criteriaVersion,
+      criteriaHash: context.criteriaVersion.criteriaHash,
       pages,
       pageCount: counted.pages,
       pageCountTrusted: counted.trusted,
@@ -671,6 +837,15 @@ export async function POST(request: Request) {
       model: modelUsed,
       diagnostics,
     });
+    if (pagesMismatch) {
+      result.analysisWarnings.unshift(
+        "İstemcinin gönderdiği sayfa metni sunucudaki PDF ile aynı sayfa sayısında değil; "
+        + "deterministik dil ve başlık kontrolleri bu metne göre YAPILMADI.",
+      );
+    }
+    if (!context.competitionActive) {
+      result.analysisWarnings.unshift("Bu yarışma pasif durumda; analiz geçmiş kayıt üzerinde çalıştırıldı.");
+    }
     recordUsage({ model: modelUsed, promptTokens: usage.prompt, outputTokens: usage.output, totalTokens: usage.total, durationMs: totalMs, cached: false, error: false, apiCalls });
 
     const cache = evaluationCache();
@@ -704,7 +879,8 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("Beklenmeyen katılımcı raporu analiz hatası:", error);
     recordUsage({ model: PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls: 0 });
-    return Response.json({ error: "Rapor analizi sırasında beklenmeyen bir hata oluştu." }, { status: 500 });
+    // D1/R2 bağlaması yoksa sebebi açıkça söylenir; "beklenmeyen hata" denmez.
+    return handleError(error);
   } finally {
     if (cleanupKey && uploadedName) await deleteGeminiFile(cleanupKey, uploadedName);
     permit.release();

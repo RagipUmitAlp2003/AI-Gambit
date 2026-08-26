@@ -1,8 +1,11 @@
 import {
   CHECK_STAGE_IDS,
+  CRITERION_VERIFIABILITIES,
   isCheckStage,
+  isCriterionVerifiability,
   type CheckStage,
   type Criterion,
+  type CriterionVerifiability,
   type SetupData,
   type TemplateProfile,
 } from "./types";
@@ -25,7 +28,7 @@ import {
  */
 
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
-export const EXTRACTION_PROMPT_VERSION = "v23-four-stage-modal-verb-balanced";
+export const EXTRACTION_PROMPT_VERSION = "v24-four-stage-verifiability";
 
 /**
  * Kural açıklaması için üst sınır. Model dolambaçlı paragraflar üretince hem
@@ -96,8 +99,18 @@ export const EXTRACTION_SCHEMA = {
             type: "string",
             description: `sourcePage sayfasından özgün dilde BİREBİR alıntı; tek cümle, en fazla ${MAX_SOURCE_TEXT_CHARS} karakter.`,
           },
+          verifiability: {
+            type: "string",
+            enum: CRITERION_VERIFIABILITIES,
+            description:
+              "Kuralın kanıtı NEREDE bulunur? "
+              + "PDF_DENETLENEBILIR: kanıt raporun kendi metninde/tablosunda/çiziminde bulunur. "
+              + "HARICI_KANIT_GEREKLI: kanıt rapor DIŞINDADIR (tanıtım/saha videosu, ayrı portal yüklemesi, "
+              + "fiziksel teslim, canlı demo, çevrim içi form). "
+              + "HAKEM_KONTROLU_GEREKLI: kurul/jüri takdiri veya elle doğrulama gerektirir.",
+          },
         },
-        required: ["name", "stage", "required", "description", "violationOutcome", "sourcePage", "sourceText"],
+        required: ["name", "stage", "required", "description", "violationOutcome", "sourcePage", "sourceText", "verifiability"],
       },
     },
   },
@@ -171,6 +184,20 @@ Yukarıdaki gereksinim RAPORDA gösterilmesi/anlatılması gerekiyorsa kriterdir
 Yalnızca saha gününde fiziksel olarak ölçülüyorsa ve raporda hiçbir karşılığı
 yoksa kriter DEĞİLDİR.
 
+KANIT YERİ (verifiability) — YANLIŞ İHLAL ÜRETMEMEK İÇİN ZORUNLU:
+Sistem katılımcı raporunu YALNIZCA PDF olarak inceler. Kanıtı PDF'in dışında olan
+bir kural "PDF'de yok" diye ihlal sayılamaz. Her kriterde kanıtın nerede olduğunu işaretle:
+- PDF_DENETLENEBILIR: kanıt raporun metninde, tablosunda, çiziminde veya hesabında bulunur.
+  (Ör. "raporda yapısal analiz sonuçları verilmelidir", "rapor en fazla 25 sayfadır".)
+- HARICI_KANIT_GEREKLI: kanıt rapor DIŞINDADIR. Tanıtım videosu, saha videosu, YouTube
+  bağlantısı, ayrı portal/sistem yüklemesi, fiziksel teslim, canlı sunum, imzalı ıslak belge,
+  çevrim içi form gönderimi bu türdendir. Kural raporda "video yüklenmelidir" dese bile
+  videonun KENDİSİ PDF'te olamaz; bu tür HARICI_KANIT_GEREKLI'dir.
+- HAKEM_KONTROLU_GEREKLI: kurul onayı, jüri takdiri, özgünlük/etik değerlendirmesi gibi
+  insan kararı gerektiren kurallar.
+Şüphede kalırsan PDF_DENETLENEBILIR yazma; kanıt rapor metninden okunamıyorsa
+HARICI_KANIT_GEREKLI ya da HAKEM_KONTROLU_GEREKLI seç.
+
 BİÇİM VE UZUNLUK (yanıt süresi ve okunabilirlik):
 - description TEK CÜMLE ve en fazla ${MAX_DESCRIPTION_CHARS} karakterdir: koşul + raporda ne aranacağı. "Bu kriter ...", "Şartnameye göre ..." gibi giriş cümlesi, tekrar, gerekçe ve genel yorum yazma.
 - name en fazla 6 kelimedir.
@@ -194,7 +221,10 @@ export function buildExtractionPrompt(input: { pageCount: number }): string {
     + `Boyut, ağırlık, batarya/gerilim limitleri, yasaklı malzeme, fiziksel acil durdurma butonu ve zorunlu analiz/çizim gereksinimlerini ATLAMA. `
     + `Belge raporun içermesi gereken bölümleri/başlıkları sayıyorsa her birini AYRI bir headings_content kriteri yap. `
     + `Her kriterde sourcePage 1 ile ${input.pageCount} arasında, alıntının okunduğu DOSYA sayfası olmalıdır; basılı sayfa etiketi kullanma. `
-    + `description tek cümle ve en fazla ${MAX_DESCRIPTION_CHARS} karakter olsun. Belge sessizse değer uydurma; puan, ceza ve saha maddelerini kriter yapma.`;
+    + `description tek cümle ve en fazla ${MAX_DESCRIPTION_CHARS} karakter olsun. Belge sessizse değer uydurma; puan, ceza ve saha maddelerini kriter yapma. `
+    + `Her kriterde verifiability alanını doldur: kanıt raporun içinde okunuyorsa PDF_DENETLENEBILIR, `
+    + `video/portal yüklemesi/fiziksel teslim gibi rapor dışı bir kanıt gerekiyorsa HARICI_KANIT_GEREKLI, `
+    + `kurul veya jüri takdiri gerekiyorsa HAKEM_KONTROLU_GEREKLI yaz.`;
 }
 
 export type RawCriterion = {
@@ -205,6 +235,7 @@ export type RawCriterion = {
   violationOutcome?: unknown;
   sourcePage?: unknown;
   sourceText?: unknown;
+  verifiability?: unknown;
 };
 
 export type RawExtraction = {
@@ -296,6 +327,40 @@ export function foldKey(value: string): string {
  * aynı olması tekrar sayılmaz; şartname tek cümlede birden çok zorunlu başlık
  * veya kural listeleyebilir ve her biri ayrı kriter olarak kalmalıdır.
  */
+/**
+ * Kanıt yeri belirleme.
+ *
+ * Model alanı doldurduysa ona uyulur. Doldurmadıysa (eski önbellek kaydı veya
+ * şemaya uymayan çıktı) metinden dar bir işaret taraması yapılır: PDF'in
+ * içinde bulunamayacak kanıt türleri (video, canlı demo, ayrı portal yüklemesi)
+ * `HARICI_KANIT_GEREKLI` sayılır. Amaç, "PDF'de video yok" gibi UYDURMA
+ * ihlalleri baştan engellemektir; şüphede kalınırsa PDF denetlenebilir kabul
+ * edilir ve kararı yine hakem verir.
+ */
+const EXTERNAL_EVIDENCE_MARKERS = [
+  "video", "youtube", "vimeo", "canli yayin", "canli demo", "canli sunum",
+  "saha teslimi", "fiziksel teslim", "numune teslimi", "yerinde teslim",
+  "portala yukle", "portal uzerinden yukle", "sisteme yukle", "cevrim ici form",
+];
+
+const JUDGE_REVIEW_MARKERS = [
+  "kurul karari", "komite karari", "juri takdiri", "juri karari",
+  "hakem heyeti", "yonetim kurulu onayi", "degerlendirme kurulu",
+];
+
+export function resolveVerifiability(
+  entry: RawCriterion | undefined,
+  name: string,
+  sourceText: string,
+  description: string,
+): CriterionVerifiability {
+  if (isCriterionVerifiability(entry?.verifiability)) return entry.verifiability;
+  const haystack = foldKey(`${name} ${description} ${sourceText}`);
+  if (EXTERNAL_EVIDENCE_MARKERS.some((marker) => haystack.includes(marker))) return "HARICI_KANIT_GEREKLI";
+  if (JUDGE_REVIEW_MARKERS.some((marker) => haystack.includes(marker))) return "HAKEM_KONTROLU_GEREKLI";
+  return "PDF_DENETLENEBILIR";
+}
+
 export function normalizeCriteria(raw: unknown, pageCount: number): { criteria: Criterion[]; warnings: string[] } {
   const warnings: string[] = [];
   if (!Array.isArray(raw)) return { criteria: [], warnings: ["Model kriter listesi döndürmedi."] };
@@ -334,6 +399,7 @@ export function normalizeCriteria(raw: unknown, pageCount: number): { criteria: 
       violationOutcome: text(entry?.violationOutcome, "Belgede belirtilmemiş").slice(0, 240),
       sourcePage: page,
       sourceText,
+      verifiability: resolveVerifiability(entry, name, sourceText, text(entry?.description, "")),
       active: true,
       origin: "document",
     });

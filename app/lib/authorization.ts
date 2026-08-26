@@ -50,6 +50,26 @@ export const PERMISSIONS = {
    */
   manage_competition_stage: ["01"],
   /**
+   * Yarışmayı AKTİF / PASİF yapma (madde 6).
+   *
+   * Hem yarışmanın sahibi Yarışma Yöneticisi (01) hem de süreci yöneten
+   * Değerlendirme Yöneticisi (04) bu anahtarı çevirebilir. Pasifleştirme
+   * yarışmanın aşamasını veya kararlarını DEĞİŞTİRMEZ; yalnızca yeni başvuru
+   * ve yeni değerlendirme kuyruğu üretimini durdurur.
+   */
+  toggle_competition_activation: ["01", "04"],
+  /**
+   * Eski yarışmayı arşivleme (soft delete, madde 11).
+   * Yalnızca yarışmanın sahibi Yarışma Yöneticisi arşivleyebilir; kayıt
+   * silinmez, işlem gerekçesiyle denetim izine yazılır.
+   */
+  archive_competition: ["01"],
+  /**
+   * Hakemin kendi aktif iş listesinden başvuru kaldırması (soft delete).
+   * Fiziksel silme yoktur; kayıt, PDF ve değerlendirme geçmişi korunur.
+   */
+  archive_application: ["02"],
+  /**
    * Yarışmaya ÖNCELİKLİ işareti koyma/kaldırma — Değerlendirme Yöneticisinin
    * operasyonel aksiyonu. Başvuru yığılan veya hakem değerlendirmesi geciken
    * yarışmalar hakem panelinde öne çıkar. Karar değil, sıralama işaretidir.

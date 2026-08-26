@@ -166,6 +166,26 @@ async function applyRoleMigrations(database: D1Database): Promise<void> {
   console.info(`[migration] ${FINAL_ROLE_RESTORE_MIGRATION} uygulandı: 03 Yarışmacı, 04 Değerlendirme Yöneticisi.`);
 }
 
+/**
+ * Kullanıcı adıyla giriş (madde 7).
+ *
+ * Sütun EKLEMELİ ve geriye uyumludur: var olan hesaplar e-postayla girmeye
+ * devam eder, `username` boş kalır. Kısmi benzersiz dizin yalnızca dolu
+ * değerleri kapsar, böylece birden çok NULL sorun çıkarmaz.
+ * Referans SQL: migrations/0008_integrity_and_lifecycle.sql
+ */
+async function upgradeAccountTable(database: D1Database): Promise<void> {
+  const info = await database.prepare(`PRAGMA table_info(admin_accounts)`).all<{ name: string }>();
+  const present = new Set((info.results ?? []).map((row) => row.name));
+  if (!present.has("username")) {
+    await database.prepare(`ALTER TABLE admin_accounts ADD COLUMN username TEXT`).run();
+  }
+  await database.prepare(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_accounts_username
+     ON admin_accounts (username) WHERE username IS NOT NULL`,
+  ).run().catch(() => undefined);
+}
+
 let schemaPromise: Promise<void> | null = null;
 
 /** Bağlama yoksa null döner; çağıranlar açık hata mesajı üretebilsin diye. */
@@ -179,6 +199,7 @@ export async function getDatabase(): Promise<D1Database> {
   if (!schemaPromise) {
     schemaPromise = database
       .batch(SCHEMA.map((statement) => database.prepare(statement)))
+      .then(() => upgradeAccountTable(database))
       .then(() => applyRoleMigrations(database))
       .catch((error: unknown) => {
         // Sonraki istek yeniden denesin; kalıcı hata bırakma.
@@ -198,10 +219,21 @@ export function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
 }
 
+/**
+ * Kullanıcı adı: küçük harfe indirgenir, yalnızca harf/rakam/nokta/alt çizgi
+ * ve tire kabul edilir. Boş sonuç `null` döner (kullanıcı adı isteğe bağlıdır).
+ */
+export function normalizeUsername(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = value.trim().toLocaleLowerCase("en-US").replace(/[^a-z0-9._-]/g, "");
+  return cleaned ? cleaned.slice(0, 64) : null;
+}
+
 type AccountRow = {
   id: string;
   full_name: string;
   email: string;
+  username: string | null;
   role_code: string;
   password_hash: string;
   password_salt: string;
@@ -219,6 +251,7 @@ function toAccount(row: AccountRow): AdminAccount {
     id: row.id,
     fullName: row.full_name,
     email: row.email,
+    username: row.username ?? null,
     roleCode: (isRoleCode(row.role_code) ? row.role_code : "01") as RoleCode,
     status: row.status === "revoked" ? "revoked" : "active",
     mustChangePassword: row.must_change_password === 1,
@@ -258,12 +291,21 @@ export async function findAccountById(id: string): Promise<AdminAccount | null> 
 export async function insertAccount(input: {
   fullName: string;
   email: string;
+  username?: string | null;
   roleCode: RoleCode;
   password: PasswordRecord;
   createdBy: string | null;
+  /** Kurulum hesabının şifresi ilk girişte değiştirilmiş sayılmaz; varsayılan true. */
+  mustChangePassword?: boolean;
 }): Promise<AdminAccount> {
   const database = await getDatabase();
   const email = normalizeEmail(input.email);
+  const username = normalizeUsername(input.username);
+  if (username) {
+    const taken = await database.prepare(`SELECT id FROM admin_accounts WHERE username = ?`)
+      .bind(username).first<{ id: string }>();
+    if (taken) throw new ConflictError("Bu kullanıcı adı zaten kullanılıyor.");
+  }
   const existing = await database
     .prepare(`SELECT id, status FROM admin_accounts WHERE email = ?`)
     .bind(email)
@@ -280,9 +322,10 @@ export async function insertAccount(input: {
     id: crypto.randomUUID(),
     fullName: input.fullName.trim(),
     email,
+    username,
     roleCode: input.roleCode,
     status: "active",
-    mustChangePassword: true,
+    mustChangePassword: input.mustChangePassword !== false,
     createdAt: nowIso(),
     createdBy: input.createdBy,
     revokedAt: null,
@@ -292,18 +335,20 @@ export async function insertAccount(input: {
   await database
     .prepare(
       `INSERT INTO admin_accounts
-        (id, full_name, email, role_code, password_hash, password_salt, password_iterations,
+        (id, full_name, email, username, role_code, password_hash, password_salt, password_iterations,
          must_change_password, status, created_at, created_by, revoked_at, revoked_reason)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'active', ?, ?, NULL, NULL)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, NULL)`,
     )
     .bind(
       account.id,
       account.fullName,
       account.email,
+      account.username,
       account.roleCode,
       input.password.hash,
       input.password.salt,
       input.password.iterations,
+      account.mustChangePassword ? 1 : 0,
       account.createdAt,
       account.createdBy,
     )
@@ -399,6 +444,15 @@ export async function deleteAccount(id: string): Promise<MutationResult> {
   return { ok: true, account: existing };
 }
 
+export async function findAccountByUsername(username: string): Promise<AdminAccount | null> {
+  const database = await getDatabase();
+  const normalized = normalizeUsername(username);
+  if (!normalized) return null;
+  const row = await database.prepare(`SELECT * FROM admin_accounts WHERE username = ?`)
+    .bind(normalized).first<AccountRow>();
+  return row ? toAccount(row) : null;
+}
+
 export async function countActiveModerators(): Promise<number> {
   const database = await getDatabase();
   const row = await database
@@ -415,6 +469,27 @@ export async function countAccounts(): Promise<number> {
 
 /** Parola doğrulaması için hesap + özet alanları. Yalnızca giriş akışında kullanılır. */
 export type AccountCredentials = { account: AdminAccount; password: PasswordRecord };
+
+/**
+ * Giriş kimliğiyle hesap arar: kullanıcı adı VEYA e-posta.
+ *
+ * Kullanıcı rol SEÇMEZ; hesabın rolü veri tabanından okunur ve panel ona göre
+ * açılır (madde 7).
+ */
+export async function findCredentialsByIdentifier(identifier: string): Promise<AccountCredentials | null> {
+  const database = await getDatabase();
+  const email = normalizeEmail(identifier);
+  const username = normalizeUsername(identifier);
+  const row = await database
+    .prepare(`SELECT * FROM admin_accounts WHERE email = ? OR (username IS NOT NULL AND username = ?)`)
+    .bind(email, username ?? "\u0000")
+    .first<AccountRow>();
+  if (!row) return null;
+  return {
+    account: toAccount(row),
+    password: { hash: row.password_hash, salt: row.password_salt, iterations: row.password_iterations },
+  };
+}
 
 export async function findCredentialsByEmail(email: string): Promise<AccountCredentials | null> {
   const database = await getDatabase();

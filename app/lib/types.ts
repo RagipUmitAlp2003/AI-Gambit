@@ -96,14 +96,31 @@ export function isCheckStage(value: unknown): value is CheckStage {
  *   REVIZYON     Kural eksik/kısmi karşılandı; düzeltme gerekir.
  *   KRITIK_HATA  Zorunlu kural karşılanmadı veya belgede açık ihlal var.
  */
-export type RuleVerdict = "BASARILI" | "REVIZYON" | "KRITIK_HATA";
+/**
+ *   BASARILI            Kural karşılandı.
+ *   REVIZYON            Kural eksik/kısmi karşılandı; düzeltme gerekir.
+ *   KRITIK_HATA         Zorunlu kural karşılanmadı veya belgede açık ihlal var.
+ *   DEGERLENDIRILEMEDI  Kural PDF'den doğrulanamaz (video, saha, kurul kararı).
+ *                       Bu durum bir İHLAL DEĞİLDİR: sayaçlarda hata sayılmaz,
+ *                       aşama sonucunu kötüleştirmez ve yalnızca sunucu
+ *                       tarafından, kriterin `verifiability` alanına bakılarak
+ *                       atanır — model bu değeri üretemez.
+ */
+export type RuleVerdict = "BASARILI" | "REVIZYON" | "KRITIK_HATA" | "DEGERLENDIRILEMEDI";
 
-export const RULE_VERDICTS: readonly RuleVerdict[] = ["BASARILI", "REVIZYON", "KRITIK_HATA"];
+export const RULE_VERDICTS: readonly RuleVerdict[] = ["BASARILI", "REVIZYON", "KRITIK_HATA", "DEGERLENDIRILEMEDI"];
+
+/**
+ * Modelin ve hakemin PDF üzerinde kullanabileceği durumlar.
+ * `DEGERLENDIRILEMEDI` buraya dahil değildir; onu yalnızca sunucu atar.
+ */
+export const PDF_RULE_VERDICTS: readonly RuleVerdict[] = ["BASARILI", "REVIZYON", "KRITIK_HATA"];
 
 export const RULE_VERDICT_LABELS: Record<RuleVerdict, string> = {
   BASARILI: "BAŞARILI",
   REVIZYON: "REVİZYON",
   KRITIK_HATA: "KRİTİK HATA",
+  DEGERLENDIRILEMEDI: "PDF'DEN DEĞERLENDİRİLEMEZ",
 };
 
 export function isRuleVerdict(value: unknown): value is RuleVerdict {
@@ -111,6 +128,53 @@ export function isRuleVerdict(value: unknown): value is RuleVerdict {
 }
 
 export type CriterionOrigin = "document" | "manager";
+
+/* ------------------------------------------------------------------------- *
+ * Kriterin PDF'den denetlenebilirliği
+ *
+ * Şartname analizinde tanıtım videosu, saha videosu, canlı demo veya kurul
+ * onayı gibi kurallar da kriter olarak çıkabilir. Katılımcı rapor analizi
+ * YALNIZCA PDF üzerinde çalıştığı için, PDF'de video bulunmaması bir ihlal
+ * DEĞİLDİR. Bu alan, kuralın hangi kanıtla doğrulanacağını söyler:
+ *
+ *   PDF_DENETLENEBILIR      AI kuralı rapor PDF'i üzerinde değerlendirir.
+ *   HARICI_KANIT_GEREKLI    Video, saha teslimi, portal yüklemesi gibi PDF dışı
+ *                           kanıt gerekir; AI olumlu/olumsuz karar VERMEZ.
+ *   HAKEM_KONTROLU_GEREKLI  Takdir veya kurul kararı gerektirir; hakeme bırakılır.
+ *
+ * Son iki tür hiçbir koşulda otomatik olarak KRİTİK_HATA veya eksik sayılmaz.
+ * ------------------------------------------------------------------------- */
+export type CriterionVerifiability =
+  | "PDF_DENETLENEBILIR"
+  | "HARICI_KANIT_GEREKLI"
+  | "HAKEM_KONTROLU_GEREKLI";
+
+export const CRITERION_VERIFIABILITIES: readonly CriterionVerifiability[] = [
+  "PDF_DENETLENEBILIR",
+  "HARICI_KANIT_GEREKLI",
+  "HAKEM_KONTROLU_GEREKLI",
+];
+
+export const VERIFIABILITY_LABELS: Record<CriterionVerifiability, string> = {
+  PDF_DENETLENEBILIR: "PDF'den denetlenebilir",
+  HARICI_KANIT_GEREKLI: "Harici kanıt gerekli",
+  HAKEM_KONTROLU_GEREKLI: "Hakem kontrolü gerekli",
+};
+
+export const VERIFIABILITY_HINTS: Record<CriterionVerifiability, string> = {
+  PDF_DENETLENEBILIR: "Kural rapor PDF'inin içinden doğrulanabilir; AI değerlendirir.",
+  HARICI_KANIT_GEREKLI: "Video, saha teslimi veya portal yüklemesi gibi PDF dışı kanıt gerekir; AI karar vermez.",
+  HAKEM_KONTROLU_GEREKLI: "Takdir veya kurul kararı gerektirir; karar hakeme bırakılır.",
+};
+
+export function isCriterionVerifiability(value: unknown): value is CriterionVerifiability {
+  return typeof value === "string" && (CRITERION_VERIFIABILITIES as readonly string[]).includes(value);
+}
+
+/** AI'nin PDF üzerinden karar veremeyeceği kriter türü mü? */
+export function verifiedOutsidePdf(verifiability: CriterionVerifiability): boolean {
+  return verifiability !== "PDF_DENETLENEBILIR";
+}
 
 /**
  * Şartnameden çıkarılan, yarışmanın PDF aşamasında kontrol edilecek tek kural.
@@ -132,6 +196,11 @@ export type Criterion = {
   sourcePage: number | null;
   /** Kaynak sayfadan özgün dilde birebir kısa alıntı. */
   sourceText: string;
+  /**
+   * Kuralın hangi kanıtla doğrulanacağı (bkz. CriterionVerifiability).
+   * Eski (1.0/2.0-erken) profillerde bulunmaz; okunurken PDF_DENETLENEBILIR sayılır.
+   */
+  verifiability: CriterionVerifiability;
   /**
    * Geriye uyumluluk alanı: YENİ profillerde her zaman `true`.
    *
@@ -276,6 +345,8 @@ export type CriterionFinding = {
   criterionName: string;
   stage: CheckStage;
   required: boolean;
+  /** Kriterin kanıt türü; PDF dışı kurallar hiçbir zaman ihlal sayılmaz. */
+  verifiability: CriterionVerifiability;
   verdict: RuleVerdict;
   rationale: string;
   /** Rapordan sayfa/paragraf numaralı doğrudan alıntılar. */
@@ -321,6 +392,11 @@ export type VerdictSummary = {
   basarili: number;
   revizyon: number;
   kritikHata: number;
+  /**
+   * PDF'den değerlendirilemeyen (harici kanıt / hakem kontrolü) kural sayısı.
+   * Eski kayıtlarda bulunmaz; okunurken 0 sayılır. Hata sayacı DEĞİLDİR.
+   */
+  disiKanit?: number;
   overall: RuleVerdict;
 };
 
@@ -354,6 +430,15 @@ export const PARTICIPANT_FEEDBACK_HINTS = {
   suggestions: "Bir sonraki sürümde düzeltmeniz önerilen noktalar.",
 } as const satisfies Record<keyof ParticipantFeedback, string>;
 
+/**
+ * Yapay zekâ uyarısı — tek doğruluk kaynağı (madde 10).
+ *
+ * Yapay zekâ analizinin gösterildiği bütün hakem ve katılımcı ekranlarında,
+ * sonucun HEMEN ALTINDA görünür. Genel sayfa altbilgisine konmaz.
+ */
+export const AI_DISCLAIMER =
+  "Yapay zekâ tarafından üretilen analizler hata içerebilir. Nihai değerlendirme yetkili hakeme aittir.";
+
 /** Rapor analiz çıktısının tam şeması; POST /api/evaluate-report bu JSON'u döndürür. */
 export type ReportEvaluation = {
   version: "2.0";
@@ -364,11 +449,23 @@ export type ReportEvaluation = {
     year: string;
     stage: string;
     reportType: string;
+    /**
+     * Sonucun üretildiği DEĞİŞMEZ kriter sürümü. Kriterler yeniden
+     * yayımlandığında sürüm artar ve bu sonuç eskir; ekran "Kriterler
+     * güncellendi, yeniden analiz gerekli" uyarısı gösterir.
+     * Eski kayıtlarda bulunmaz.
+     */
+    criteriaVersion?: number | null;
+    criteriaHash?: string | null;
   };
   report: {
     name: string;
     pages: number;
     sizeBytes: number;
+    /** Analiz edilen PDF'in SHA-256'sı; sonuç başka bir dosyaya bağlanamaz. */
+    pdfHash?: string | null;
+    /** Analizin yapıldığı katılımcı rapor sürümü (submission_versions.id). */
+    submissionVersionId?: string | null;
   };
   /** Dosya kapısı ve havuz benzerliği gibi deterministik kontroller. */
   preChecks: PreCheck[];

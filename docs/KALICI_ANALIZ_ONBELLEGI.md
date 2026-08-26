@@ -25,10 +25,13 @@ sınırı budaması en sık kullanılan belgeyi silemesin.
 Anahtar, şu bağlamın SHA-256 özetidir; **dosya adı değil belge içeriği** esastır:
 
 ```
-{ promptVersion: EXTRACTION_PROMPT_VERSION,
-  document: sha256(PDF baytları),
-  model: GEMINI_MODEL,
-  mediaResolution, thinking, pageCount }
+{ promptVersion: EXTRACTION_PROMPT_VERSION,   // istem sürümü
+  document:      sha256(PDF baytları),        // şartnamenin GERÇEK içerik özeti
+  model:         GEMINI_MODEL,                // kullanılan model
+  mediaResolution,                            // medya/çözünürlük ayarı
+  thinking,                                   // düşünme bütçesi
+  maxOutputTokens, temperature,               // analiz yapılandırması
+  pageCount }                                 // sayfa sayısı
 ```
 
 Aynı PDF farklı adla yüklense de isabet eder. Talimat/şema (`EXTRACTION_PROMPT_VERSION`),
@@ -91,6 +94,18 @@ düzenlenirken gösterilmez ve yeni belge seçiminde sıfırlanır.
    (yalnızca çift maliyet olasılığı kalır).
 4. **`JSON.parse("null")` kapanı.** Nesne olmayan gövde 502 ile reddedilir; önbelleğe
    giremez.
+5. **"Yeniden analiz et".** Yarışma Yöneticisi hem 1. adımda hem de önbellek notunun
+   yanında bu seçeneği görür. İstek `refresh=1` ile gider; bellek kaydı silinir, D1
+   kaydı `deleteStoredAnalysis` ile kaldırılır, uçuş içi birleştirme atlanır ve model
+   GERÇEKTEN yeniden çalışır. Yeni sonuç eski kaydın üzerine yazılır. Böylece eski ama
+   hatalı bir sonuç sistemde sonsuza kadar kalamaz.
+6. **Ayar değişikliği eski kaydı geçersiz kılar.** İstem sürümü, model, çözünürlük,
+   düşünme bütçesi, çıktı tavanı, sıcaklık veya sayfa sayısı değişirse anahtar
+   eşleşmez; belge bir kez yeniden analiz edilir. Ayrı bir temizleme adımı gerekmez.
+7. **Aynı veri şeması.** Önbellekten dönen sonuç ile taze sonuç BİREBİR aynı
+   `AnalysisResult` şemasını kullanır; yalnızca `diagnostics` alanları farklıdır
+   (`cached: true`, `apiCalls: 0`, `cacheStore`, `firstAnalyzedAt`). Normalizasyon her
+   okumada yeniden çalıştığı için ham çıktı saklanır, işlenmiş sonuç değil.
 
 ## Canlı doğrulama (İDA şartnamesi · 29 sayfa · 1,8 MB)
 

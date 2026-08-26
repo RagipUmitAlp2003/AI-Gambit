@@ -17,10 +17,15 @@ export class AnalysisRequestError extends Error {
   }
 }
 
-export async function analyzeWithGemini(file: File, pageCount: number): Promise<AnalysisResult> {
+/**
+ * @param forceRefresh "Yeniden analiz et": kayıtlı sonuç atlanır, model
+ * gerçekten yeniden çalışır ve eski kayıt yeni sonuçla değiştirilir.
+ */
+export async function analyzeWithGemini(file: File, pageCount: number, forceRefresh = false): Promise<AnalysisResult> {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("pageCount", String(pageCount));
+  if (forceRefresh) formData.append("refresh", "1");
 
   const response = await fetch("/api/analyze", {
     method: "POST",

@@ -9,6 +9,7 @@ import { formatDateTime } from "../lib/admin-client";
 import { WorkflowApiError, workflowApi } from "../lib/workflow-client";
 import { APPLICATION_STATUS_LABELS, type CompetitionApplication } from "../lib/workflow-types";
 import { PARTICIPANT_FEEDBACK_HINTS, PARTICIPANT_FEEDBACK_LABELS } from "../lib/types";
+import AiDisclaimer from "./ai-disclaimer";
 
 type ParticipantView = "competitions" | "applications";
 
@@ -38,10 +39,23 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
 const OUTCOME_LABELS: Record<CompetitionApplication["outcome"], string> = {
   pending: "Sonuç henüz açıklanmadı",
-  accepted: "ONAY — hakem inceledi ve onayladı",
-  rejected: "RED — hakem inceledi ve reddetti",
+  accepted: "ONAYLANDI — hakem inceledi ve onayladı",
+  rejected: "REDDEDİLDİ — hakem inceledi ve reddetti",
   revision_required: "Hakem inceledi; hatalar düzeltilmeli",
 };
+
+/**
+ * Yarışmacının gördüğü durum satırı.
+ *
+ * ONAY, RED ve REVİZYON aynı kaynaktan (`application.outcome`) ve aynı anda
+ * okunur: hakem kararı kesinleştirdiği anda üçü de görünür. Eskiden ONAY,
+ * "sonuçlar yayımlanana kadar" gizleniyor ve yarışmacı hiçbir şey göremiyordu
+ * (madde 9).
+ */
+function stageLabel(application: CompetitionApplication): string {
+  if (application.status === "completed") return OUTCOME_LABELS[application.outcome];
+  return APPLICATION_STATUS_LABELS[application.status];
+}
 
 export default function ParticipantPortal({ account, onSignOut }: { account: AdminAccount; onSignOut: () => void | Promise<void> }) {
   const [view, setView] = useState<ParticipantView>("competitions");
@@ -269,14 +283,39 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
           <div className="participant-application-list">
             {applications.map((application) => (
               <article key={application.id}>
-                <div className="application-line"><div><span>{APPLICATION_STATUS_LABELS[application.status]}</span><h2>{application.competitionName}</h2><p>{application.teamName} · {application.fileName ?? "Başvuru PDF'i"} · {application.sizeBytes ? `${formatFileSize(application.sizeBytes)} · ` : ""}{formatDateTime(application.submittedAt)}</p>{application.status === "completed" ? <strong className={`application-outcome ${application.outcome}`}>{OUTCOME_LABELS[application.outcome]}</strong> : null}</div><a href={`/api/applications/${application.id}/file`} target="_blank" rel="noreferrer" className="secondary-button">PDF&apos;i aç</a></div>
-                {application.outcome === "rejected" ? (
+                <div className="application-line"><div><span>{stageLabel(application)}</span><h2>{application.competitionName}</h2><p>{application.teamName} · {application.fileName ?? "Başvuru PDF'i"} · {application.sizeBytes ? `${formatFileSize(application.sizeBytes)} · ` : ""}{formatDateTime(application.submittedAt)}</p>{application.status === "completed" ? <strong className={`application-outcome ${application.outcome}`}>{OUTCOME_LABELS[application.outcome]}</strong> : null}</div><a href={`/api/applications/${application.id}/file`} target="_blank" rel="noreferrer" className="secondary-button">PDF&apos;i aç</a></div>
+                {/*
+                  KARAR KUTUSU (madde 9)
+                  Onay ve ret AYNI veri kaynağından okunur ve aynı ayrıntıyı
+                  gösterir: karar tarihi, yarışma, takım ve varsa hakem notu.
+                */}
+                {application.status === "completed" && application.outcome === "accepted" ? (
+                  <div className="participant-approval" role="note">
+                    <strong>Başvurunuz onaylandı</strong>
+                    <p>{application.outcomeNote || "Hakem ek not yazmadı; raporunuz kriterlere uygun bulundu."}</p>
+                    <dl className="participant-decision-facts">
+                      <div><dt>Karar tarihi</dt><dd>{formatDateTime(application.decidedAt ?? application.completedAt)}</dd></div>
+                      <div><dt>Yarışma</dt><dd>{application.competitionName}</dd></div>
+                      <div><dt>Takım</dt><dd>{application.teamName}</dd></div>
+                      {application.judgeName ? <div><dt>Değerlendiren hakem</dt><dd>{application.judgeName}</dd></div> : null}
+                    </dl>
+                    <small>Bu sonuç e-posta adresinize de gönderildi.</small>
+                  </div>
+                ) : application.status === "completed" && application.outcome === "rejected" ? (
                   <div className="participant-rejection" role="note">
                     <strong>Başvurunuz reddedildi</strong>
                     <p>{application.outcomeNote || "Hakem ret gerekçesi kaydetmedi. Ayrıntı için yarışma sekretaryasına başvurun."}</p>
+                    <dl className="participant-decision-facts">
+                      <div><dt>Karar tarihi</dt><dd>{formatDateTime(application.decidedAt ?? application.completedAt)}</dd></div>
+                      <div><dt>Yarışma</dt><dd>{application.competitionName}</dd></div>
+                      <div><dt>Takım</dt><dd>{application.teamName}</dd></div>
+                      {application.judgeName ? <div><dt>Değerlendiren hakem</dt><dd>{application.judgeName}</dd></div> : null}
+                    </dl>
                     <small>Bu gerekçe e-posta adresinize de gönderildi.</small>
                   </div>
-                ) : application.status === "completed" && application.outcomeNote ? <p className="participant-outcome-note">{application.outcomeNote}</p> : null}
+                ) : application.status === "completed" && application.outcomeNote
+                  ? <p className="participant-outcome-note">{application.outcomeNote}</p>
+                  : null}
                 {application.status === "completed" && application.review?.feedbackApproved ? (
                   /* Problem 4 · "AI 4. Göz": hakem kararı sonrası üç kart. */
                   <div className="participant-result">
@@ -292,8 +331,10 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
                         </section>
                       );
                     })}
+                    {/* AI destekli geri bildirimin HEMEN ALTINDA (madde 10). */}
+                    <AiDisclaimer compact />
                   </div>
-                ) : application.outcome === "rejected" ? null : <p className="application-wait-note">Sonuç, hakem nihai değerlendirmeyi tamamlayıp geri bildirimi onayladığında burada açılır. AI ön değerlendirmesi tek başına sonuç değildir.</p>}
+                ) : application.status === "completed" ? null : <p className="application-wait-note">Sonuç, hakem nihai değerlendirmeyi tamamlayıp geri bildirimi onayladığında burada açılır. AI ön değerlendirmesi tek başına sonuç değildir.</p>}
                 {(application.status === "document_reupload_requested" || (application.status === "completed" && application.outcome === "revision_required")) ? (
                   <div className="participant-revision-box">
                     <div><strong>Yeni rapor sürümü gerekli</strong><p>Eski dosyanız korunur. Düzeltilmiş PDF yeni sürüm olarak aynı başvuruya eklenir.</p></div>

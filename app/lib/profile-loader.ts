@@ -1,4 +1,4 @@
-import { isCheckStage, type CheckStage, type Criterion, type ProfileExport, type SetupData, type TemplateProfile } from "./types";
+import { isCheckStage, isCriterionVerifiability, type CheckStage, type Criterion, type CriterionVerifiability, type ProfileExport, type SetupData, type TemplateProfile } from "./types";
 
 export const LAST_PROFILE_KEY = "kriter-atolyesi:last-profile";
 
@@ -6,6 +6,16 @@ const VIOLATION_ACTIONS = ["block", "warn", "jury", "unspecified"] as const;
 
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function resolveStoredVerifiability(
+  raw: Record<string, unknown>,
+  pdfStage: boolean,
+  informational: boolean,
+): CriterionVerifiability {
+  if (isCriterionVerifiability(raw.verifiability)) return raw.verifiability;
+  if (informational) return "HAKEM_KONTROLU_GEREKLI";
+  return pdfStage ? "PDF_DENETLENEBILIR" : "HARICI_KANIT_GEREKLI";
 }
 
 /**
@@ -42,6 +52,10 @@ export function upgradeLegacyCriterion(raw: Record<string, unknown>, index: numb
     violationOutcome: stringOr(raw.violationOutcome, "Belgede belirtilmemiş"),
     sourcePage: Number.isInteger(page) && page > 0 ? page : null,
     sourceText: stringOr(raw.sourceText, ""),
+    // Alan eski profillerde yoktur. Eski modelin "PDF aşaması dışı" saydığı
+    // (saha/fiziksel/bilgilendirme) maddeler harici kanıt olarak taşınır;
+    // böylece rapor analizinde "PDF'de yok" diye ihlal üretilmez.
+    verifiability: resolveStoredVerifiability(raw, pdfStage, informational),
     active: raw.active === true && pdfStage && !informational,
     origin: raw.origin === "manager" ? "manager" : "document",
   };

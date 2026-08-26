@@ -29,12 +29,25 @@ import {
  *   Yapamaz kriter değiştirme, nihai karar, başvuru durumunu açma/kapatma
  *           (o yetki yarışmanın sahibi Yarışma Yöneticisindedir).
  */
+type ArchiveTrailEntry = {
+  id: string;
+  kind: "competition" | "application";
+  subject: string;
+  actorName: string;
+  at: string;
+  reason: string;
+  previousStatus: string;
+  nextStatus: string;
+};
+
 export default function OperationsPanel({ canInitialAssign = false }: { canInitialAssign?: boolean }) {
   const [applications, setApplications] = useState<CompetitionApplication[]>([]);
   const [overview, setOverview] = useState<CompetitionOverview[]>([]);
   const [summary, setSummary] = useState<OperationsSummary | null>(null);
   const [recent, setRecent] = useState<TimelineEntry[]>([]);
   const [judges, setJudges] = useState<JudgeWorkload[]>([]);
+  /** Kim neyi ne zaman ve neden arşivledi (madde 11); bu rol yalnızca görüntüler. */
+  const [archiveTrail, setArchiveTrail] = useState<ArchiveTrailEntry[]>([]);
   const [priorityNote, setPriorityNote] = useState<Record<string, string>>({});
   const [judgeChoice, setJudgeChoice] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState("");
@@ -51,6 +64,7 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
         setRecent(operationsResult.recent);
         setJudges(operationsResult.judges);
         setOverview(operationsResult.overview ?? []);
+        setArchiveTrail(operationsResult.archiveTrail ?? []);
         setError("");
       })
       .catch((caught) => setError(caught instanceof Error ? caught.message : "Süreç bilgileri yüklenemedi."))
@@ -99,6 +113,28 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
       setPriorityNote((current) => ({ ...current, [item.competitionId]: "" }));
       await load();
     } catch (caught) { setError(caught instanceof Error ? caught.message : "Öncelik güncellenemedi."); }
+    finally { setBusyId(""); }
+  }
+
+  /**
+   * Yarışmayı AKTİF / PASİF yapma (madde 6).
+   *
+   * Pasif yarışma yarışmacının listesinde görünmez ve yeni başvuru kabul
+   * etmez; hakem geçmiş başvuruları görmeye devam eder. Yarışmanın süreç
+   * aşaması ve kararları DEĞİŞMEZ.
+   */
+  async function toggleActive(item: CompetitionOverview) {
+    setBusyId(item.competitionId);
+    setError("");
+    setNotice("");
+    try {
+      const next = !item.isActive;
+      await workflowApi.setCompetitionActive(item.competitionId, next, priorityNote[item.competitionId] ?? "");
+      setNotice(next
+        ? `“${item.competitionName}” AKTİF edildi; yarışmacı listesinde görünür ve yeni başvuru kabul eder.`
+        : `“${item.competitionName}” PASİF edildi; yeni başvuru alınmaz. Hakem geçmiş başvuruları görmeye devam eder.`);
+      await load();
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "Yarışma durumu güncellenemedi."); }
     finally { setBusyId(""); }
   }
 
@@ -227,6 +263,9 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
                   </div>
                   <div className="competition-overview-tags">
                     <span className="status-chip neutral">{item.criteriaCount} kriter ayıklandı</span>
+                    <span className={`status-chip ${item.isActive ? "success" : "danger"}`}>
+                      {item.isActive ? "AKTİF" : "PASİF"}
+                    </span>
                     <span className={`status-chip ${item.acceptingApplications ? "success" : "neutral"}`}>
                       Başvuru: {item.acceptingApplications ? "Açık" : "Kapalı"}
                     </span>
@@ -236,12 +275,15 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
 
                 <div className="competition-overview-counts">
                   <div><strong>{item.total}</strong><span>toplam başvuru</span></div>
+                  <div><strong>{item.analysisCompleted}</strong><span>analizi tamamlanan</span></div>
+                  <div className={item.analysisPending ? "summary-warning" : ""}><strong>{item.analysisPending}</strong><span>analiz bekleyen</span></div>
                   <div><strong>{item.evaluated}</strong><span>değerlendirilen</span></div>
                   <div><strong>{item.accepted}</strong><span>onaylanan</span></div>
                   <div><strong>{item.rejected}</strong><span>reddedilen</span></div>
                   <div><strong>{item.pending}</strong><span>bekleyen</span></div>
                   {item.revision ? <div><strong>{item.revision}</strong><span>düzeltme istendi</span></div> : null}
                   {item.unassigned ? <div className="summary-warning"><strong>{item.unassigned}</strong><span>hakem atanamadı</span></div> : null}
+                  {item.archived ? <div><strong>{item.archived}</strong><span>arşivlenen</span></div> : null}
                 </div>
 
                 {/* Yoğunluk: bu yarışmanın tüm başvurular içindeki payı. */}
@@ -273,6 +315,15 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
                     {busyId === item.competitionId
                       ? "Güncelleniyor…"
                       : item.isPriority ? "Önceliği kaldır" : "🔥 Öncelikli işaretle"}
+                  </button>
+                  {/* Aktif/pasif: yeni başvuru ve yeni kuyruk üretimini durdurur (madde 6). */}
+                  <button
+                    type="button"
+                    className={item.isActive ? "danger-button ghost" : "secondary-button"}
+                    disabled={busyId === item.competitionId}
+                    onClick={() => toggleActive(item)}
+                  >
+                    {item.isActive ? "Pasife al" : "Aktifleştir"}
                   </button>
                 </div>
               </article>
@@ -333,6 +384,38 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
         })}
         {!filtered.length ? <p className="participant-empty">Aramanızla eşleşen başvuru bulunamadı.</p> : null}
       </div>
+
+      {/*
+        SİLME VE DENETİM GÖRÜNÜRLÜĞÜ (madde 11)
+        Hangi yarışma/başvuru kim tarafından, ne zaman, hangi gerekçeyle
+        arşivlendi. Bu bölüm YALNIZCA GÖRÜNTÜLENİR: bu rol katılımcı raporunun
+        içeriğini değiştiremez ve arşivlenmiş kaydı geri alamaz.
+      */}
+      <section className="operations-archive" aria-labelledby="operations-archive-title">
+        <div>
+          <h2 id="operations-archive-title">Arşivleme ve kaldırma kayıtları</h2>
+          <p>
+            Fiziksel silme yoktur: arşivlenen yarışma ve başvurular veri tabanında durur.
+            Aşağıdaki liste yalnızca izleme amaçlıdır.
+          </p>
+        </div>
+        {archiveTrail.length ? (
+          <div className="operations-table" role="table" aria-label="Arşivleme kayıtları">
+            <div className="operations-table-head archive-table-head" role="row">
+              <span>Kayıt</span><span>İşlemi yapan</span><span>Tarih</span><span>Önceki → yeni durum</span><span>Gerekçe</span>
+            </div>
+            {archiveTrail.map((entry) => (
+              <div key={entry.id} className="operations-table-row archive-table-row" role="row">
+                <span><strong>{entry.subject}</strong><small>{entry.kind === "competition" ? "Yarışma" : "Başvuru"}</small></span>
+                <span>{entry.actorName}</span>
+                <span>{formatDateTime(entry.at)}</span>
+                <span>{entry.previousStatus} → {entry.nextStatus}</span>
+                <span>{entry.reason}</span>
+              </div>
+            ))}
+          </div>
+        ) : <p className="participant-empty">Arşivlenmiş yarışma veya başvuru yok.</p>}
+      </section>
 
       <section className="operations-timeline" aria-label="Son süreç hareketleri">
         <div><h2>Son süreç hareketleri</h2><p>Rollerin gerçekleştirdiği son işlemler; sıralı belge devri değil, olay kaydıdır.</p></div>

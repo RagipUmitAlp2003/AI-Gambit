@@ -1,6 +1,16 @@
 import { env } from "cloudflare:workers";
 import { handleError, json, jsonError, readJson, requirePermission } from "../../../lib/admin-guard";
-import { assignApplication, coordinateApplication, findApplication, markApplicationAnalyzing, saveApplicationEvaluation, saveApplicationReview } from "../../../lib/workflow-db";
+import {
+  archiveApplication,
+  assignApplication,
+  coordinateApplication,
+  findApplication,
+  markApplicationAnalyzing,
+  reportBucket,
+  resolveEvaluationContext,
+  saveApplicationEvaluation,
+  saveApplicationReview,
+} from "../../../lib/workflow-db";
 import { isRuleVerdict, type JudgeReview, type ReportEvaluation } from "../../../lib/types";
 import { findAccountById, recordAudit, recordMail } from "../../../lib/admin-db";
 import type { CompetitionApplication } from "../../../lib/workflow-types";
@@ -117,9 +127,11 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
     const body = await readJson(request);
     const permission = body.action === "save_review"
       ? "final_judgement"
-      : body.action === "assign_judge" || ["remind_judge", "requeue_analysis", "request_document"].includes(String(body.action))
-        ? "coordinate_evaluation"
-        : "run_ai_prescreen";
+      : body.action === "archive_application"
+        ? "archive_application"
+        : body.action === "assign_judge" || ["remind_judge", "requeue_analysis", "request_document"].includes(String(body.action))
+          ? "coordinate_evaluation"
+          : "run_ai_prescreen";
     const auth = await requirePermission(request, permission);
     if (!auth.ok) return auth.response;
     const visibleApplication = await findApplication(id, auth.account);
@@ -150,7 +162,65 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
     } else if (body.action === "save_evaluation") {
       const evaluation = body.evaluation as ReportEvaluation | undefined;
       if (!validEvaluation(evaluation)) return jsonError(400, "AI değerlendirme çıktısı geçerli değil.");
-      await saveApplicationEvaluation(id, auth.account, evaluation);
+      /*
+       * BÜTÜNLÜK KAPISI (madde 3)
+       *
+       * Sonuç, sunucunun kendi kurduğu zincirle EŞLEŞMEDEN kaydedilmez:
+       *   application_id → competition_key → current_pdf_version → latest
+       *   published criteria version → evaluation_result
+       *
+       * Böylece istemci başka bir başvurunun, başka bir PDF sürümünün ya da
+       * eski bir kriter setinin sonucunu bu kayda yazdıramaz. Uyuşmazlıkta
+       * sessizce kaydedilmez; anlaşılır bir 409 döner.
+       */
+      const context = await resolveEvaluationContext(id, auth.account);
+      if (typeof context === "string") {
+        return jsonError(409, context === "forbidden"
+          ? "Bu başvuru size atanmadı; sonucu yalnızca atanan hakem kaydedebilir."
+          : "Değerlendirme bağlamı çözümlenemedi; sonuç kaydedilmedi.");
+      }
+      if (evaluation.profileRef?.criteriaVersion !== context.criteriaVersion.criteriaVersion
+        || evaluation.profileRef?.criteriaHash !== context.criteriaVersion.criteriaHash) {
+        return jsonError(409,
+          "Kriterler güncellendi, yeniden analiz gerekli. Bu sonuç "
+          + `v${evaluation.profileRef?.criteriaVersion ?? "?"} kriter sürümüyle üretildi; `
+          + `yürürlükteki sürüm v${context.criteriaVersion.criteriaVersion}.`);
+      }
+      // PDF özeti sunucudaki GEÇERLİ sürümle karşılaştırılır: başka bir belgenin
+      // analizi bu başvuruya yazılamaz.
+      const object = await reportBucket().get(context.fileKey);
+      if (!object) return jsonError(409, "Başvurunun geçerli PDF sürümü okunamadı; sonuç kaydedilmedi.");
+      const digest = await crypto.subtle.digest("SHA-256", await object.arrayBuffer());
+      const expectedHash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      if (evaluation.report?.pdfHash !== expectedHash) {
+        return jsonError(409,
+          "Analiz sonucu bu başvurunun geçerli PDF sürümüne ait değil; sonuç kaydedilmedi. "
+          + "Katılımcı yeni sürüm yüklemiş olabilir — analizi yenileyin.");
+      }
+      await saveApplicationEvaluation(id, auth.account, evaluation, false, {
+        criteriaVersion: context.criteriaVersion.criteriaVersion,
+        criteriaHash: context.criteriaVersion.criteriaHash,
+        pdfHash: expectedHash,
+        submissionVersionId: context.submissionVersionId,
+      });
+    } else if (body.action === "archive_application") {
+      // Arşivleme = soft delete. Kayıt, PDF ve değerlendirme geçmişi silinmez.
+      const archived = body.archived !== false;
+      const reason = typeof body.note === "string" ? body.note.trim() : "";
+      if (archived && !reason) return jsonError(400, "Başvuruyu listeden kaldırmak için gerekçe yazın.");
+      const result = await archiveApplication(id, archived, reason, auth.account);
+      if (result === "not_found") return jsonError(404, "Başvuru bulunamadı.");
+      if (result === "forbidden") return jsonError(403, "Yalnızca size atanmış başvuruyu listenizden kaldırabilirsiniz.");
+      await recordAudit({
+        actorId: auth.account.id, actorEmail: auth.account.email, actorRole: auth.account.roleCode,
+        action: archived ? "application_archived" : "application_restored",
+        targetType: "competition_application", targetId: id,
+        detail: `${visibleApplication.competitionName} · ${visibleApplication.teamName}`
+          + `${reason ? ` · gerekçe: ${reason.slice(0, 200)}` : ""}`,
+      }).catch((auditError) => console.error("[audit] application archive", auditError));
+      // Arşivlenen kayıt hakemin aktif listesinden çıktığı için geri
+      // döndürülmez; kayıt SİLİNMEDİ, yalnızca işaretlendi.
+      return json({ application: result === "archived" ? null : result, archived });
     } else if (body.action === "analysis_failed") {
       await saveApplicationEvaluation(id, auth.account, null, true);
     } else if (body.action === "save_review") {

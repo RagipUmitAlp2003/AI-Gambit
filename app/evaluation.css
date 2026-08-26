@@ -173,3 +173,28 @@
   .eval-result-actions { grid-column: 2; justify-items: start; }
   .eval-result-actions small { text-align: left; }
 }
+
+/* ---------------------------------------------------------------------------
+ * PDF'den değerlendirilemeyen kurallar (madde 4)
+ *
+ * Bunlar hata DEĞİLDİR: kanıtları raporun dışındadır (video, portal yüklemesi,
+ * fiziksel teslim, kurul kararı). Kırmızı/sarı hata renklerinden ayrı, nötr
+ * mavi bir kimlikle ve ayrı bir bölümde gösterilir.
+ * ------------------------------------------------------------------------- */
+.eval-verdict.DEGERLENDIRILEMEDI { color: #245a7a; background: #e8f2f7; border-color: #a9c8d8; }
+.eval-mark.DEGERLENDIRILEMEDI { background: #4b7f9c; }
+.eval-stage-icon.DEGERLENDIRILEMEDI { color: #245a7a; background: #e8f2f7; }
+.eval-result-row.DEGERLENDIRILEMEDI { border-color: #a9c8d8; background: #f6fbfd; }
+.eval-result-summary .DEGERLENDIRILEMEDI strong { color: #245a7a; }
+
+.eval-outside-group { border: 1px solid #a9c8d8; border-radius: var(--radius-md); padding: 14px 16px; background: #f9fcfd; }
+.eval-outside-note { margin: 0 0 12px; color: var(--ink-soft); font-size: 11.5px; line-height: 1.6; }
+
+/* Kriterler analizden sonra yeniden yayımlandı (madde 2). */
+.criteria-outdated { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.criteria-outdated .secondary-button { margin-left: auto; }
+
+/* Hakemin başvuruyu aktif listeden kaldırması (arşivleme, madde 11). */
+.eval-archive-row { display: flex; justify-content: flex-end; padding: 4px 0; }
+.eval-archive-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; width: 100%; }
+.eval-archive-form .field { flex: 1 1 260px; }

@@ -4,13 +4,17 @@ TEKNOFEST benzeri yarışmalarda organizatörün yüklediği şartname PDF'sini;
 
 ## Rol bazlı yönetici girişi
 
-Uygulama `http://localhost:3000` adresinde yönetici giriş ekranıyla açılır. Yönetici hesapları ve oturumları Cloudflare D1 içinde saklanır; gerçek giriş e-posta ve PBKDF2 ile özetlenmiş parola üzerinden yapılır. Yerel geliştirmede `ALLOW_DEV_LOGIN=on` olduğunda dört şifresiz rol kısayolu görünür; bu kısayollar `APP_ENV=production` ortamında sunucu tarafından kapatılır.
+Uygulama `http://localhost:3000` adresinde **tek bir giriş formuyla** açılır: kullanıcı adı (veya e-posta) ve şifre. **Giriş sırasında rol seçilmez.** Sistem hesabı Cloudflare D1'den doğrular ve hesabın rolüne göre doğru paneli otomatik açar. Parolalar açık metin saklanmaz; PBKDF2-SHA256 ile özetlenir. Şifresiz rol kısayolları kaldırılmıştır.
+
+Sistemde hiç Admin yokken, üretim DIŞI ortamda giriş ekranında **“Kurulum Admini oluştur”** düğmesi görünür ve `admin` / `1234` hesabını **bir kez** açar. Bu hesap yalnızca geliştirme ve demo içindir; ikinci kez çalıştırıldığında ikinci bir Admin üretmez ve üretimde uç 404 döner.
 
 - **00 · Genel Yönetici / Admin:** yalnızca yönetici ataması yapar. Personel hesabı açar, rol atar/kaldırır ve atama geçmişini izler. Kriter, değerlendirme, operasyon ve başvuru uçlarına erişmez; hakem atayamaz.
 - **01 · Yarışma Yöneticisi:** `/kriter-atolyesi` üzerinden şartname PDF'sini analiz eder, kriterleri düzenler ve değerlendirme profilini yayımlar.
 - **02 · Hakem:** `/degerlendirme` üzerinden kriteri çıkarılmış yarışmayı ve kendisine atanmış başvuruyu seçer, **Yapay Zeka Analizi** ile kriterleri PDF'e karşı kontrol ettirir, ONAY / RED kararını verir; RED'de hata analizi şablon olarak yarışmacıya iletilir.
 - **03 · Yarışmacı:** hesap oluşturur, yarışmayı seçer, PDF raporunu gönderir ve yalnızca hakem onaylı sonucunu görür.
-- **04 · Değerlendirme Yöneticisi:** başvuruya **ilk hakemi atar**; hakem yüklerini ve hata kuyruğunu izler; yeniden atama, hatırlatma, analizi yeniden sıraya alma, süreç kilitleme ve sonuç yayınını yönetir. Kriter değiştiremez, rapor değerlendiremez, nihai karar veremez.
+- **04 · Değerlendirme Yöneticisi:** hakem yüklerini ve hata kuyruğunu izler; yeniden atama, hatırlatma, analizi yeniden sıraya alma, yarışmayı aktif/pasif yapma ve sonuç yayın akışını yönetir. Arşivleme kayıtlarını (kim, ne zaman, neden) yalnızca **görüntüler**. Kriter değiştiremez, rapor değerlendiremez, nihai karar veremez.
+
+Başvuru alındığı anda **sistem** dosyayı uygun hakemler arasından en az açık dosyası olana otomatik atar (mümkünse aynı yarışmada görevli hakeme); eşit yükte sıra deterministiktir. Değerlendirme Yöneticisi gerektiğinde yeniden atar ve atama geçmişi korunur.
 
 Yetki matrisi tek kaynaktan okunur: `app/lib/authorization.ts`. Her API ucu bu matristeki bir izne bağlıdır; 00 rolü yalnızca `manage_accounts` iznine sahiptir. **03 · Yarışmacı** yönetici rolü değildir ve yönetici hesap ekranından atanmaz; yarışmacı giriş ekranından kendi hesabını oluşturur. Hem sayfalar hem de ücretli analiz uçları sunucu oturumuna ve role göre korunur.
 

@@ -42,11 +42,11 @@ Yalnızca yarışmanın PDF (rapor) aşaması kontrol edilir. Puanlama sistemler
 
 1. Yarışmacı açık yarışmayı seçer; adı-soyadı, takım adı, ekip üyeleri ve PDF'i gönderir.
 2. Başvuru D1'e, PDF özel R2 deposuna yazılır. Yükleme AI analizini başlatmaz.
-3. Değerlendirme Yöneticisi ilk Hakemi atar. Hakem yalnızca kendisine atanmış başvuruları görür.
-4. Hakem Değerlendirme Atölyesi'nde kriteri çıkarılmış yarışmayı, ardından başvuru kutusunu açar ve "Yapay Zeka Analizi" der; ikinci aşama başlar. Analiz, yayımlı kriterlerin rapor PDF'i ile karşılaştırılmasıdır.
+3. **Sistem** başvuruyu otomatik atar: aktif Hakemler arasından, mümkünse aynı yarışmada görevli olan, en az açık dosyası bulunan Hakem seçilir; eşit yükte sıra deterministiktir (en eski hesap, sonra kimlik). Atama transaction koşuluyla yapılır: aynı başvuru iki Hakeme birden atanamaz. Atama denetim izine ve süreç zaman çizelgesine yazılır. Aktif Hakem yoksa başvuru atanmamış kalır ve 04 panosunda kırmızı uyarı olarak görünür; Değerlendirme Yöneticisi elle atar veya sonradan yeniden atar (geçmiş kaybolmaz). Hakem yalnızca kendisine atanmış başvuruları görür.
+4. Hakem Değerlendirme Atölyesi'nde kriteri çıkarılmış yarışmayı, ardından başvuru kutusunu açar ve "Yapay Zeka Analizi" der; ikinci aşama başlar. **Analiz bağlamı tamamen sunucuda kurulur:** istemci kriter seti veya PDF gönderemez; sunucu başvurudan yarışmayı, yarışmadan SON yayımlanmış kriter sürümünü ve başvurudan geçerli PDF sürümünü çözer.
 5. Uygun kriterler ✓ ile, hatalı kriterler hata sebebi ve kaynak sayfaya giden düğmeyle listelenir. Hakem ONAY veya RED kararını verir; karar düğmesi, yarışmacıya iletilecek düzenlenebilir şablonu açar (kriter durumu ve hata sebebi elle değiştirilebilir).
 6. RED'de AI'nin adım adım hata analizi şablon olarak yarışmacıya iletilir; ekstra analiz yapılmaz. Kararı verilen başvuru "Geçmiş değerlendirmeler"e düşer, gerekirse yeniden açılır.
-7. Sonuç, sonuçlar yayımlanana kadar yarışmacıya açılmaz; yayımlanınca ONAY/RED, açıklama ve şablon görünür. Değerlendirme Yöneticisi yeni belge isteyebilir; yeni PDF sürümü eskiyi silmez.
+7. Sonuç, **hakem kararı kesinleştirdiği anda** yarışmacıya açılır. ONAY, RED ve REVİZYON aynı veri kaynağından okunur ve aynı ayrıntıyı taşır: karar tarihi, yarışma, takım, hakem ve varsa hakem notu. Tamamlanmamış hakem taslağı yarışmacıya gösterilmez. Değerlendirme Yöneticisi yeni belge isteyebilir; yeni PDF sürümü eskiyi silmez.
 
 ## İkinci AI aşaması — rapor değerlendirme
 
@@ -59,7 +59,46 @@ Sonuç dört aşama hâlinde döner:
 - **3. Kategori Uygunluğu ve Benzerlik:** 0–100 kategori uygunluk skoru ve havuz benzerlik durumu; aşama kararı.
 - **4. Kriter Bazlı Kanıt Çıkarma:** profildeki her aktif kural için tam olarak bir bulgu.
 
-Her bulgu kriter kimliği, aşama, zorunluluk, **BAŞARILI / REVİZYON / KRİTİK HATA** kararı, gerekçe ve rapordan sayfa/paragraf numaralı doğrudan alıntı taşır. Alıntı gösterilemediyse bulgu `evidenceMissing` ile işaretlenir; hakem kaynağı kendisi doğrular. Özet, kararların sayımını ve bütüncül sonucu verir. Hakem ekranında her kural için karar onaylanır ya da değiştirilir; hakemin nihai kural durumu AI bulgusundan ayrı saklanır.
+Her bulgu kriter kimliği, aşama, zorunluluk, kanıt yeri, **BAŞARILI / REVİZYON / KRİTİK HATA** kararı, gerekçe ve rapordan sayfa/paragraf numaralı doğrudan alıntı taşır. Alıntı gösterilemediyse bulgu `evidenceMissing` ile işaretlenir; hakem kaynağı kendisi doğrular. Özet, kararların sayımını ve bütüncül sonucu verir. Hakem ekranında her kural için karar onaylanır ya da değiştirilir; hakemin nihai kural durumu AI bulgusundan ayrı saklanır.
+
+### PDF dışından doğrulanacak kriterler
+
+Şartname analizi tanıtım videosu, saha teslimi, portal yüklemesi veya kurul kararı
+gerektiren kuralları da kriter olarak çıkarabilir. Rapor analizi YALNIZCA PDF üzerinde
+çalıştığı için bu kurallar modele hiç gönderilmez ve "PDF'de yok" diye ihlal sayılmaz.
+Her kriter kanıtının nerede olduğunu söyleyen bir alan taşır:
+
+| Değer | Rapor analizindeki davranış |
+| --- | --- |
+| `PDF_DENETLENEBILIR` | AI kriteri rapor PDF'i üzerinde değerlendirir. |
+| `HARICI_KANIT_GEREKLI` | "PDF üzerinden değerlendirilemez; harici kanıt kontrol edilmeli" olarak işaretlenir. |
+| `HAKEM_KONTROLU_GEREKLI` | Karar hakeme bırakılır. |
+
+Son iki tür hata sayaçlarına girmez, aşama sonucunu kötüleştirmez, zorunlu olsa bile
+kritik hata doğurmaz ve yarışmacı geri bildirimine "eksik" olarak yazılmaz. Hakem
+ekranında AYRI ve açık bir bölümde listelenir. Yarışma Yöneticisi kriterin bu türünü
+Kriter Atölyesi'nden değiştirebilir.
+
+### Kriter sürümleri ve değerlendirme bütünlüğü
+
+Yarışma Yöneticisi kriterleri her yayımladığında `criteria_profile_versions` tablosuna
+**yeni ve değişmez** bir satır yazılır (`criteria_version`, `criteria_hash`,
+`published_at`, `published_by`). Var olan satır asla güncellenmez.
+
+- Hakem analizi DAİMA son yayımlanan sürümü kullanır.
+- Kaydedilen sonuç, üretildiği kriter sürümüne ve katılımcı PDF'inin SHA-256'sına
+  bağlanır. Sunucu kaydetmeden önce bu bağı yeniden çözüp karşılaştırır; uyuşmazlıkta
+  kayıt yapılmaz ve anlaşılır bir hata döner.
+- Kriterler analizden sonra değişirse eski analiz "eskimiş" sayılır: ekranda
+  **"Kriterler güncellendi, yeniden analiz gerekli"** uyarısı çıkar ve sunucu bu analiz
+  üzerine nihai karar verilmesini reddeder.
+- Geçmiş değerlendirmeler kendi sürümleriyle korunur; yeni kriterlerle sessizce değişmez.
+
+Kriterin **kaynak sayfası ve kaynak alıntısı** ilk yayımda kilitlenir. Arayüzde salt
+okunurdur; istek elle düzenlense bile sunucu ilk değeri geri koyar ve işlemi denetim
+izine yazar. Kaynak yanlışsa çözüm elle düzeltmek değil, **"Yeniden analiz et"** ya da
+kriteri silip yerine yenisini oluşturmaktır. Elle eklenen kriterlerde kaynak boş kalır
+ve "Manuel kriter" olarak işaretlenir.
 
 ### Benzerlik
 
@@ -69,24 +108,61 @@ Anlamsal embedding katmanı bu sürümde dış servise ayrıca rapor metni gönd
 
 ## Değerlendirme Yöneticisi
 
-- Yeni başvuruya ilk Hakemi atar; iş akışı bu atamayla başlar.
+- İlk atamayı sistem yapar; 04 atanamayan başvuruları görür ve elle atar.
 - Hakem başına aktif, tamamlanan ve hatalı dosya sayılarını görür.
 - Atanmış raporu başka Hakeme aktarabilir ve sistem içi hatırlatma oluşturabilir.
 - Başarısız AI analizini yeniden sıraya alabilir veya yarışmacıdan yeni PDF isteyebilir.
-- Başvuruları kapatır, değerlendirmeyi başlatır, kararları dondurur, sonuçları yayımlar ve yarışmayı arşivler.
+- Yarışmayı **aktif/pasif** yapabilir ve ÖNCELİKLİ işaretleyebilir.
+- Her yayımlanmış yarışma için aktif/pasif durumu, toplam başvuru, analizi tamamlanan,
+  analiz bekleyen, onaylanan, reddedilen sayılarını ve hakemlere göre iş yükünü görür.
+- Arşivleme kayıtlarını (hangi yarışma/başvuru, kim, ne zaman, hangi gerekçe, önceki ve
+  yeni durum) **yalnızca görüntüler**; kayıtları değiştiremez.
 - Katılımcı PDF'ini, kanıt alıntılarını ve özel proje içeriğini göremez.
 
-## Admin
+## Aktif / pasif yarışma ve arşivleme
+
+**Aktif/pasif** süreç aşamasından bağımsız bir anahtardır ve hem Yarışma Yöneticisi
+(kendi yarışmasında) hem Değerlendirme Yöneticisi tarafından çevrilebilir.
+
+| | Aktif | Pasif |
+| --- | --- | --- |
+| Yarışmacı listesi | görünür | görünmez |
+| Yeni başvuru | kabul edilir | kabul edilmez |
+| Hakem geçmiş başvuruları | görünür | görünür |
+| İzin verilen karar düzeltmeleri | yapılabilir | yapılabilir |
+| Yeni değerlendirme kuyruğu | oluşur | oluşmaz |
+
+Değişiklik ilgili bütün panellere aynı sorgudan yansır. Pasifleştirme hiçbir kaydı
+silmez ve aşamayı geri almaz.
+
+**Arşivleme soft delete'tir.** Yarışma Yöneticisi kendi eski yarışmalarını, Hakem ise
+kendisine atanmış bir başvuruyu aktif listesinden kaldırabilir. Hiçbiri fiziksel silme
+değildir: kayıt, PDF ve değerlendirme geçmişi yerinde kalır; `deleted_at`, `deleted_by`
+ve gerekçe yazılır, işlem denetim izine düşer ve Değerlendirme Yöneticisi panosunda
+görünür.
+
+## Admin ve giriş
 
 - Personel hesabı açar; 01, 02 ve 04 rollerini atar veya kaldırır; hesabı pasife alır.
 - Her atama denetim izine yazılır; atama geçmişini izler.
 - Yarışma sürecine, kriterlere, başvurulara ve değerlendirmeye erişmez.
 
+**Giriş** tek formdur: kullanıcı adı (veya e-posta) + şifre. Rol SEÇİLMEZ; sistem
+hesabı D1'den doğrular ve rolüne göre doğru paneli açar. Parolalar PBKDF2-SHA256 ile
+özetlenir, açık metin saklanmaz. Şifresiz rol kısayolları kaldırılmıştır.
+
+Sistemde hiç Admin yokken ve ortam üretim DIŞI iken giriş ekranında tek seferlik
+**Kurulum Admini** (`admin` / `1234`) açılabilir. İşlem idempotenttir: ikinci çağrı
+ikinci bir Admin üretmez. Bu hesap yalnızca geliştirme ve demo içindir; üretimde uç
+404 döner.
+
 ## Yarışma durumları
 
 `Kriter taslağı → AI kriter işlemi → Kriter inceleme → Başvuruya açık → Başvurular kapalı → Değerlendiriliyor → Kararlar donduruldu → Sonuçlar yayımlandı → Arşiv`
 
-Kararlar dondurulmadan önce bütün başvurular tamamlanmış olmalıdır. Aşama geçişlerini yalnızca Değerlendirme Yöneticisi yapar; hiçbir rol geçersiz bir aşamayı atlayamaz.
+Kararlar dondurulmadan önce bütün başvurular tamamlanmış olmalıdır. Aşama geçişlerini
+yarışmanın SAHİBİ olan Yarışma Yöneticisi yapar; hiçbir rol geçersiz bir aşamayı
+atlayamaz. Aktif/pasif anahtarı bu zincirden ayrıdır ve aşamayı değiştirmez.
 
 ## Veritabanı
 
@@ -105,6 +181,12 @@ SQL sırası:
 5. `migrations/0005_final_workflow.sql`
 6. `migrations/0006_competition_priority.sql`
 7. `migrations/0007_analysis_cache.sql`
+8. `migrations/0008_integrity_and_lifecycle.sql`
+
+`0008` eklemelidir ve hiçbir satır silmez: değişmez kriter sürümleri tablosu
+(`criteria_profile_versions`), kriterin PDF'den denetlenebilirlik alanı, değerlendirme
+sonucunun kriter sürümü ve PDF özeti bağı, yarışmanın aktif/pasif anahtarı, yarışma ve
+başvuru için soft delete sütunları ve hesapların kullanıcı adı sütunu.
 
 ## Kontrol sonucu
 

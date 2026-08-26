@@ -5,15 +5,17 @@ import Link from "next/link";
 import TopbarSession from "./topbar-session";
 import { formatDateTime } from "../lib/admin-client";
 import { extractPdfText } from "../lib/pdf-reader";
-import { applySimilarity, buildFileGateChecks, expectedLanguageCode } from "../lib/report-prechecks";
+import { applySimilarity, expectedLanguageCode } from "../lib/report-prechecks";
 import { evaluateReport } from "../lib/report-evaluator";
 import { workflowApi } from "../lib/workflow-client";
 import { APPLICATION_STATUS_LABELS, type CompetitionApplication, type CompetitionProfile, type CompetitionWorkflow } from "../lib/workflow-types";
+import AiDisclaimer from "./ai-disclaimer";
 import {
   CHECK_STAGES,
   PARTICIPANT_FEEDBACK_LABELS,
-  RULE_VERDICTS,
+  PDF_RULE_VERDICTS,
   RULE_VERDICT_LABELS,
+  VERIFIABILITY_LABELS,
   checkStageOf,
   isRuleVerdict,
   type CriterionFinding,
@@ -125,17 +127,26 @@ function buildFeedback(findings: CriterionFinding[], decisions: JudgeDecision[])
     strengths: findings.filter((finding) => finalVerdictOf(finding, decisions) === "BASARILI").map((finding) => `✓ ${finding.criterionName}`),
     improvements: findings.filter((finding) => finalVerdictOf(finding, decisions) === "KRITIK_HATA").map((finding) => line(finding, "✕")),
     suggestions: findings.filter((finding) => finalVerdictOf(finding, decisions) === "REVIZYON").map((finding) => line(finding, "⚠")),
+    // PDF dışı kanıt gerektiren kurallar yarışmacıya "eksik" olarak gitmez.
   };
 }
 
 function countVerdicts(findings: CriterionFinding[], decisions: JudgeDecision[]) {
-  const counts = { BASARILI: 0, REVIZYON: 0, KRITIK_HATA: 0 };
+  // DEGERLENDIRILEMEDI hata sayacı değildir: PDF dışı kanıt gerektiren
+  // kurallar ayrı sayılır ve ekranda ayrı bir bölümde listelenir (madde 4).
+  const counts = { BASARILI: 0, REVIZYON: 0, KRITIK_HATA: 0, DEGERLENDIRILEMEDI: 0 };
   for (const finding of findings) counts[finalVerdictOf(finding, decisions)] += 1;
   return counts;
 }
 
+/** PDF'den doğrulanamayan kural mı? Bu kurallar hata listesine girmez. */
+function outsidePdf(finding: CriterionFinding, decisions: JudgeDecision[]): boolean {
+  return finalVerdictOf(finding, decisions) === "DEGERLENDIRILEMEDI";
+}
+
 function defaultOutcomeNote(outcome: Outcome, counts: ReturnType<typeof countVerdicts>): string {
-  const summary = `${counts.BASARILI} kriter uygun, ${counts.REVIZYON} kriter revizyon gerektiriyor, ${counts.KRITIK_HATA} kriterde kritik hata var.`;
+  const summary = `${counts.BASARILI} kriter uygun, ${counts.REVIZYON} kriter revizyon gerektiriyor, ${counts.KRITIK_HATA} kriterde kritik hata var.`
+    + (counts.DEGERLENDIRILEMEDI ? ` ${counts.DEGERLENDIRILEMEDI} kural rapor dışından (video, portal, kurul) kontrol edilmelidir.` : "");
   return outcome === "accepted"
     ? `Rapor kriterlere uygun bulundu ve onaylandı. ${summary}`
     : `Rapor kriterleri karşılamadığı için reddedildi. ${summary} Hatalı kriterler ve sebepleri aşağıda listelenmiştir.`;
@@ -482,7 +493,8 @@ function DecisionTemplate({ application, evaluation, outcome, decisions, note, s
 }) {
   const counts = countVerdicts(evaluation.findings, decisions);
   const feedback = buildFeedback(evaluation.findings, decisions);
-  const failed = evaluation.findings.filter((finding) => finalVerdictOf(finding, decisions) !== "BASARILI");
+  const failed = evaluation.findings.filter((finding) =>
+    finalVerdictOf(finding, decisions) !== "BASARILI" && !outsidePdf(finding, decisions));
   const passed = evaluation.findings.filter((finding) => finalVerdictOf(finding, decisions) === "BASARILI");
 
   return (
@@ -529,7 +541,7 @@ function DecisionTemplate({ application, evaluation, outcome, decisions, note, s
                         if (isRuleVerdict(value)) onDecision(finding.criterionId, { finalVerdict: value, verdict: value === finding.verdict ? "accepted" : "adjusted" });
                       }}
                     >
-                      {RULE_VERDICTS.map((verdict) => <option key={verdict} value={verdict}>{RULE_VERDICT_LABELS[verdict]}{verdict === finding.verdict ? " (AI)" : ""}</option>)}
+                      {PDF_RULE_VERDICTS.map((verdict) => <option key={verdict} value={verdict}>{RULE_VERDICT_LABELS[verdict]}{verdict === finding.verdict ? " (AI)" : ""}</option>)}
                     </select>
                   </div>
                   <textarea
@@ -591,12 +603,14 @@ function DecisionTemplate({ application, evaluation, outcome, decisions, note, s
   );
 }
 
-function ApplicationDetail({ application, analyzing, progress, onAnalyze, onFinalize }: {
+function ApplicationDetail({ application, analyzing, progress, onAnalyze, onFinalize, onArchive }: {
   application: CompetitionApplication;
   analyzing: boolean;
   progress: string;
-  onAnalyze: (application: CompetitionApplication) => void;
+  onAnalyze: (application: CompetitionApplication, force?: boolean) => void;
   onFinalize: (application: CompetitionApplication, review: JudgeReview) => Promise<boolean>;
+  /** Aktif iş listesinden kaldırma (arşivleme); fiziksel silme DEĞİLDİR. */
+  onArchive: (application: CompetitionApplication, reason: string) => Promise<void>;
 }) {
   const evaluation = usableEvaluation(application);
   const completed = application.status === "completed" && application.review?.status === "completed";
@@ -606,10 +620,19 @@ function ApplicationDetail({ application, analyzing, progress, onAnalyze, onFina
   const [note, setNote] = useState(application.review?.outcomeNote ?? "");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [archiving, setArchiving] = useState(false);
+  const [archiveReason, setArchiveReason] = useState("");
+  const [archiveOpen, setArchiveOpen] = useState(false);
 
   const canAnalyze = (ANALYZABLE_STATUSES as readonly string[]).includes(application.status) && !analyzing;
   const canRefresh = !analyzing && (canAnalyze || application.status === "awaiting_judge" || application.status === "judge_in_review");
   const locked = completed && !reopened;
+  /*
+   * KRİTER TAZELİĞİ (madde 2): kriterler bu analizden sonra yeniden
+   * yayımlandıysa sonuç eskimiştir. Sunucu da bu durumda nihai kararı
+   * reddeder; ekran nedenini önceden söyler.
+   */
+  const criteriaOutdated = application.criteriaOutdated && !completed;
 
   function patchDecision(criterionId: string, patch: Partial<JudgeDecision>) {
     setDecisions((current) => current.map((item) => item.criterionId === criterionId ? { ...item, ...patch } : item));
@@ -654,8 +677,13 @@ function ApplicationDetail({ application, analyzing, progress, onAnalyze, onFina
   }
 
   const counts = evaluation ? countVerdicts(evaluation.findings, decisions) : null;
-  const failed = evaluation ? evaluation.findings.filter((finding) => finalVerdictOf(finding, decisions) !== "BASARILI") : [];
+  const failed = evaluation
+    ? evaluation.findings.filter((finding) => finalVerdictOf(finding, decisions) !== "BASARILI" && !outsidePdf(finding, decisions))
+    : [];
   const passed = evaluation ? evaluation.findings.filter((finding) => finalVerdictOf(finding, decisions) === "BASARILI") : [];
+  // PDF üzerinden değerlendirilemeyen kurallar AYRI ve açık bir bölümde
+  // gösterilir; hata listesine karıştırılmaz (madde 4).
+  const outsideFindings = evaluation ? evaluation.findings.filter((finding) => outsidePdf(finding, decisions)) : [];
 
   return (
     <section className="eval-detail" aria-labelledby="eval-detail-title">
@@ -700,7 +728,23 @@ function ApplicationDetail({ application, analyzing, progress, onAnalyze, onFina
         </div>
       ) : (
         <>
+          {criteriaOutdated ? (
+            <div className="inline-error criteria-outdated" role="alert">
+              <strong>Kriterler güncellendi, yeniden analiz gerekli.</strong>
+              <span>
+                Bu analiz v{application.evaluationCriteriaVersion ?? "?"} kriter sürümüyle üretildi;
+                yürürlükteki sürüm v{application.currentCriteriaVersion}. Nihai karar vermeden önce
+                “Analizi yenile” deyin.
+              </span>
+              <button type="button" className="secondary-button" disabled={analyzing} onClick={() => onAnalyze(application, true)}>
+                Analizi yenile
+              </button>
+            </div>
+          ) : null}
+
           <StageStrip stages={evaluation.stages} />
+          {/* AI sonucunun HEMEN ALTINDA; altbilgide kaybolmaz (madde 10). */}
+          <AiDisclaimer />
 
           {evaluation.analysisWarnings.length ? (
             <details className="eval-warnings">
@@ -713,11 +757,14 @@ function ApplicationDetail({ application, analyzing, progress, onAnalyze, onFina
             <div className="BASARILI"><strong>{counts?.BASARILI}</strong><span>uygun kriter</span></div>
             <div className="REVIZYON"><strong>{counts?.REVIZYON}</strong><span>revizyon</span></div>
             <div className="KRITIK_HATA"><strong>{counts?.KRITIK_HATA}</strong><span>kritik hata</span></div>
+            {counts?.DEGERLENDIRILEMEDI
+              ? <div className="DEGERLENDIRILEMEDI"><strong>{counts.DEGERLENDIRILEMEDI}</strong><span>PDF dışı kanıt</span></div>
+              : null}
             <div><strong>{evaluation.findings.length}</strong><span>toplam kriter</span></div>
             {analyzing ? (
               <span className="eval-analyzing-note" role="status">{progress || "Analiz ediliyor…"}</span>
             ) : !locked ? (
-              <button type="button" className="text-button" disabled={!canRefresh} onClick={() => onAnalyze(application)}>Analizi yenile</button>
+              <button type="button" className="text-button" disabled={!canRefresh} onClick={() => onAnalyze(application, true)}>Analizi yenile</button>
             ) : null}
           </div>
 
@@ -753,6 +800,78 @@ function ApplicationDetail({ application, analyzing, progress, onAnalyze, onFina
                     {passed.map((finding) => <CriterionResult key={finding.criterionId} finding={finding} application={application} decisions={decisions} />)}
                   </ul>
                 ) : <p className="eval-result-empty">Uygun kriter bulunmadı.</p>}
+              </div>
+
+              {/*
+                PDF DIŞI KANIT (madde 4)
+                Video, portal yüklemesi, fiziksel teslim veya kurul kararı
+                gerektiren kurallar. Yapay zekâ bunlar için OLUMLU ya da
+                OLUMSUZ sonuç üretmez; raporda karşılıklarının bulunmaması
+                ihlal SAYILMAZ. Kanıtı hakem rapor dışından kontrol eder.
+              */}
+              {outsideFindings.length ? (
+                <div className="eval-result-group eval-outside-group">
+                  <h3>PDF üzerinden değerlendirilemeyen kurallar <span>{outsideFindings.length}</span></h3>
+                  <p className="eval-outside-note">
+                    Bu kuralların kanıtı rapor PDF&apos;inin dışındadır. Yapay zekâ bunları hatalı ya da eksik
+                    saymaz; kanıtı (video, portal yüklemesi, fiziksel teslim veya kurul kararı) siz kontrol
+                    edip kararı verirsiniz.
+                  </p>
+                  <ul className="eval-result-list compact">
+                    {outsideFindings.map((finding) => (
+                      <li key={finding.criterionId} className="eval-result-row DEGERLENDIRILEMEDI">
+                        <span className="eval-mark DEGERLENDIRILEMEDI" aria-label={RULE_VERDICT_LABELS.DEGERLENDIRILEMEDI} title={RULE_VERDICT_LABELS.DEGERLENDIRILEMEDI}>?</span>
+                        <div className="eval-result-body">
+                          <div className="eval-result-title">
+                            <strong>{finding.criterionName}</strong>
+                            <span className="eval-result-meta">
+                              {checkStageOf(finding.stage).shortTitle} · {finding.required ? "Zorunlu" : "Diğer"} · {VERIFIABILITY_LABELS[finding.verifiability]}
+                            </span>
+                          </div>
+                          <p className="eval-result-reason">{finding.rationale}</p>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              {/*
+                ARŞİVLEME (madde 11): fiziksel silme değildir. Kayıt, PDF ve
+                değerlendirme geçmişi yerinde kalır; işlem gerekçesiyle birlikte
+                denetim izine yazılır ve Değerlendirme Yöneticisi görebilir.
+              */}
+              <div className="eval-archive-row">
+                {archiveOpen ? (
+                  <div className="eval-archive-form" role="group" aria-label="Başvuruyu aktif listeden kaldır">
+                    <label className="field">
+                      <span className="field-label">Kaldırma gerekçesi</span>
+                      <input
+                        value={archiveReason}
+                        maxLength={400}
+                        placeholder="Örn. Yanlış yarışmaya gönderilmiş başvuru"
+                        onChange={(event) => setArchiveReason(event.target.value)}
+                      />
+                    </label>
+                    <button type="button" className="text-button" disabled={archiving} onClick={() => setArchiveOpen(false)}>Vazgeç</button>
+                    <button
+                      type="button"
+                      className="danger-button ghost"
+                      disabled={archiving || !archiveReason.trim()}
+                      onClick={async () => {
+                        setArchiving(true);
+                        try { await onArchive(application, archiveReason.trim()); setArchiveOpen(false); setArchiveReason(""); }
+                        finally { setArchiving(false); }
+                      }}
+                    >
+                      {archiving ? "Kaldırılıyor…" : "Aktif listeden kaldır"}
+                    </button>
+                  </div>
+                ) : (
+                  <button type="button" className="text-button" onClick={() => setArchiveOpen(true)}>
+                    Bu başvuruyu aktif listemden kaldır (arşivle)
+                  </button>
+                )}
               </div>
 
               <div className="eval-decision-bar">
@@ -837,7 +956,18 @@ export default function EvaluationApp() {
     setError("");
   }
 
-  async function analyze(application: CompetitionApplication) {
+  /**
+   * Yapay Zekâ Analizi.
+   *
+   * BÜTÜNLÜK (madde 3): istemci modele kriter ya da PDF GÖNDERMEZ. Sunucuya
+   * yalnızca başvuru kimliği gider; kriter seti (son yayımlanan sürüm) ve
+   * rapor PDF'i (R2'deki geçerli sürüm) sunucuda çözülür. Buradaki PDF indirme
+   * yalnızca kanıt alıntılarının doğrulanması ve benzerlik taraması içindir ve
+   * aynı yetkili uçtan (`/api/applications/{id}/file`) gelir.
+   *
+   * @param force "Analizi yenile": sunucudaki kayıtlı sonuç atlanır.
+   */
+  async function analyze(application: CompetitionApplication, force = false) {
     if (analyzingId) return;
     setAnalyzingId(application.id);
     setError("");
@@ -848,22 +978,15 @@ export default function EvaluationApp() {
       const current = (await workflowApi.updateApplication(application.id, "start_analysis")).application;
       started = true;
       replaceApplication(current);
-      if (!current.profileId) throw new Error("Bu yarışma için yayımlanmış kriter profili bulunamadı.");
-      const [profileResult, file] = await Promise.all([
-        workflowApi.profile(current.profileId),
-        workflowApi.applicationFile(current.id, current.fileName ?? "basvuru.pdf"),
-      ]);
-      const profile = profileResult.profile.profile;
       setProgress("Rapor PDF'i okunuyor…");
+      const file = await workflowApi.applicationFile(current.id, current.fileName ?? "basvuru.pdf");
       const extracted = await extractPdfText(file);
-      setProgress(`${profile.criteria.length} kriter rapor ile karşılaştırılıyor…`);
+      setProgress("Yayımlanmış kriterler rapor ile karşılaştırılıyor…");
       let evaluation = await evaluateReport({
-        profile,
-        file,
+        applicationId: current.id,
         pages: extracted.pages,
         pageCount: extracted.pageCount,
-        peers: [],
-        gateChecks: buildFileGateChecks(file, profile.setup),
+        force,
       });
       setProgress("Aynı yarışma havuzunda benzerlik kontrol ediliyor…");
       try {
@@ -890,6 +1013,20 @@ export default function EvaluationApp() {
     } finally {
       setAnalyzingId(null);
       setProgress("");
+    }
+  }
+
+  /** Arşivleme: fiziksel silme değil; kayıt ve denetim izi korunur (madde 11). */
+  async function archive(application: CompetitionApplication, reason: string): Promise<void> {
+    try {
+      await workflowApi.updateApplication(application.id, "archive_application", { note: reason });
+      setApplications((current) => current.filter((item) => item.id !== application.id));
+      setApplicationId(null);
+      setError("");
+      setNotice(`“${application.teamName}” aktif listenizden kaldırıldı. Kayıt silinmedi; işlem denetim izine yazıldı.`);
+    } catch (caught) {
+      setNotice("");
+      setError(caught instanceof Error ? caught.message : "Başvuru aktif listeden kaldırılamadı.");
     }
   }
 
@@ -966,6 +1103,7 @@ export default function EvaluationApp() {
                     progress={progress}
                     onAnalyze={analyze}
                     onFinalize={finalize}
+                    onArchive={archive}
                   />
                 ) : (
                   <ApplicationGrid applications={visible} selectedId={applicationId} analyzingId={analyzingId} onSelect={setApplicationId} />

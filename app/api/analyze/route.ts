@@ -13,7 +13,7 @@ import { MEDIA_RESOLUTION, describeGeminiFailure, mediaResolutionPart, runSingle
 import { recordUsage } from "../../lib/usage-metrics";
 import { pdfIntegrityError } from "../../lib/pdf-integrity";
 import { sourcePageLimit } from "../../lib/pdf-page-count";
-import { findStoredAnalysis, saveCriteriaExtractionRun, saveStoredAnalysis, touchStoredAnalysis } from "../../lib/workflow-db";
+import { deleteStoredAnalysis, findStoredAnalysis, saveCriteriaExtractionRun, saveStoredAnalysis, touchStoredAnalysis } from "../../lib/workflow-db";
 import type { AnalysisDiagnostics, AnalysisResult } from "../../lib/types";
 
 /**
@@ -320,13 +320,31 @@ export async function POST(request: Request) {
       promptVersion: EXTRACTION_PROMPT_VERSION,
       document: docHash,
       model: PRIMARY_MODEL,
-      // Çözünürlük ve düşünme bütçesi çıktıyı değiştirir; ayar değişince eski
-      // önbellek kaydı geçersiz olmalı, aksi hâlde yeni ayar hiç denenmez.
+      // Çözünürlük, düşünme bütçesi ve çıktı tavanı sonucu değiştirir; ayar
+      // değişince eski önbellek kaydı geçersiz olmalı, aksi hâlde yeni ayar
+      // hiç denenmez ve eski (hatalı) sonuç kalıcı hâle gelir.
       mediaResolution: MEDIA_RESOLUTION,
       thinking: thinkingLevelFor(pageCount),
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
+      temperature: 0,
       pageCount,
     });
     const cacheKey = await documentHash(new TextEncoder().encode(cacheContext).buffer);
+
+    /*
+     * YENİDEN ANALİZ (madde 1)
+     *
+     * Yarışma Yöneticisi "Yeniden analiz et" dediğinde `refresh=1` gelir:
+     * bellek ve D1 kayıtları ATLANIR, model gerçekten yeniden çalışır ve
+     * yeni sonuç eski kaydın üzerine yazılır. Böylece eski ama hatalı bir
+     * sonuç sistemde sonsuza kadar kalamaz.
+     */
+    const forceRefresh = String(formData.get("refresh") ?? "") === "1";
+    if (forceRefresh) {
+      analysisCache().delete(cacheKey);
+      await deleteStoredAnalysis(cacheKey).catch((cacheError) =>
+        console.error("[analyze] kalıcı analiz kaydı silinemedi", cacheError));
+    }
 
     /** Önbellek isabeti: modele gidilmez, 0 token; kaynağı tanılamaya yazılır. */
     const respondFromCache = async (extraction: CachedExtraction, store: "memory" | "database") => {
@@ -345,13 +363,13 @@ export async function POST(request: Request) {
       return Response.json(cachedResult);
     };
 
-    const cachedExtraction = analysisCache().get(cacheKey);
+    const cachedExtraction = forceRefresh ? undefined : analysisCache().get(cacheKey);
     if (cachedExtraction) return await respondFromCache(cachedExtraction, "memory");
 
     // Süreç belleğinde yoksa kalıcı kayda bakılır: sunucu yeniden başlasa bile
     // daha önce analiz edilmiş şartname modele gitmeden yanıtlanır. Kayıt
     // okunamazsa analiz normal yoldan sürer; önbellek hiçbir isteği düşürmez.
-    const storedAnalysis = await findStoredAnalysis(cacheKey).catch((cacheError) => {
+    const storedAnalysis = forceRefresh ? null : await findStoredAnalysis(cacheKey).catch((cacheError) => {
       console.error("[analyze] kalıcı analiz kaydı okunamadı", cacheError);
       return null;
     });
@@ -382,7 +400,7 @@ export async function POST(request: Request) {
     // çağrı başlatılmaz; ilk isteğin sonucu beklenir ve önbellek gibi sunulur.
     // (Bekleyiş analiz iznini tutar: en kötü durumda bir eşzamanlılık yuvası
     // ilk istek bitene dek dolu kalır; iki tam model çağrısından ucuzdur.)
-    const inflight = inflightAnalyses().get(cacheKey);
+    const inflight = forceRefresh ? undefined : inflightAnalyses().get(cacheKey);
     if (inflight) {
       const sharedExtraction = await inflight.catch(() => null);
       if (sharedExtraction) return await respondFromCache(sharedExtraction, "memory");

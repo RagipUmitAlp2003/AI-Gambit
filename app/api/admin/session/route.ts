@@ -1,7 +1,7 @@
 import {
   createSession,
   deleteSession,
-  findCredentialsByEmail,
+  findCredentialsByIdentifier,
   recordAudit,
 } from "../../../lib/admin-db";
 import { roleByCode } from "../../../lib/admin-roles";
@@ -26,8 +26,13 @@ import { hashPassword, verifyPassword } from "../../../lib/password";
 /**
  * Oturum ucu: giriş (POST), çıkış (DELETE) ve mevcut oturum (GET).
  *
- * Giriş akışı: e-posta + şifre → hesap D1'den bulunur → hesap aktif mi
- * kontrol edilir → parola özeti doğrulanır → imzalı oturum çerezi verilir.
+ * Giriş akışı: kullanıcı adı VEYA e-posta + şifre → hesap D1'den bulunur →
+ * hesap aktif mi kontrol edilir → parola özeti doğrulanır → imzalı oturum
+ * çerezi verilir.
+ *
+ * ROL SEÇİMİ YOKTUR (madde 7): kullanıcı giriş sırasında rol seçmez; rol
+ * veri tabanındaki hesaptan okunur ve panel ona göre açılır. Şifresiz rol
+ * kısayolu (eski `/api/admin/dev-session`) kaldırılmıştır.
  */
 
 /** Aynı izolat içinde kaba kuvvet denemelerini yavaşlatan basit sayaç. */
@@ -78,22 +83,26 @@ export async function POST(request: Request): Promise<Response> {
 
   try {
     const body = await readJson(request);
-    const email = requiredText(body, "email", "E-posta", 200).toLowerCase();
+    // `identifier` kullanıcı adı ya da e-posta olabilir. `email` alanı eski
+    // istemcilerle geriye uyum için kabul edilmeye devam eder.
+    const identifier = (typeof body.identifier === "string" && body.identifier.trim()
+      ? requiredText(body, "identifier", "Kullanıcı adı veya e-posta", 200)
+      : requiredText(body, "email", "Kullanıcı adı veya e-posta", 200)).toLowerCase();
     const password = requiredText(body, "password", "Şifre", 200);
 
-    const key = failureKey(request, email);
+    const key = failureKey(request, identifier);
     if (throttled(key)) {
       return jsonError(429, "Çok fazla başarısız deneme. Lütfen bir süre sonra tekrar deneyin.");
     }
 
-    const credentials = await findCredentialsByEmail(email);
+    const credentials = await findCredentialsByIdentifier(identifier);
 
     if (!credentials) {
       // Hesap yokken de bir türetme çalıştırılır; yanıt süresi hesap
       // varlığını ele vermesin.
       await verifyPassword(password, await hashPassword("kayitsiz-hesap-icin-sabit-deger"));
       noteFailure(key);
-      return jsonError(401, "E-posta veya şifre hatalı.");
+      return jsonError(401, "Kullanıcı adı, e-posta veya şifre hatalı.");
     }
 
     if (credentials.account.status !== "active") {
@@ -120,7 +129,7 @@ export async function POST(request: Request): Promise<Response> {
 
     if (!valid) {
       noteFailure(key);
-      return jsonError(401, "E-posta veya şifre hatalı.");
+      return jsonError(401, "Kullanıcı adı, e-posta veya şifre hatalı.");
     }
 
     failures.delete(key);

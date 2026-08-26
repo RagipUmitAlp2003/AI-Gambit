@@ -130,15 +130,26 @@ Kullanılabilir komutlar:
 | `npx tsc --noEmit` | Tip kontrolü |
 | `npm test` | Depo güvenliği + birim testleri + regresyon testleri (model çağrısı yapmaz) |
 | `npm run test:unit` | Şema, normalizasyon ve profil yükseltme birim testleri |
-| `npm run test:regressions` | İstek koruması (hız sınırı / eşzamanlılık) regresyonları |
+| `npm run test:regressions` | İstek koruması, bütünlük, yaşam döngüsü ve giriş regresyonları |
+| `npm run dev:reset` | Yerel geliştirme verisini KURU çalıştırmayla listeler (hiçbir şey silinmez) |
+| `npm run dev:reset -- --apply` | Yerel demo/test verisini siler; bootstrap Admin, corpus ve göçler korunur |
+| `npm run test:e2e` | Çalışan sunucuya karşı uçtan uca senaryo (ücretli AI çağrısı YAPMAZ) |
 
 ---
 
 ## 6. İlk deneme
 
 Değerlendirme Atölyesi yayımlı bir profil olmadan çalışmaz; bu yüzden sıra önemlidir.
-Yerel geliştirmede `.env.local` içine `ALLOW_DEV_LOGIN=on` yazarsanız giriş ekranında
-şifresiz rol kısayolları görünür; aşağıdaki adımlarda rol değiştirmek için bunları kullanın.
+
+**Giriş sistemi:** tek form vardır — kullanıcı adı (veya e-posta) + şifre. Rol
+seçilmez; panel hesabın rolüne göre açılır. Şifresiz rol kısayolları kaldırıldı.
+
+0. **Kurulum Admini.** Sistemde hiç Admin yoksa giriş ekranındaki
+   **“Kurulum Admini oluştur”** düğmesine basın: `admin` / `1234` hesabı bir kez
+   açılır. *Bu hesap yalnızca geliştirme ve demo içindir; üretime çıkarmayın.*
+   Ardından `admin` ile girip **Yönetici atama** panelinden 01, 02 ve 04
+   hesaplarını oluşturun. Yarışmacılar giriş ekranındaki **Yarışmacı kaydı**
+   sekmesinden kendi hesaplarını açar.
 
 1. `http://localhost:3000` adresini açın ve **01 · Yarışma Yöneticisi** olarak girin.
 2. **1. adım — Kaynak belge:** "Hazır test belgeleri" bölümünden birini seçin; isterseniz
@@ -154,8 +165,10 @@ Yerel geliştirmede `.env.local` içine `ALLOW_DEV_LOGIN=on` yazarsanız giriş 
    yazılır ve yarışma başvuruya açılır.
 5. **Başvuru:** **03 · Yarışmacı** olarak yarışmayı seçip bir PDF gönderin. Yükleme analiz
    başlatmaz.
-6. **Hakem ataması:** **04 · Değerlendirme Yöneticisi** olarak operasyon panosundan
-   başvuruya ilk hakemi atayın.
+6. **Hakem ataması:** başvuru alındığı anda **sistem** dosyayı en az açık dosyası
+   olan uygun hakeme otomatik atar. Atama yapılamadıysa (aktif Hakem hesabı yok)
+   **04 · Değerlendirme Yöneticisi** panosunda kırmızı uyarı çıkar ve elle
+   atanabilir; 04 gerektiğinde başka bir hakeme yeniden atar.
 7. **Hakem değerlendirmesi:** **02 · Hakem** olarak `/degerlendirme` adresinde
    **Değerlendirme Atölyesi**'ni seçin, soldan yarışmayı, ardından başvuru kutusunu açın ve
    **Yapay Zeka Analizi** deyin. Uygun kriterler ✓, hatalı kriterler sebebi ve
@@ -323,7 +336,8 @@ tools/                        Birim testleri, kalite ve karşılaştırma betikl
 `.openai/hosting.json` içinde D1 `DB` ve R2 `REPORTS` bağlamaları tanımlıdır.
 Dağıtım öncesinde `migrations/0001_admin.sql` … `0005_final_workflow.sql` sırasıyla
 uygulanmalı; `GEMINI_API_KEY`, `MODERATOR_SECRET` ve üretim e-posta değişkenleri sunucu
-sırrı olarak tanımlanmalıdır. `ALLOW_DEV_LOGIN=off` ve `APP_ENV=production` doğrulanmalıdır.
+sırrı olarak tanımlanmalıdır. `APP_ENV=production` doğrulanmalıdır: bu ortamda
+geliştirme bootstrap hesabı (`admin` / `1234`) hiç açılamaz ve varsa KALDIRILMALIDIR.
 
 Proje Cloudflare Workers/Sites çalışma modeline hazırdır; gerçek ortamda D1/R2
 kaynaklarının oluşturulması, bağlanması ve göçlerin uygulanması dağıtım adımıdır.

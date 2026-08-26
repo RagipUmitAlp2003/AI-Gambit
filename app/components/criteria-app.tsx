@@ -19,10 +19,14 @@ import {
 } from "../lib/draft-store";
 import {
   CHECK_STAGES,
+  CRITERION_VERIFIABILITIES,
+  VERIFIABILITY_HINTS,
+  VERIFIABILITY_LABELS,
   checkStageOf,
   type AnalysisResult,
   type CheckStage,
   type Criterion,
+  type CriterionVerifiability,
   type ProfileExport,
   type SetupData,
   type Step,
@@ -61,6 +65,7 @@ type CriterionDraft = {
   kind: CriterionKind;
   name: string;
   stage: CheckStage;
+  verifiability: CriterionVerifiability;
   description: string;
   violationOutcome: string;
   sourcePage: string;
@@ -72,11 +77,20 @@ function emptyDraft(kind: CriterionKind): CriterionDraft {
     kind,
     name: "",
     stage: "criteria_evidence",
+    verifiability: "PDF_DENETLENEBILIR",
     description: "",
     violationOutcome: "Belgede belirtilmemiş",
     sourcePage: "",
     sourceText: "",
   };
+}
+
+function verifiabilityBadge(value: CriterionVerifiability) {
+  return (
+    <span className={`verifiability-badge ${value.toLowerCase()}`} title={VERIFIABILITY_HINTS[value]}>
+      {VERIFIABILITY_LABELS[value]}
+    </span>
+  );
 }
 
 function formatBytes(bytes: number) {
@@ -177,6 +191,7 @@ function UploadStep({
   onFile,
   onSample,
   onAnalyze,
+  onReanalyze,
   analysisReady,
   loading,
   loadingMessage,
@@ -187,6 +202,8 @@ function UploadStep({
   onFile: (file: File) => void;
   onSample: (file: File) => void;
   onAnalyze: () => void;
+  /** Kayıtlı sonucu atlayıp modeli gerçekten yeniden çalıştırır. */
+  onReanalyze: () => void;
   analysisReady: boolean;
   loading: boolean;
   loadingMessage: string;
@@ -306,6 +323,14 @@ function UploadStep({
 
       <div className="workspace-actions">
         <span className="source-limit-note">Kaynak PDF analiz motoru için teknik yükleme sınırı: 18 MB.</span>
+        {/*
+          YENİDEN ANALİZ (madde 1): kayıtlı sonuç atlanır, model gerçekten
+          yeniden çalışır ve yeni sonuç eski kaydın üzerine yazılır. Sonuç
+          hatalıysa yönetici bu düğmeyle kaydı tazeler.
+        */}
+        <button type="button" className="secondary-button" disabled={!file || loading} onClick={onReanalyze}>
+          Yeniden analiz et
+        </button>
         <button type="button" className="primary-button" disabled={!file || loading} onClick={onAnalyze}>
           {analysisReady ? "Mevcut analize dön" : "Belgeyi analiz et"} <span aria-hidden="true">→</span>
         </button>
@@ -326,6 +351,7 @@ function CriteriaReview({
   setCriteria,
   onBack,
   onApprove,
+  onReanalyze,
   publishing,
   approvalError,
 }: {
@@ -358,6 +384,8 @@ function CriteriaReview({
   setCriteria: (criteria: Criterion[]) => void;
   onBack: () => void;
   onApprove: () => void;
+  /** Kayıtlı analizi atlayıp şartnameyi baştan analiz eder; kaynak PDF elde ise açıktır. */
+  onReanalyze: (() => void) | null;
   publishing: boolean;
   approvalError: string;
 }) {
@@ -444,6 +472,7 @@ function CriteriaReview({
       violationOutcome: draft.violationOutcome.trim().slice(0, 240) || "Belgede belirtilmemiş",
       sourcePage: page,
       sourceText: draft.sourceText.trim().slice(0, 900),
+      verifiability: draft.verifiability,
       active: true,
       origin: "manager",
     };
@@ -510,6 +539,7 @@ function CriteriaReview({
         </span>
         <span className={`criterion-value ${item.required ? "required" : "other"}`}>
           {item.required ? "Zorunlu" : "Diğer"}
+          {item.verifiability !== "PDF_DENETLENEBILIR" ? verifiabilityBadge(item.verifiability) : null}
         </span>
       </button>
     );
@@ -546,7 +576,14 @@ function CriteriaReview({
 
       {/* Not yalnızca taze bir önbellek isabetini anlatır; yayımlanmış profil
           düzenlenirken bağlam değiştiği için gösterilmez. */}
-      {cacheNotice && !editingPublished ? <p className="page-note" role="status">{cacheNotice}</p> : null}
+      {cacheNotice && !editingPublished ? (
+        <p className="page-note cache-notice" role="status">
+          {cacheNotice}
+          {onReanalyze ? (
+            <button type="button" className="text-button" onClick={onReanalyze}>Yeniden analiz et</button>
+          ) : null}
+        </p>
+      ) : null}
 
       {analysisWarnings.length ? (
         <ul className="analysis-warning-list" role="status">
@@ -613,6 +650,16 @@ function CriteriaReview({
                   onChange={(event) => setDraft({ ...draft, description: event.target.value })}
                   placeholder="Örn. Rapor Türkçe yazılmalıdır; başka dilde yazılan rapor değerlendirmeye alınmaz."
                 />
+              </Field>
+              <Field label="PDF'den denetlenebilirlik" hint={VERIFIABILITY_HINTS[draft.verifiability]}>
+                <select
+                  value={draft.verifiability}
+                  onChange={(event) => setDraft({ ...draft, verifiability: event.target.value as CriterionVerifiability })}
+                >
+                  {CRITERION_VERIFIABILITIES.map((value) => (
+                    <option key={value} value={value}>{VERIFIABILITY_LABELS[value]}</option>
+                  ))}
+                </select>
               </Field>
               <div className="form-grid two-col">
                 <Field label="İhlal sonucunda">
@@ -697,6 +744,20 @@ function CriteriaReview({
                     <option value="other">Diğer</option>
                   </select>
                 </Field>
+                {/*
+                  PDF dışı kanıt gerektiren kurallar rapor analizinde ihlal
+                  sayılmaz; "PDF'de video yok" gibi yanlış bir hata üretilmez.
+                */}
+                <Field label="PDF'den denetlenebilirlik" hint={VERIFIABILITY_HINTS[selected.verifiability]}>
+                  <select
+                    value={selected.verifiability}
+                    onChange={(event) => update({ verifiability: event.target.value as CriterionVerifiability })}
+                  >
+                    {CRITERION_VERIFIABILITIES.map((value) => (
+                      <option key={value} value={value}>{VERIFIABILITY_LABELS[value]}</option>
+                    ))}
+                  </select>
+                </Field>
                 <Field label="İhlal sonucunda">
                   <input value={selected.violationOutcome} onChange={(event) => update({ violationOutcome: event.target.value })} />
                 </Field>
@@ -715,24 +776,35 @@ function CriteriaReview({
                   <span title="Şartname PDF'i sunucuda saklanmamış; kriterleri yeniden yayımlayın.">Kaynak s. {selected.sourcePage} · belge kayıtlı değil</span>
                 ) : <span>Kaynak sayfa girilmedi</span>}
               </div>
-              <div className="manual-evidence-grid">
-                <Field label="Kaynak PDF sayfası" hint={`1–${pageCount} arası PDF sayfa sırası. Model yanlış okuduysa düzeltin.`}>
-                  <input
-                    type="number"
-                    min={1}
-                    max={pageCount}
-                    value={selected.sourcePage ?? ""}
-                    placeholder="Örn. 12"
-                    onChange={(event) => {
-                      const next = event.target.value === "" ? null : Math.round(Number(event.target.value));
-                      update({ sourcePage: next !== null && Number.isFinite(next) && next >= 1 ? Math.min(next, pageCount) : null });
-                    }}
-                  />
-                </Field>
-                <Field label="Kaynak alıntı" hint="Kuralı kanıtlayan cümle, belgeden birebir.">
-                  <textarea value={selected.sourceText} onChange={(event) => update({ sourceText: event.target.value })} />
-                </Field>
+              {/*
+                KAYNAK KİLİDİ (madde 12)
+                Kaynak sayfa ve kaynak alıntı AI'nin belgeden çıkardığı kanıttır
+                ve elle DEĞİŞTİRİLEMEZ; salt okunur gösterilir. Sunucu da aynı
+                kuralı uygular: istek elle düzenlense bile ilk yayımdaki değer
+                geri konur. Kaynak yanlışsa çözüm "Yeniden analiz et" ya da
+                kriteri silip yerine yenisini oluşturmaktır.
+              */}
+              <div className="manual-evidence-grid locked-evidence-grid">
+                <div className="field locked-field">
+                  <span className="field-label">Kaynak PDF sayfası</span>
+                  <output className="locked-value">
+                    {selected.sourcePage ?? (selected.origin === "manager" ? "Manuel kriter · kaynak yok" : "Kaynak sayfa yok")}
+                  </output>
+                  <span className="field-hint">Salt okunur. Değiştirilemez.</span>
+                </div>
+                <div className="field locked-field">
+                  <span className="field-label">Kaynak alıntı</span>
+                  <output className="locked-value locked-quote">
+                    {selected.sourceText || (selected.origin === "manager" ? "Manuel kriter · alıntı yok" : "Alıntı yok")}
+                  </output>
+                  <span className="field-hint">Salt okunur. Değiştirilemez.</span>
+                </div>
               </div>
+              <p className="locked-evidence-note">
+                Kaynak sayfa ve alıntı yapay zekânın belgeden çıkardığı kanıttır; düzenlenemez.
+                Kaynak yanlışsa <strong>şartnameyi yeniden analiz edin</strong> veya bu kriteri silip
+                doğru kaynağıyla yeni bir kriter oluşturun.
+              </p>
             </div>
 
             <div className="inspector-section delete-section">
@@ -833,10 +905,13 @@ function CriteriaReview({
 
 function ProfileReady({
   profile,
+  summary,
   onEdit,
   onRestart,
 }: {
   profile: ProfileExport;
+  /** Yayımın sürüm künyesi; kriter sürümleri değişmezdir (madde 2). */
+  summary: { version: number; created: boolean; sourceLockWarning: string } | null;
   onEdit: () => void;
   onRestart: () => void;
 }) {
@@ -872,9 +947,24 @@ function ProfileReady({
         </div>
       </div>
 
+      {summary?.sourceLockWarning ? (
+        <div className="inline-error" role="alert">
+          <strong>Kaynak alanları değiştirilemez.</strong>
+          <span>{summary.sourceLockWarning} Kaynak yanlışsa şartnameyi yeniden analiz edin ya da kriteri silip yenisini oluşturun.</span>
+        </div>
+      ) : null}
+
+      {summary ? (
+        <p className="page-note" role="status">
+          {summary.created
+            ? `Kriter sürümü v${summary.version} yayımlandı. Hakem analizleri bu sürümü kullanır; önceki sürümler geçmiş değerlendirmeler için değişmeden saklanır.`
+            : `Kriter içeriği değişmediği için yeni sürüm açılmadı; yürürlükteki sürüm v${summary.version} olarak kaldı.`}
+        </p>
+      ) : null}
+
       <div className="profile-sheet">
         <div className="profile-sheet-header">
-          <div><span>Profil kimliği</span><strong>{profile.setup.year} / {profile.setup.stage} / v2.0</strong></div>
+          <div><span>Profil kimliği</span><strong>{profile.setup.year} / {profile.setup.stage} / v2.0{summary ? ` · kriter sürümü v${summary.version}` : ""}</strong></div>
           <span className="status-chip success">Yayında</span>
         </div>
         <dl className="profile-facts">
@@ -932,6 +1022,12 @@ export default function CriteriaApp() {
   const [approvalError, setApprovalError] = useState("");
   const [publishing, setPublishing] = useState(false);
   const [draftReady, setDraftReady] = useState(false);
+  /** Son yayımın sürüm künyesi ve varsa kaynak kilidi uyarısı. */
+  const [publishSummary, setPublishSummary] = useState<{
+    version: number;
+    created: boolean;
+    sourceLockWarning: string;
+  } | null>(null);
 
   const backgroundLabel = useMemo(
     () => result || editedProfile ? `${setup.competition} · ${setup.reportType}` : "Organizatör PDF'si bekleniyor",
@@ -1034,9 +1130,10 @@ export default function CriteriaApp() {
     setCacheNotice("");
   }
 
-  async function analyze() {
+  async function analyze(forceRefresh = false) {
     if (!file || loading) return;
-    if (result && criteria.length) {
+    // Yeniden analizde kayıtlı sonuca dönülmez; model gerçekten yeniden çalışır.
+    if (!forceRefresh && result && criteria.length) {
       setStep(2);
       return;
     }
@@ -1046,9 +1143,11 @@ export default function CriteriaApp() {
     try {
       setLoadingMessage("PDF sayfa yapısı doğrulanıyor…");
       const pageCount = await getPdfPageCount(file);
-      setLoadingMessage("Belgenin tamamı tek AI çağrısıyla dört aşamaya göre okunuyor…");
+      setLoadingMessage(forceRefresh
+        ? "Kayıtlı sonuç atlanıyor; belge baştan analiz ediliyor…"
+        : "Belgenin tamamı tek AI çağrısıyla dört aşamaya göre okunuyor…");
       // Sunucu tek `generateContent` isteği yapar; burada da yeniden deneme yoktur.
-      const analysis = await analyzeWithGemini(file, pageCount);
+      const analysis = await analyzeWithGemini(file, pageCount, forceRefresh);
       setLoadingMessage("Kriterler kaynak sayfalarıyla eşleştiriliyor…");
       if (!analysis.criteria.length) {
         throw new Error("Belgede PDF aşamasında kontrol edilebilecek bir kriter bulunamadı.");
@@ -1147,6 +1246,13 @@ export default function CriteriaApp() {
       const published = await workflowApi.submitProfileForReview(nextProfile, file);
       localStorage.setItem("kriter-atolyesi:last-profile", JSON.stringify(published.profile.profile));
       setProfile(published.profile.profile);
+      setPublishSummary({
+        version: published.criteriaVersion?.criteriaVersion ?? 0,
+        created: published.versionCreated === true,
+        // Sunucu kaynak sayfa/alıntı değişikliğini geri aldıysa yönetici bunu görmeli:
+        // alanlar salt okunurdur ve elle düzeltilemez (madde 12).
+        sourceLockWarning: published.sourceLockWarning ?? "",
+      });
       setEditedProfile(null);
       setStep(3);
     } catch (caught) {
@@ -1170,6 +1276,7 @@ export default function CriteriaApp() {
     setErrorRetryable(false);
     setCacheNotice("");
     setApprovalError("");
+    setPublishSummary(null);
     clearDraftSnapshot();
     saveDraftFile(null).catch(() => undefined);
     // Geçmiş profil düzenleme adresinden çıkılır; yenilemede taslak geri gelmesin.
@@ -1212,7 +1319,8 @@ export default function CriteriaApp() {
             file={file}
             onFile={chooseFile}
             onSample={(sampleFile) => chooseFile(sampleFile)}
-            onAnalyze={analyze}
+            onAnalyze={() => analyze(false)}
+            onReanalyze={() => analyze(true)}
             analysisReady={Boolean(result && criteria.length)}
             loading={loading}
             loadingMessage={loadingMessage}
@@ -1233,11 +1341,12 @@ export default function CriteriaApp() {
             setCriteria={setCriteria}
             onBack={() => setStep(1)}
             onApprove={approve}
+            onReanalyze={file ? () => analyze(true) : null}
             publishing={publishing}
             approvalError={approvalError}
           />
         ) : null}
-        {step === 3 && profile ? <ProfileReady profile={profile} onEdit={() => navigate(2)} onRestart={restart} /> : null}
+        {step === 3 && profile ? <ProfileReady profile={profile} summary={publishSummary} onEdit={() => navigate(2)} onRestart={restart} /> : null}
       </div>
     </main>
   );

@@ -1,6 +1,6 @@
 # AI-Gambit — Proje Durumu ve Yapılacaklar
 
-**Tarih:** 26 Ağustos 2026 · **Dal:** `son_merge_deneme_2` · **Temel işleme:** `4228c24`
+**Tarih:** 26 Ağustos 2026 · **Dal:** `son_merge_deneme_2` · **Temel işleme:** `d92d8f8`
 
 Bu belge projenin **güncel durumunu** tutar: neyin çalıştığı, neyin eksik olduğu ve
 neyin düzeltilmesi gerektiği. Aşağıdaki her madde bugün kod üzerinde veya gerçek
@@ -20,7 +20,50 @@ neyin düzeltilmesi gerektiği. Aşağıdaki her madde bugün kod üzerinde veya
 
 ---
 
-## 1. Bugün yapılan son iş — Kalıcı analiz önbelleği ve aşama şeridi düzeltmesi
+## 1. Bugün yapılan son iş — Bütünlük, yaşam döngüsü ve gerçek giriş
+
+Problem 4 teslim listesinin 1–13. maddeleri uygulandı. Çalışan hiçbir özellik
+yeniden yazılmadı; şema değişiklikleri **eklemeli** ve geriye uyumludur
+(`migrations/0008_integrity_and_lifecycle.sql`).
+
+| # | İş | Ne değişti |
+|---|---|---|
+| 1 | Kalıcı önbellek güvenliği | Anahtara çıktı tavanı ve sıcaklık eklendi; **“Yeniden analiz et”** seçeneği geldi (bellek + D1 kaydı atlanır ve silinir, model gerçekten yeniden çalışır). Boş/bozuk sonucun yazılmaması ve uçuş içi birleştirme korundu |
+| 2 | Değişmez kriter sürümleri | `criteria_profile_versions`: her yayımda yeni satır (`criteria_version`, `criteria_hash`, `published_at`, `published_by`); eski satır ASLA güncellenmez. Hakem analizi daima son sürümü kullanır; kriterler değişince eski analiz "eskimiş" olur ve sunucu o analizle nihai karar verilmesini reddeder |
+| 3 | Değerlendirme bütünlüğü | `/api/evaluate-report` artık **yalnızca `applicationId`** alır. Kriter seti ve PDF sunucuda çözülür (`resolveEvaluationContext`). Sonuç kaydedilirken kriter sürümü, kriter özeti ve PDF SHA-256'sı yeniden ölçülüp karşılaştırılır; uyuşmazlıkta kayıt yapılmaz |
+| 4 | PDF dışı kanıt | Kriterlere `verifiability` alanı (`PDF_DENETLENEBILIR` / `HARICI_KANIT_GEREKLI` / `HAKEM_KONTROLU_GEREKLI`) eklendi. PDF dışı kurallar modele hiç gönderilmez, `DEGERLENDIRILEMEDI` alır, hata sayılmaz ve hakem ekranında ayrı bölümde listelenir |
+| 5 | Otomatik atama | Aynı yarışmada görevli hakem tercih edilir; yük sayımı arşivlenmiş dosyaları saymaz; atama denetim izine de yazılır. Koşullu `UPDATE` ile çift atama engellenir |
+| 6 | Aktif / pasif yarışma | Süreç aşamasından bağımsız anahtar; 01 (kendi yarışması) ve 04 çevirebilir. Pasif yarışma listede görünmez, yeni başvuru almaz; hakem geçmişi görmeye devam eder |
+| 7 | Gerçek giriş | Rol kısayolları ve `/api/admin/dev-session` **kaldırıldı**. Tek form: kullanıcı adı/e-posta + şifre; rol veri tabanından okunur. Tek seferlik bootstrap Admini `admin` / `1234` (yalnızca üretim dışı, idempotent, PBKDF2 ile hash'li) |
+| 8 | Demo verisi temizliği | `tools/dev_reset.mjs`: yalnızca yerel miniflare D1, üretim reddi, kuru çalıştırma varsayılan, tek transaction, idempotent. Corpus, kaynak kod, göçler ve bootstrap Admin korunur |
+| 9 | Katılımcı onay sonucu | **Kök neden:** ONAY, yarışma sonuçları yayımlanana kadar gizleniyordu; RED ise anında görünüyordu. Artık üçü de hakem kararı kesinleştiği anda aynı kaynaktan görünür; onay kutusu karar tarihi, yarışma, takım ve hakem notunu gösterir |
+| 10 | AI uyarısı | `AI_DISCLAIMER` + `AiDisclaimer` bileşeni; hakem ve katılımcı ekranlarında AI sonucunun hemen altında |
+| 11 | Silme ve denetim | Yarışma arşivleme (01) ve başvuru kaldırma (02) soft delete; 04 panosunda kim/ne zaman/gerekçe/önceki-yeni durum tablosu |
+| 12 | Kaynak kilidi | Kaynak sayfa ve alıntı ilk yayımda kilitlenir; arayüzde salt okunur, sunucu elle değişikliği geri alır ve olayı kaydeder |
+
+### Doğrulama (bugün ölçüldü)
+
+| Kontrol | Sonuç |
+|---|---|
+| `npx tsc --noEmit` | ✅ temiz |
+| `npm run lint` | ✅ temiz |
+| `npm run check:repo-safety` | ✅ PASS |
+| `npm run test:unit` | ✅ 76/76 |
+| `npm run test:regressions` | ✅ PASS (6 blok) |
+| `npm run build` | ✅ üretim derlemesi tamam |
+| `node tools/dev_reset.mjs --apply` | ✅ 204 satır silindi, ikinci koşuda 0 (idempotent) |
+| `node tools/e2e_scenario.mjs` | ✅ **96/96** — canlı sunucuya karşı, ücretli AI çağrısı yapılmadan |
+
+Uçtan uca senaryo 1 Admin · 3 Yarışma Yöneticisi · 3 Hakem · 1 Değerlendirme
+Yöneticisi · 9 Katılımcı · 3 yarışma · 9 başvuru (kötü/orta/iyi) kurar ve
+RBAC, R2 yükleme/indirme, otomatik atama, bütünlük kapıları, video kriteri,
+pasif yarışma, onay görünürlüğü, kaynak kilidi ve arşiv denetimini sınar.
+
+**Ölçülmedi:** canlı Gemini analizi (ücretli çağrı; açık izin alınmadı).
+
+---
+
+## 1b. Önceki iş — Kalıcı analiz önbelleği ve aşama şeridi düzeltmesi
 
 1. **Şartname analizleri kalıcı kayda alındı.** Daha önce analiz edilen belge tekrar
    analiz edildiğinde model **hiç çağrılmaz**: sonuç D1'deki `criteria_analysis_cache`
@@ -159,7 +202,9 @@ O gün alınan puan/kapsam ölçümleri eski prensibe ait olduğu için burada t
 | Depo güvenliği | `npm run check:repo-safety` | ✅ PASS (bugün ölçüldü) |
 | Tip kontrolü | `npx tsc --noEmit` | ✅ temiz (bugün ölçüldü) |
 | Lint | `npm run lint` | ✅ temiz (bugün ölçüldü) |
-| Birim testleri | `npm run test:unit` | ✅ 63/63 geçti (bugün ölçüldü) |
+| Birim testleri | `npm run test:unit` | ✅ 76/76 geçti (bugün ölçüldü) |
+| Uçtan uca senaryo | `node tools/e2e_scenario.mjs` | ✅ 96/96 (bugün ölçüldü; ücretli AI çağrısı yapılmadı) |
+| Geliştirme sıfırlaması | `node tools/dev_reset.mjs --apply` | ✅ idempotent (bugün ölçüldü) |
 | Regresyon testleri | `npm run test:regressions` | ✅ PASS (bugün ölçüldü) |
 | AI erişimi | `npm run check:gemini` | ✅ canlı üretim çağrısı başarılı — İDA analizi 28,4 sn · 14.055 token · 26 kriter (önbellek doğrulaması sırasında; `check:gemini` komutu ayrıca koşulmadı) |
 | Doğruluk benchmarkı | `node tools/run_celikkubbe_benchmark.mjs http://localhost:3000/api/analyze` | ölçülmedi — referans dosyası yeni biçime çevrildi, canlı koşu gerekiyor (A1) |
@@ -193,7 +238,8 @@ Sıra önem derecesine göre. "Dosya" sütunu işe nereden başlanacağını gö
 |---|---|---|---|
 | **C1** | Belge havuzu cihaza bağlı | Tarayıcı içi IndexedDB. `DocumentRepository` arayüzü hazır, sunucu uygulaması yok | R2 tabanlı sunucu uygulaması; ekip ortak havuzu ancak böyle mümkün. Bugün başka bilgisayardan aynı havuz görülmüyor |
 | **C2** | Yarışma listesi kodda sabit | `COMPETITIONS` dizisi 40 kayıt; seçim `setup.competition` **ad dizgesiyle** taşınıyor | Kalıcı `competitionId`; ad değişirse eski profiller kopuyor. D1'de `competitions` tablosu ve `competitionId` akışı var, kriter tarafı bağlanmamış |
-| **C3** | Cloudflare kaynakları | 7 göç dosyası hazır (`migrations/0001`–`0007`), uygulanmadı; uygulama şeması tabloları çalışma anında da oluşturur | D1 ve R2 kaynaklarının oluşturulması, göçlerin uygulanması, sunucu sırlarının tanımlanması — dağıtım işi |
+| **C3** | Cloudflare kaynakları | 8 göç dosyası hazır (`migrations/0001`–`0008`), üretime uygulanmadı; uygulama şeması tabloları çalışma anında da oluşturur | D1 ve R2 kaynaklarının oluşturulması, göçlerin uygulanması, sunucu sırlarının tanımlanması — dağıtım işi |
+| **C4** | Üretimde bootstrap Admini | Geliştirme hesabı (`admin` / `1234`) yalnızca üretim DIŞI ortamda açılabilir; uç üretimde 404 döner | Üretimde `MODERATOR_BOOTSTRAP_TOKEN` ile gerçek Admin açılmalı; demo hesabı varsa kaldırılmalı |
 
 ### D · Arayüz
 
@@ -216,7 +262,8 @@ Sıra önem derecesine göre. "Dosya" sütunu işe nereden başlanacağını gö
 | # | İş | Yapılması gereken |
 |---|---|---|
 | **F1** | API anahtarı ifşası | Mevcut `GEMINI_API_KEY` sohbet ortamında düz metin paylaşıldı. AI Studio'dan **iptal edilip yenilenmeli** |
-| **F2** | Üretim sırları | `MODERATOR_SECRET` üretimde uzun ve rastgele olmalı; `ALLOW_DEV_LOGIN=off` ve `APP_ENV=production` doğrulanmalı |
+| **F2** | Üretim sırları | `MODERATOR_SECRET` üretimde uzun ve rastgele olmalı; `APP_ENV=production` doğrulanmalı (bu ortamda geliştirme bootstrap hesabı hiç açılamaz). `ALLOW_DEV_LOGIN` artık hiçbir kod tarafından okunmuyor |
+| **F3** | Geliştirme bootstrap hesabı | `admin` / `1234` herkesçe bilinen geçici bir şifredir. Üretime çıkmadan önce bu hesap KALDIRILMALI; arayüz ve API yanıtı bunu açıkça uyarıyor |
 
 ---
 
@@ -272,6 +319,11 @@ kaldırılıp bu belgeye yönlendirildi.
 ## 7. Doğrulama komutları
 
 ```bash
+# Uçtan uca senaryo (ücretli AI çağrısı YAPMAZ)
+npm run dev                            # ayrı bir kabuk
+node tools/dev_reset.mjs --apply       # temiz başlangıç (yalnızca yerel D1)
+node tools/e2e_scenario.mjs            # 96 kontrol
+
 npm run check:gemini          # anahtar, model adları ve gerçek üretim çağrısı
 npx tsc --noEmit              # tip kontrolü
 npm run lint                  # lint

@@ -18,6 +18,7 @@ import {
   type PageLimitRule,
   type SimilarityPeer,
 } from "./report-prechecks";
+import { verifiedOutsidePdf } from "./types";
 import type { Criterion, CriterionFinding, PreCheck, ProfileExport, ReportEvaluation, StageResult } from "./types";
 
 /**
@@ -37,7 +38,18 @@ function buildFinding(criterion: Criterion, pageCount: number, pageLimits: PageL
     criterionName: criterion.name,
     stage: criterion.stage,
     required: criterion.required,
+    verifiability: criterion.verifiability,
   };
+  // PDF dışı kanıt gerektiren kural çevrimdışı yedekte de ihlal sayılmaz.
+  if (verifiedOutsidePdf(criterion.verifiability)) {
+    return {
+      ...base,
+      verdict: "DEGERLENDIRILEMEDI",
+      rationale: "PDF üzerinden değerlendirilemez; harici kanıt veya hakem kontrolü gerekli.",
+      evidence: [],
+      evidenceMissing: false,
+    };
+  }
   const pageRule = pageLimits.find((entry) => entry.rule.id === criterion.id);
   if (pageRule) {
     const withinLimit = pageCount <= pageRule.limit;

@@ -91,8 +91,43 @@ export type CompetitionWorkflow = {
   /** Önceliğin gerekçesi; hakeme rozetin yanında gösterilir. */
   priorityNote: string;
   prioritySetAt: string | null;
+  /**
+   * Yarışma AKTİF mi?
+   *
+   * Pasif yarışma: yarışmacının listesinde görünmez, yeni başvuru kabul etmez
+   * ve yeni değerlendirme kuyruğu üretmez. Hakem geçmiş başvuruları görmeye,
+   * izin verilen karar düzeltmelerini yapmaya devam eder. Aktif/pasif, süreç
+   * aşamasından (status) AYRIDIR: pasifleştirmek aşamayı geri almaz.
+   */
+  isActive: boolean;
+  activationNote: string;
+  activationChangedAt: string | null;
+  activationChangedByName: string | null;
+  /** Arşivlendi mi? (soft delete — kayıt silinmez, denetim izi korunur) */
+  archivedAt: string | null;
+  archivedByName: string | null;
+  archivedReason: string;
   createdAt: string;
   updatedAt: string;
+};
+
+/**
+ * Değişmez kriter sürümü.
+ *
+ * Yarışma Yöneticisi kriterleri her yayımladığında yeni bir sürüm oluşur;
+ * eski sürüm ASLA değiştirilmez. Hakem analizi daima en son yayımlanan sürümü
+ * kullanır, geçmiş değerlendirmeler kendi sürümüyle okunabilir kalır.
+ */
+export type CriteriaVersion = {
+  id: string;
+  criteriaProfileId: string;
+  competitionKey: string;
+  criteriaVersion: number;
+  criteriaHash: string;
+  criteriaCount: number;
+  publishedAt: string;
+  publishedBy: string;
+  publishedByName: string;
 };
 
 export type SubmissionVersion = {
@@ -184,6 +219,20 @@ export type CompetitionApplication = {
   outcome: ApplicationOutcome;
   outcomeNote: string;
   decidedAt: string | null;
+  /**
+   * Kaydedilmiş AI sonucunun bağlı olduğu değişmez kriter sürümü ve PDF özeti.
+   * `criteriaOutdated` true ise kriterler o analizden sonra yeniden yayımlanmış
+   * demektir ve ekran "Kriterler güncellendi, yeniden analiz gerekli" der.
+   */
+  evaluationCriteriaVersion: number | null;
+  evaluationPdfHash: string | null;
+  /** Yarışmanın şu anda yürürlükte olan kriter sürümü. */
+  currentCriteriaVersion: number | null;
+  criteriaOutdated: boolean;
+  /** Hakem/yönetici tarafından aktif listeden kaldırıldı mı? (soft delete) */
+  archivedAt: string | null;
+  archivedByName: string | null;
+  archivedReason: string;
   submittedAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -233,11 +282,17 @@ export type CompetitionOverview = {
   sourceDocumentName: string;
   criteriaCount: number;
   status: CompetitionStatus;
-  /** Başvuruya açık mı? Bu rol yalnızca İZLER, değiştiremez. */
+  /** Başvuruya açık mı? (aktif + süreç durumu 'open') */
   acceptingApplications: boolean;
+  /** Yarışma aktif mi? Pasif yarışma yeni başvuru ve yeni kuyruk üretmez. */
+  isActive: boolean;
   isPriority: boolean;
   priorityNote: string;
   total: number;
+  /** AI analizi tamamlanmış başvurular (hakem kuyruğu + karar verilmişler). */
+  analysisCompleted: number;
+  /** AI analizi henüz yapılmamış veya başarısız olmuş başvurular. */
+  analysisPending: number;
   evaluated: number;
   accepted: number;
   rejected: number;
@@ -245,6 +300,8 @@ export type CompetitionOverview = {
   pending: number;
   /** Hakem atanamamış başvurular; normalde 0 olmalıdır. */
   unassigned: number;
+  /** Arşivlenmiş (soft delete) başvuru sayısı. */
+  archived: number;
 };
 
 export type JudgeWorkload = {

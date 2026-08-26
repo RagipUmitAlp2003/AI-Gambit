@@ -8,6 +8,12 @@ export type AdminAccount = {
   id: string;
   fullName: string;
   email: string;
+  /**
+   * Giriş için kullanılabilen kısa kullanıcı adı (isteğe bağlı).
+   * Giriş formu kullanıcı adını da e-postayı da kabul eder; rol seçimi yoktur,
+   * panel hesabın rolüne göre otomatik açılır.
+   */
+  username: string | null;
   roleCode: RoleCode;
   status: AccountStatus;
   /** Tek kullanımlık şifre henüz değiştirilmediyse true. */
@@ -41,6 +47,7 @@ export type MailDelivery = {
 export type CreateAccountInput = {
   fullName: string;
   email: string;
+  username?: string | null;
   roleCode: RoleCode;
   /** Boş bırakılırsa sistem 8 haneli şifreyi kendisi üretir. */
   password?: string;
@@ -84,7 +91,14 @@ export type WorkflowEventName =
   | "judge_review_started"
   | "judge_score_adjusted"
   | "judge_decision_completed"
-  | "competition_stage_changed";
+  | "competition_stage_changed"
+  | "criteria_version_published"
+  | "criteria_source_locked"
+  | "competition_activated"
+  | "competition_deactivated"
+  | "competition_archived"
+  | "application_archived"
+  | "application_restored";
 
 export type WorkflowEvent = {
   id: string;

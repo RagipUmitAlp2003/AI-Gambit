@@ -16,6 +16,8 @@
     "check:gemini": "node tools/check_gemini_access.mjs",
     "test:regressions": "node --experimental-strip-types --import ./tools/ts-resolve-hook.mjs tools/regression-tests.mjs",
     "test:unit": "node --experimental-strip-types --import ./tools/ts-resolve-hook.mjs --test tools/*.test.ts",
+    "test:e2e": "node tools/e2e_scenario.mjs",
+    "dev:reset": "node tools/dev_reset.mjs",
     "test:quality:saved": "node tools/verify_saved_quality.mjs",
     "test:benchmark:celikkubbe": "node tools/run_celikkubbe_benchmark.mjs --reuse"
   },

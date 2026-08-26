@@ -1,6 +1,7 @@
-import { listAccounts, listRecentWorkflowEvents } from "../../lib/admin-db";
+import { listAccounts, listAudit, listRecentWorkflowEvents } from "../../lib/admin-db";
 import { handleError, json, requirePermission } from "../../lib/admin-guard";
 import { WORKFLOW_EVENT_LABELS } from "../../lib/admin-roles";
+import { APPLICATION_STATUS_LABELS, COMPETITION_STATUS_LABELS } from "../../lib/workflow-types";
 import { listApplications, listCompetitionWorkflows, listProfiles, operationsSummary } from "../../lib/workflow-db";
 import type { CompetitionOverview, JudgeWorkload, TimelineEntry } from "../../lib/workflow-types";
 
@@ -53,6 +54,11 @@ export async function GET(request: Request): Promise<Response> {
       const profile = profiles.find((item) => item.id === competition.currentProfileId)
         ?? profiles.find((item) => item.competitionKey === competition.competitionKey && item.status === "approved");
       const decided = items.filter((item) => item.status === "completed");
+      // "Analizi tamamlanan": AI ön değerlendirmesi başarıyla bitmiş olanlar —
+      // hakem kuyruğundakiler, hakem incelemesindekiler ve karar verilmişler.
+      const analysisCompleted = items.filter(
+        (item) => ["awaiting_judge", "judge_in_review", "completed"].includes(item.status),
+      ).length;
       return {
         competitionId: competition.id,
         competitionKey: competition.competitionKey,
@@ -61,18 +67,63 @@ export async function GET(request: Request): Promise<Response> {
         sourceDocumentName: profile?.sourceDocumentName ?? "",
         criteriaCount: profile?.profile.criteria.length ?? 0,
         status: competition.status,
-        acceptingApplications: competition.status === "open",
+        // Başvuruya açık olmak için hem süreç durumu 'open' hem de yarışmanın
+        // AKTİF olması gerekir; pasif yarışma yeni başvuru kabul etmez.
+        acceptingApplications: competition.status === "open" && competition.isActive && !competition.archivedAt,
+        isActive: competition.isActive && !competition.archivedAt,
         isPriority: competition.isPriority,
         priorityNote: competition.priorityNote,
         total: items.length,
+        analysisCompleted,
+        analysisPending: items.length - analysisCompleted,
         evaluated: decided.length,
         accepted: decided.filter((item) => item.outcome === "accepted").length,
         rejected: decided.filter((item) => item.outcome === "rejected").length,
         revision: decided.filter((item) => item.outcome === "revision_required").length,
         pending: items.length - decided.length,
         unassigned: items.filter((item) => !item.assignedJudgeId && item.status !== "completed").length,
+        archived: items.filter((item) => Boolean(item.archivedAt)).length,
       };
     });
-    return json({ summary, recent, judges, competitions, overview });
+    /*
+     * SİLME VE DENETİM GÖRÜNÜRLÜĞÜ (madde 11)
+     *
+     * Değerlendirme Yöneticisi hangi yarışmanın/başvurunun kim tarafından,
+     * ne zaman ve hangi gerekçeyle arşivlendiğini görür. Bu liste yalnızca
+     * GÖRÜNTÜLENİR: bu roldeki hesap katılımcı raporunun içeriğini
+     * değiştiremez, yalnızca operasyonel işlemleri izler.
+     */
+    const archiveTrail = [
+      ...competitions.filter((item) => item.archivedAt).map((item) => ({
+        id: `competition:${item.id}`,
+        kind: "competition" as const,
+        subject: item.competitionName,
+        actorName: item.archivedByName ?? "bilinmiyor",
+        at: item.archivedAt as string,
+        reason: item.archivedReason || "Gerekçe girilmedi",
+        previousStatus: COMPETITION_STATUS_LABELS[item.status] ?? item.status,
+        nextStatus: "Arşivlendi",
+      })),
+      ...applications.filter((item) => item.archivedAt).map((item) => ({
+        id: `application:${item.id}`,
+        kind: "application" as const,
+        // 04 görünümünde katılımcı adı yerine takım adı bulunur; rapor içeriği taşınmaz.
+        subject: `${item.teamName} · ${item.competitionName}`,
+        actorName: item.archivedByName ?? "bilinmiyor",
+        at: item.archivedAt as string,
+        reason: item.archivedReason || "Gerekçe girilmedi",
+        previousStatus: APPLICATION_STATUS_LABELS[item.status] ?? item.status,
+        nextStatus: "Aktif listeden kaldırıldı",
+      })),
+    ].sort((left, right) => right.at.localeCompare(left.at));
+
+    // Denetim izinin arşivleme/atama satırları; içerik değil işlem kaydıdır.
+    const auditRows = (await listAudit(60)).filter((entry) => [
+      "competition_archived", "competition_restored", "competition_activation_changed",
+      "application_archived", "application_restored", "application_auto_assigned",
+      "assign_judge", "profile_published",
+    ].includes(entry.action));
+
+    return json({ summary, recent, judges, competitions, overview, archiveTrail, audit: auditRows });
   } catch (error) { return handleError(error); }
 }

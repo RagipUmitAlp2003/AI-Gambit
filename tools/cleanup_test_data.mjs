@@ -5,12 +5,16 @@
  * yerel veri tabanında çalıştırır, öncesinde/sonrasında sayar ve silinecek
  * başvuruların R2 nesne anahtarlarını listeler (SQL bunları silemez).
  *
+ * ADI GEÇEN yarışmalar dışında hiçbir kayda dokunmaz. Bütün geliştirme verisini
+ * sıfırlamak için `tools/dev_reset.mjs` kullanın (üretim reddi, tek transaction,
+ * idempotent ve bootstrap Admini korur).
+ *
  * Kullanım:
  *   node tools/cleanup_test_data.mjs           # kuru çalıştırma, hiçbir şey silinmez
  *   node tools/cleanup_test_data.mjs --apply   # gerçekten siler
  *
- * Uzak (üretim) D1 için:
- *   npx wrangler d1 execute <DB_ADI> --remote --file tools/cleanup-test-data.sql
+ * UYARI: bu betik ve eşlik eden SQL YALNIZCA yerel geliştirme içindir. Üretim
+ * veri tabanında çalıştırmayın.
  */
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";

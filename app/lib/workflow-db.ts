@@ -1,10 +1,10 @@
 import { env } from "cloudflare:workers";
-import { ConflictError, getDatabase, recordWorkflowEvent, recordWorkflowEvents } from "./admin-db";
+import { ConflictError, getDatabase, recordAudit, recordWorkflowEvent, recordWorkflowEvents } from "./admin-db";
 import { COMPETITIONS, fold, type CompetitionEntry } from "./competitions";
 import type { AdminAccount, WorkflowEventInput } from "./admin-types";
 import { can, canUpdateProfile } from "./authorization";
 import { validateProfileExport } from "./profile-loader";
-import { RULE_VERDICT_LABELS, type AnalysisResult, type JudgeReview, type ProfileExport, type ReportEvaluation, type RuleVerdict } from "./types";
+import { RULE_VERDICT_LABELS, type AnalysisResult, type Criterion, type JudgeReview, type ProfileExport, type ReportEvaluation, type RuleVerdict } from "./types";
 import type { SimilarityFingerprint } from "./similarity-engine";
 import {
   APPLICATION_STATUSES,
@@ -15,6 +15,7 @@ import {
   type CompetitionStatus,
   type CompetitionWorkflow,
   type CriteriaExtractionRun,
+  type CriteriaVersion,
   type OperationsSummary,
   type ProfileReviewDecision,
   type ProfileStatus,
@@ -187,6 +188,26 @@ const WORKFLOW_SCHEMA = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_assignments_application ON application_assignments (application_id, active, assigned_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_assignments_judge ON application_assignments (judge_id, active, assigned_at DESC)`,
+  // Değişmez kriter sürümleri: her yayımlama yeni bir satır açar, eski satır
+  // ASLA güncellenmez. Hakem analizi her zaman EN SON sürümü kullanır; geçmiş
+  // değerlendirmeler kendi sürümüyle denetlenebilir kalır.
+  `CREATE TABLE IF NOT EXISTS criteria_profile_versions (
+    id TEXT PRIMARY KEY,
+    criteria_profile_id TEXT NOT NULL,
+    competition_key TEXT NOT NULL,
+    criteria_version INTEGER NOT NULL,
+    criteria_hash TEXT NOT NULL,
+    criteria_json TEXT NOT NULL,
+    criteria_count INTEGER NOT NULL DEFAULT 0,
+    published_at TEXT NOT NULL,
+    published_by TEXT NOT NULL,
+    published_by_name TEXT NOT NULL DEFAULT '',
+    UNIQUE (competition_key, criteria_version)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_criteria_versions_competition
+   ON criteria_profile_versions (competition_key, criteria_version DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_criteria_versions_profile
+   ON criteria_profile_versions (criteria_profile_id, criteria_version ASC)`,
 ];
 
 /**
@@ -211,12 +232,46 @@ const COMPETITION_COLUMNS: Array<{ name: string; definition: string }> = [
   { name: "is_priority", definition: "INTEGER NOT NULL DEFAULT 0" },
   { name: "priority_note", definition: "TEXT" },
   { name: "priority_set_at", definition: "TEXT" },
+  // Aktif/pasif anahtarı süreç durumundan AYRIDIR: pasifleştirme yarışmanın
+  // aşamasını değiştirmez, yalnızca yeni başvuru ve yeni kuyruk üretimini
+  // durdurur. Yeniden aktifleştirildiğinde aşama olduğu gibi geri döner.
+  { name: "is_active", definition: "INTEGER NOT NULL DEFAULT 1" },
+  { name: "activation_note", definition: "TEXT" },
+  { name: "activation_changed_at", definition: "TEXT" },
+  { name: "activation_changed_by", definition: "TEXT" },
+  { name: "activation_changed_by_name", definition: "TEXT" },
+  // Arşivleme = soft delete. Satır silinmez; denetlenebilirlik korunur.
+  { name: "deleted_at", definition: "TEXT" },
+  { name: "deleted_by", definition: "TEXT" },
+  { name: "deleted_by_name", definition: "TEXT" },
+  { name: "deleted_reason", definition: "TEXT" },
 ];
 
 const APPLICATION_WORKFLOW_COLUMNS: Array<{ name: string; definition: string }> = [
   { name: "assigned_judge_id", definition: "TEXT" },
   { name: "assigned_judge_name", definition: "TEXT" },
   { name: "current_version_id", definition: "TEXT" },
+  // Kaydedilen AI sonucunun bağlı olduğu değişmez bağlam. Kriterler yeniden
+  // yayımlanınca sürüm eskir ve ekran "yeniden analiz gerekli" uyarısı verir.
+  { name: "evaluation_criteria_version", definition: "INTEGER" },
+  { name: "evaluation_criteria_hash", definition: "TEXT" },
+  { name: "evaluation_pdf_hash", definition: "TEXT" },
+  { name: "evaluation_version_id", definition: "TEXT" },
+  // Hakemin aktif iş listesinden kaldırması: fiziksel silme değil arşivleme.
+  { name: "deleted_at", definition: "TEXT" },
+  { name: "deleted_by", definition: "TEXT" },
+  { name: "deleted_by_name", definition: "TEXT" },
+  { name: "deleted_reason", definition: "TEXT" },
+];
+
+const EVALUATION_RESULT_COLUMNS: Array<{ name: string; definition: string }> = [
+  { name: "criteria_version", definition: "INTEGER" },
+  { name: "criteria_hash", definition: "TEXT" },
+  { name: "pdf_hash", definition: "TEXT" },
+];
+
+const CRITERIA_COLUMNS: Array<{ name: string; definition: string }> = [
+  { name: "verifiability", definition: "TEXT NOT NULL DEFAULT 'PDF_DENETLENEBILIR'" },
 ];
 
 async function upgradeProfileTable(database: D1Database): Promise<void> {
@@ -239,6 +294,19 @@ async function upgradeApplicationTable(database: D1Database): Promise<void> {
   }
 }
 
+/** Eksik sütunları tek tek ekler; D1'de `ADD COLUMN IF NOT EXISTS` yoktur. */
+async function addMissingColumns(
+  database: D1Database,
+  table: string,
+  columns: Array<{ name: string; definition: string }>,
+): Promise<void> {
+  const info = await database.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
+  const present = new Set((info.results ?? []).map((row) => row.name));
+  for (const column of columns.filter((item) => !present.has(item.name))) {
+    await database.prepare(`ALTER TABLE ${table} ADD COLUMN ${column.name} ${column.definition}`).run();
+  }
+}
+
 async function upgradeCompetitionTable(database: D1Database): Promise<void> {
   const columns = await database.prepare(`PRAGMA table_info(competitions)`).all<{ name: string }>();
   const present = new Set((columns.results ?? []).map((row) => row.name));
@@ -247,6 +315,9 @@ async function upgradeCompetitionTable(database: D1Database): Promise<void> {
   }
   await database.prepare(
     `CREATE INDEX IF NOT EXISTS idx_competitions_priority ON competitions (is_priority DESC, updated_at DESC)`,
+  ).run().catch(() => undefined);
+  await database.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_competitions_active ON competitions (is_active, status, updated_at DESC)`,
   ).run().catch(() => undefined);
 }
 
@@ -260,6 +331,8 @@ async function workflowDatabase(): Promise<D1Database> {
         await upgradeProfileTable(database);
         await upgradeApplicationTable(database);
         await upgradeCompetitionTable(database);
+        await addMissingColumns(database, "evaluation_results", EVALUATION_RESULT_COLUMNS);
+        await addMissingColumns(database, "criteria", CRITERIA_COLUMNS);
       })
       .catch((error: unknown) => {
         workflowSchemaPromise = null;
@@ -338,6 +411,14 @@ type ApplicationRow = {
   outcome_note: string | null;
   decided_at: string | null;
   competition_status: string | null;
+  competition_is_active: number | null;
+  evaluation_criteria_version: number | null;
+  evaluation_criteria_hash: string | null;
+  evaluation_pdf_hash: string | null;
+  current_criteria_version: number | null;
+  deleted_at: string | null;
+  deleted_by_name: string | null;
+  deleted_reason: string | null;
 };
 
 type TeamMemberRow = {
@@ -370,6 +451,13 @@ type CompetitionRow = {
   is_priority: number | null;
   priority_note: string | null;
   priority_set_at: string | null;
+  is_active: number | null;
+  activation_note: string | null;
+  activation_changed_at: string | null;
+  activation_changed_by_name: string | null;
+  deleted_at: string | null;
+  deleted_by_name: string | null;
+  deleted_reason: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -392,6 +480,14 @@ function toCompetition(row: CompetitionRow): CompetitionWorkflow {
     isPriority: row.is_priority === 1,
     priorityNote: row.priority_note ?? "",
     prioritySetAt: row.priority_set_at ?? null,
+    // Sütun eski satırlarda bulunmayabilir; yokluk AKTİF demektir (geriye uyum).
+    isActive: row.is_active === null || row.is_active === undefined ? true : row.is_active === 1,
+    activationNote: row.activation_note ?? "",
+    activationChangedAt: row.activation_changed_at ?? null,
+    activationChangedByName: row.activation_changed_by_name ?? null,
+    archivedAt: row.deleted_at ?? null,
+    archivedByName: row.deleted_by_name ?? null,
+    archivedReason: row.deleted_reason ?? "",
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -471,12 +567,20 @@ function toApplication(
   view: "full" | "participant" | "operations",
 ): CompetitionApplication {
   const operations = view === "operations";
-  // Kabul sonucu, yarışma sonuçları yayımlanana kadar yarışmacıya kapalıdır.
-  // Ret ve revizyon kararları bunun dışındadır: yarışmacı reddedildiğini ve
-  // gerekçesini anında görmelidir, aksi hâlde düzeltme hakkını kullanamaz.
-  const participantResultHidden = view === "participant"
-    && !["revision_required", "rejected"].includes(row.outcome ?? "")
-    && !["results_published", "archived"].includes(row.competition_status ?? "");
+  /*
+   * KARAR GÖRÜNÜRLÜĞÜ (madde 9)
+   *
+   * Eskiden ONAY sonucu yarışmacıya, yarışmanın sonuçları yayımlanana kadar
+   * kapalıydı; RED ve REVİZYON ise anında görünüyordu. Sonuç: hakem onayladığı
+   * hâlde yarışmacı panelinde hiçbir şey görünmüyor, sistem bozuk sanılıyordu.
+   *
+   * Artık ONAY, RED ve REVİZYON AYNI kaynaktan ve AYNI anda görünür: hakem
+   * kararı kesinleştirdiği (`review.status === "completed"`) anda. Tamamlanmamış
+   * hakem taslağı yarışmacıya hâlâ gösterilmez.
+   */
+  const storedReview = parseJson<JudgeReview>(row.review_json);
+  const reviewCompleted = storedReview?.status === "completed";
+  const participantResultHidden = view === "participant" && !reviewCompleted;
   const storedEvaluation = parseJson<ReportEvaluation>(row.evaluation_json);
   // Eski (puanlı, 1.0) AI sonucu dört aşamalı ekranda incelenemez; başvuru
   // "analiz başarısız" gibi sunulur ki hakem yeniden analiz edebilsin veya
@@ -502,7 +606,7 @@ function toApplication(
     sizeBytes: operations ? null : row.size_bytes,
     status: legacyEvaluation && ["awaiting_judge", "judge_in_review"].includes(storedStatus) ? "analysis_failed" : storedStatus,
     evaluation: view === "full" ? evaluation : operations ? redactEvaluation(evaluation) : null,
-    review: operations || participantResultHidden ? null : parseJson<JudgeReview>(row.review_json),
+    review: operations || participantResultHidden ? null : storedReview,
     judgeId: row.judge_id,
     judgeName: row.judge_name,
     assignedJudgeId: row.assigned_judge_id,
@@ -512,6 +616,19 @@ function toApplication(
     outcome: participantResultHidden ? "pending" : normalizeOutcome(row.outcome),
     outcomeNote: participantResultHidden ? "" : (row.outcome_note ?? ""),
     decidedAt: participantResultHidden ? null : row.decided_at,
+    evaluationCriteriaVersion: row.evaluation_criteria_version ?? null,
+    evaluationPdfHash: view === "full" ? (row.evaluation_pdf_hash ?? null) : null,
+    currentCriteriaVersion: row.current_criteria_version ?? null,
+    // Kriterler bu analizden SONRA yeniden yayımlandıysa sonuç eskimiştir.
+    // Sürümü hiç kaydedilmemiş (eski) bir sonuç da güncel sayılmaz: hangi
+    // kriter setiyle üretildiği kanıtlanamaz.
+    criteriaOutdated: Boolean(evaluation) && Boolean(row.current_criteria_version)
+      && (row.evaluation_criteria_version === null
+        || row.evaluation_criteria_version === undefined
+        || Number(row.evaluation_criteria_version) < Number(row.current_criteria_version)),
+    archivedAt: row.deleted_at ?? null,
+    archivedByName: operations || view === "full" ? (row.deleted_by_name ?? null) : null,
+    archivedReason: operations || view === "full" ? (row.deleted_reason ?? "") : "",
     submittedAt: row.submitted_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
@@ -549,7 +666,200 @@ export class ProfileOwnershipError extends Error {
   }
 }
 
-export async function submitProfileForReview(profile: ProfileExport, actor: AdminAccount): Promise<CompetitionProfile> {
+/* ------------------------------------------------------------------------- *
+ * Değişmez kriter sürümleri (Problem 4 · madde 2 ve 12)
+ *
+ * Yarışma Yöneticisi kriterleri her yayımladığında `criteria_profile_versions`
+ * tablosuna YENİ bir satır yazılır; var olan satır asla güncellenmez. Böylece:
+ *
+ *   - Hakem analizi her zaman EN SON yayımlanan sürümü kullanır.
+ *   - Geçmiş değerlendirmeler kendi sürümüyle denetlenebilir kalır; yeni
+ *     kriterlerle sessizce değişmez.
+ *   - Kaynak sayfa ve kaynak alıntı İLK sürümde kilitlenir; sonraki
+ *     yayımlarda istemci ne gönderirse göndersin sunucu ilk değeri geri koyar.
+ * ------------------------------------------------------------------------- */
+
+/** Kriter setinin içeriğine bağlı, sıralamadan bağımsız kararlı özet. */
+export async function criteriaHash(criteria: Criterion[]): Promise<string> {
+  const canonical = criteria
+    .map((item) => [
+      item.id, item.name, item.stage, item.required ? "1" : "0",
+      item.description, item.violationOutcome,
+      item.sourcePage === null ? "" : String(item.sourcePage),
+      item.sourceText, item.verifiability, item.active ? "1" : "0", item.origin,
+    ].join("␟"))
+    .sort()
+    .join("␞");
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+type CriteriaVersionRow = {
+  id: string;
+  criteria_profile_id: string;
+  competition_key: string;
+  criteria_version: number;
+  criteria_hash: string;
+  criteria_count: number;
+  published_at: string;
+  published_by: string;
+  published_by_name: string;
+};
+
+function toCriteriaVersion(row: CriteriaVersionRow): CriteriaVersion {
+  return {
+    id: row.id,
+    criteriaProfileId: row.criteria_profile_id,
+    competitionKey: row.competition_key,
+    criteriaVersion: Number(row.criteria_version) || 1,
+    criteriaHash: row.criteria_hash,
+    criteriaCount: Number(row.criteria_count) || 0,
+    publishedAt: row.published_at,
+    publishedBy: row.published_by,
+    publishedByName: row.published_by_name ?? "",
+  };
+}
+
+/** Bir yarışmanın SON yayımlanan kriter sürümü (kriterler dahil). */
+export async function findLatestCriteriaVersion(
+  competitionKey: string,
+): Promise<{ version: CriteriaVersion; criteria: Criterion[] } | null> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT * FROM criteria_profile_versions
+     WHERE competition_key = ? ORDER BY criteria_version DESC LIMIT 1`,
+  ).bind(competitionKey).first<CriteriaVersionRow & { criteria_json: string }>();
+  if (!row) return null;
+  const criteria = parseJson<Criterion[]>(row.criteria_json);
+  if (!Array.isArray(criteria) || !criteria.length) return null;
+  return { version: toCriteriaVersion(row), criteria };
+}
+
+/** Yalnızca sürüm numaraları; kriter gövdesi okunmadan tazelik karşılaştırması için. */
+export async function latestCriteriaVersionNumbers(): Promise<Map<string, number>> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(
+    `SELECT competition_key, MAX(criteria_version) AS criteria_version
+     FROM criteria_profile_versions GROUP BY competition_key`,
+  ).all<{ competition_key: string; criteria_version: number }>();
+  return new Map((result.results ?? []).map((row) => [row.competition_key, Number(row.criteria_version) || 0]));
+}
+
+/** Bu profilin bütün sürümleri, eskiden yeniye. Denetim ekranları kullanır. */
+export async function listCriteriaVersions(profileId: string): Promise<CriteriaVersion[]> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(
+    `SELECT id, criteria_profile_id, competition_key, criteria_version, criteria_hash,
+            criteria_count, published_at, published_by, published_by_name
+     FROM criteria_profile_versions WHERE criteria_profile_id = ?
+     ORDER BY criteria_version ASC`,
+  ).bind(profileId).all<CriteriaVersionRow>();
+  return (result.results ?? []).map(toCriteriaVersion);
+}
+
+type SourceLock = { sourcePage: number | null; sourceText: string; origin: Criterion["origin"] };
+
+/**
+ * Kaynak sayfa / kaynak alıntı kilidi (madde 12).
+ *
+ * Bir kriterin kaynağı İLK yayımlandığı sürümde sabitlenir. Sonraki
+ * yayımlarda istemci bu alanları değiştirse bile — arayüzde salt okunur
+ * olmalarına rağmen isteği elle düzenleyerek — sunucu ilk değeri geri koyar.
+ * Kaynak yanlışsa çözüm elle düzeltmek değil, "Yeniden analiz et" ya da
+ * kriteri silip yeni kriter oluşturmaktır.
+ */
+async function sourceLockFor(profileId: string): Promise<Map<string, SourceLock>> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(
+    `SELECT criteria_json FROM criteria_profile_versions
+     WHERE criteria_profile_id = ? ORDER BY criteria_version ASC`,
+  ).bind(profileId).all<{ criteria_json: string }>();
+  const lock = new Map<string, SourceLock>();
+  for (const row of result.results ?? []) {
+    for (const item of parseJson<Criterion[]>(row.criteria_json) ?? []) {
+      // İLK görülen sürüm kazanır; sonraki yayımlar kaynağı değiştiremez.
+      if (!item?.id || lock.has(item.id)) continue;
+      lock.set(item.id, {
+        sourcePage: typeof item.sourcePage === "number" ? item.sourcePage : null,
+        sourceText: typeof item.sourceText === "string" ? item.sourceText : "",
+        origin: item.origin === "manager" ? "manager" : "document",
+      });
+    }
+  }
+  return lock;
+}
+
+/** Kilitli kaynak alanlarını geri yazar; değiştirilmeye çalışılan kriterleri bildirir. */
+export function applySourceLock(
+  criteria: Criterion[],
+  lock: Map<string, SourceLock>,
+): { criteria: Criterion[]; reverted: string[] } {
+  const reverted: string[] = [];
+  const next = criteria.map((item) => {
+    const locked = lock.get(item.id);
+    if (!locked) return item;
+    const changed = (item.sourcePage ?? null) !== locked.sourcePage
+      || (item.sourceText ?? "") !== locked.sourceText
+      || item.origin !== locked.origin;
+    if (!changed) return item;
+    reverted.push(item.name);
+    return { ...item, sourcePage: locked.sourcePage, sourceText: locked.sourceText, origin: locked.origin };
+  });
+  return { criteria: next, reverted };
+}
+
+/**
+ * Kriter setini yeni bir sürüm olarak kaydeder.
+ * İçerik değişmediyse (aynı özet) yeni sürüm AÇILMAZ; mevcut sürüm döner.
+ */
+async function publishCriteriaVersion(input: {
+  profileId: string;
+  competitionKey: string;
+  criteria: Criterion[];
+  actor: AdminAccount;
+  timestamp: string;
+}): Promise<{ version: CriteriaVersion; created: boolean }> {
+  const database = await workflowDatabase();
+  const hash = await criteriaHash(input.criteria);
+  const latest = await database.prepare(
+    `SELECT * FROM criteria_profile_versions
+     WHERE competition_key = ? ORDER BY criteria_version DESC LIMIT 1`,
+  ).bind(input.competitionKey).first<CriteriaVersionRow>();
+  if (latest && latest.criteria_hash === hash && latest.criteria_profile_id === input.profileId) {
+    return { version: toCriteriaVersion(latest), created: false };
+  }
+  const nextNumber = (Number(latest?.criteria_version) || 0) + 1;
+  const id = crypto.randomUUID();
+  await database.prepare(
+    `INSERT INTO criteria_profile_versions
+      (id, criteria_profile_id, competition_key, criteria_version, criteria_hash,
+       criteria_json, criteria_count, published_at, published_by, published_by_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    id, input.profileId, input.competitionKey, nextNumber, hash,
+    JSON.stringify(input.criteria), input.criteria.length,
+    input.timestamp, input.actor.id, input.actor.fullName,
+  ).run();
+  const row = await database.prepare(`SELECT * FROM criteria_profile_versions WHERE id = ?`)
+    .bind(id).first<CriteriaVersionRow>();
+  if (!row) throw new Error("Kriter sürümü kaydedildi ancak geri okunamadı.");
+  return { version: toCriteriaVersion(row), created: true };
+}
+
+export type PublishedProfileResult = {
+  profile: CompetitionProfile;
+  /** Bu yayımda oluşan (veya değişmediği için korunan) kriter sürümü. */
+  criteriaVersion: CriteriaVersion;
+  /** Yeni bir sürüm mü açıldı, yoksa içerik aynı olduğu için mevcut sürüm mü korundu? */
+  versionCreated: boolean;
+  /**
+   * Kaynak sayfa/alıntısı değiştirilmeye çalışılıp sunucu tarafından geri
+   * alınan kriterlerin adları (madde 12). Boş değilse arayüz uyarı gösterir.
+   */
+  sourceLockReverted: string[];
+};
+
+export async function submitProfileForReview(profile: ProfileExport, actor: AdminAccount): Promise<PublishedProfileResult> {
   const database = await workflowDatabase();
   const id = profile.profileId ?? crypto.randomUUID();
   const timestamp = new Date().toISOString();
@@ -561,6 +871,12 @@ export async function submitProfileForReview(profile: ProfileExport, actor: Admi
     `SELECT created_by FROM competition_profiles WHERE id = ?`,
   ).bind(id).first<{ created_by: string | null }>();
   if (!canUpdateProfile(actor.id, existing?.created_by)) throw new ProfileOwnershipError();
+  // KAYNAK KİLİDİ (madde 12): kaynak sayfa ve alıntı ilk yayımda sabitlenir.
+  // İstemci isteği elle değiştirse bile sunucu ilk değeri geri koyar.
+  const lock = await sourceLockFor(id);
+  const locked = applySourceLock(profile.criteria, lock);
+  const criteria = locked.criteria;
+  profile = { ...profile, profileId: id, criteria };
   // Aynı yarışmanın farklı yıl ve aşamalarındaki raporlar birbirine karışmaz.
   const key = competitionKey(profile.setup.competition, profile.setup.year, profile.setup.stage);
   await database.prepare(
@@ -613,12 +929,12 @@ export async function submitProfileForReview(profile: ProfileExport, actor: Admi
        updated_at = excluded.updated_at`,
   ).bind(crypto.randomUUID(), key, profile.setup.competition, id, timestamp, timestamp).run();
   await database.prepare(`DELETE FROM criteria WHERE profile_id = ?`).bind(id).run();
-  if (profile.criteria.length) {
-    await database.batch(profile.criteria.map((criterion, position) => database.prepare(
+  if (criteria.length) {
+    await database.batch(criteria.map((criterion, position) => database.prepare(
       `INSERT INTO criteria
         (id, profile_id, position, name, applicability, effect, max_score, active,
-         source_page, source_text, criterion_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         source_page, source_text, verifiability, criterion_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
       criterionRowId(id, position, criterion.id),
       id,
@@ -632,10 +948,15 @@ export async function submitProfileForReview(profile: ProfileExport, actor: Admi
       criterion.active ? 1 : 0,
       criterion.sourcePage,
       criterion.sourceText,
+      criterion.verifiability,
       JSON.stringify(criterion),
       timestamp,
     )));
   }
+  // Değişmez sürüm: eski satır güncellenmez, yeni satır açılır (madde 2).
+  const published = await publishCriteriaVersion({
+    profileId: id, competitionKey: key, criteria, actor, timestamp,
+  });
   await database.prepare(
     `UPDATE criteria_extraction_runs
      SET profile_id = ?, updated_at = ?
@@ -655,9 +976,25 @@ export async function submitProfileForReview(profile: ProfileExport, actor: Admi
     subjectId: id,
     event: "profile_approved",
     actor,
-    detail: `${saved.competitionName} · ${profile.criteria.length} kriter · kaynak: ${profile.sourceDocument.name}`,
+    detail: `${saved.competitionName} · ${criteria.length} kriter · sürüm v${published.version.criteriaVersion}`
+      + ` · özet ${published.version.criteriaHash.slice(0, 12)} · kaynak: ${profile.sourceDocument.name}`,
   });
-  return saved;
+  if (locked.reverted.length) {
+    await recordWorkflowEvent({
+      subjectType: "profile",
+      subjectId: id,
+      event: "criteria_source_locked",
+      actor,
+      detail: `${locked.reverted.length} kriterin kaynak sayfası/alıntısı değiştirilmek istendi ve ilk yayımdaki `
+        + `değere geri alındı: ${locked.reverted.slice(0, 5).join(", ")}`,
+    }).catch((eventError) => console.error("[workflow] kaynak kilidi olayı kaydedilemedi", eventError));
+  }
+  return {
+    profile: saved,
+    criteriaVersion: published.version,
+    versionCreated: published.created,
+    sourceLockReverted: locked.reverted,
+  };
 }
 
 /**
@@ -776,8 +1113,9 @@ export async function findCompetitionWorkflow(name: string): Promise<Competition
   const row = await database.prepare(
     `SELECT * FROM competitions
      WHERE competition_name = ?
-     ORDER BY (current_profile_id IS NOT NULL) DESC,
-              (status = 'open') DESC,
+     ORDER BY (deleted_at IS NULL) DESC,
+              (current_profile_id IS NOT NULL) DESC,
+              (status = 'open' AND is_active = 1) DESC,
               updated_at DESC
      LIMIT 1`,
   ).bind(name).first<CompetitionRow>();
@@ -809,8 +1147,146 @@ export async function listCompetitionsFor(account: AdminAccount): Promise<Compet
     ).bind(account.id).all<CompetitionRow>();
     return (result.results ?? []).map(toCompetition);
   }
-  if (["02", "04"].includes(account.roleCode)) return listCompetitionWorkflows();
+  // Hakem arşivlenmiş yarışmayı aktif listesinde görmez; Değerlendirme
+  // Yöneticisi denetim için hepsini görür (bkz. madde 11).
+  if (account.roleCode === "02") {
+    const result = await database.prepare(
+      `SELECT * FROM competitions WHERE deleted_at IS NULL ORDER BY is_priority DESC, updated_at DESC`,
+    ).all<CompetitionRow>();
+    return (result.results ?? []).map(toCompetition);
+  }
+  if (account.roleCode === "04") return listCompetitionWorkflows();
   return [];
+}
+
+/* ------------------------------------------------------------------------- *
+ * Yarışmayı aktif / pasif yapma (madde 6)
+ *
+ * Aktif/pasif, süreç aşamasından (status) BAĞIMSIZ bir anahtardır:
+ *   Aktif   yarışmacıya görünür, yeni başvuru kabul eder, akış normal işler.
+ *   Pasif   yarışmacının listesinde görünmez, yeni başvuru kabul etmez ve yeni
+ *           değerlendirme kuyruğu üretmez. Hakem GEÇMİŞ başvuruları görmeye ve
+ *           izin verilen karar düzeltmelerini yapmaya devam eder.
+ *
+ * Pasifleştirme hiçbir kaydı silmez ve aşamayı geri almaz; yeniden
+ * aktifleştirildiğinde yarışma bıraktığı yerden devam eder.
+ * ------------------------------------------------------------------------- */
+export async function setCompetitionActive(
+  competitionId: string,
+  active: boolean,
+  note: string,
+  actor: AdminAccount,
+): Promise<CompetitionWorkflow | "not_found" | "archived"> {
+  const database = await workflowDatabase();
+  const current = await database.prepare(`SELECT * FROM competitions WHERE id = ?`)
+    .bind(competitionId).first<CompetitionRow>();
+  if (!current) return "not_found";
+  if (current.deleted_at) return "archived";
+  const timestamp = new Date().toISOString();
+  const trimmed = note.trim().slice(0, 300);
+  await database.prepare(
+    `UPDATE competitions
+     SET is_active = ?, activation_note = ?, activation_changed_at = ?,
+         activation_changed_by = ?, activation_changed_by_name = ?, updated_at = ?
+     WHERE id = ?`,
+  ).bind(active ? 1 : 0, trimmed, timestamp, actor.id, actor.fullName, timestamp, competitionId).run();
+  const row = await database.prepare(`SELECT * FROM competitions WHERE id = ?`)
+    .bind(competitionId).first<CompetitionRow>();
+  if (!row) return "not_found";
+  const saved = toCompetition(row);
+  await recordWorkflowEvent({
+    subjectType: "competition",
+    subjectId: competitionId,
+    event: active ? "competition_activated" : "competition_deactivated",
+    actor,
+    detail: `${saved.competitionName}${trimmed ? ` · ${trimmed}` : ""}`,
+  }).catch((eventError) => console.error("[workflow] aktiflik olayı kaydedilemedi", eventError));
+  return saved;
+}
+
+/**
+ * Yarışmayı arşivler (soft delete). Satır SİLİNMEZ: kim, ne zaman, hangi
+ * gerekçeyle arşivlediği kayıtta kalır ve Değerlendirme Yöneticisi görür.
+ */
+export async function archiveCompetition(
+  competitionId: string,
+  archived: boolean,
+  reason: string,
+  actor: AdminAccount,
+): Promise<CompetitionWorkflow | "not_found"> {
+  const database = await workflowDatabase();
+  const timestamp = new Date().toISOString();
+  const trimmed = reason.trim().slice(0, 400);
+  const result = await database.prepare(
+    `UPDATE competitions
+     SET deleted_at = ?, deleted_by = ?, deleted_by_name = ?, deleted_reason = ?,
+         is_active = CASE WHEN ? = 1 THEN 0 ELSE is_active END,
+         updated_at = ?
+     WHERE id = ?`,
+  ).bind(
+    archived ? timestamp : null, archived ? actor.id : null,
+    archived ? actor.fullName : null, archived ? trimmed : null,
+    archived ? 1 : 0, timestamp, competitionId,
+  ).run();
+  if (!result.meta.changes) return "not_found";
+  const row = await database.prepare(`SELECT * FROM competitions WHERE id = ?`)
+    .bind(competitionId).first<CompetitionRow>();
+  if (!row) return "not_found";
+  const saved = toCompetition(row);
+  await recordWorkflowEvent({
+    subjectType: "competition",
+    subjectId: competitionId,
+    event: archived ? "competition_archived" : "competition_activated",
+    actor,
+    detail: `${saved.competitionName}${trimmed ? ` · gerekçe: ${trimmed}` : ""}`,
+  }).catch((eventError) => console.error("[workflow] arşivleme olayı kaydedilemedi", eventError));
+  return saved;
+}
+
+/**
+ * Başvuruyu hakemin aktif iş listesinden kaldırır (soft delete / arşivleme).
+ *
+ * FİZİKSEL SİLME YOKTUR: kayıt, PDF ve bütün değerlendirme geçmişi yerinde
+ * kalır. Yalnızca `deleted_at`, `deleted_by` ve gerekçe işaretlenir; işlem
+ * denetim izine ve süreç zaman çizelgesine yazılır (madde 11).
+ */
+export type ArchiveApplicationResult = "archived" | CompetitionApplication | "not_found" | "forbidden";
+
+export async function archiveApplication(
+  applicationId: string,
+  archived: boolean,
+  reason: string,
+  actor: AdminAccount,
+): Promise<ArchiveApplicationResult> {
+  const database = await workflowDatabase();
+  const current = await database.prepare(
+    `SELECT assigned_judge_id, deleted_at FROM competition_applications WHERE id = ?`,
+  ).bind(applicationId).first<{ assigned_judge_id: string | null; deleted_at: string | null }>();
+  if (!current) return "not_found";
+  // Hakem yalnızca KENDİSİNE atanmış dosyayı kaldırabilir.
+  if (actor.roleCode === "02" && current.assigned_judge_id !== actor.id) return "forbidden";
+  const timestamp = new Date().toISOString();
+  const trimmed = reason.trim().slice(0, 400);
+  await database.prepare(
+    `UPDATE competition_applications
+     SET deleted_at = ?, deleted_by = ?, deleted_by_name = ?, deleted_reason = ?, updated_at = ?
+     WHERE id = ?`,
+  ).bind(
+    archived ? timestamp : null, archived ? actor.id : null,
+    archived ? actor.fullName : null, archived ? trimmed : null,
+    timestamp, applicationId,
+  ).run();
+  await recordWorkflowEvent({
+    subjectType: "application",
+    subjectId: applicationId,
+    event: archived ? "application_archived" : "application_restored",
+    actor,
+    detail: trimmed || (archived ? "Gerekçe girilmedi" : "Aktif listeye geri alındı"),
+  }).catch((eventError) => console.error("[workflow] arşivleme olayı kaydedilemedi", eventError));
+  // Arşivlenen satır hakemin görünürlük filtresinden çıkar; geri okumaya
+  // çalışmak "bulunamadı" üretirdi. Kaldırma işlemi başarılıdır.
+  if (archived) return "archived";
+  return await findApplication(applicationId, actor) ?? "not_found";
 }
 
 /** Bu yarışmanın kriter profilini yayımlayan yönetici mi? */
@@ -875,6 +1351,7 @@ export async function competitionAcceptsApplications(name: string): Promise<bool
   const row = await database.prepare(
     `SELECT 1 AS ok FROM competitions
      WHERE competition_name = ? AND status = 'open' AND current_profile_id IS NOT NULL
+       AND is_active = 1 AND deleted_at IS NULL
      LIMIT 1`,
   ).bind(name).first<{ ok: number }>();
   return Boolean(row);
@@ -899,6 +1376,7 @@ export async function listOpenCompetitions(): Promise<CompetitionEntry[]> {
      FROM competitions c
      LEFT JOIN competition_profiles p ON p.id = c.current_profile_id
      WHERE c.status = 'open' AND c.current_profile_id IS NOT NULL
+       AND c.is_active = 1 AND c.deleted_at IS NULL
      ORDER BY c.competition_name`,
   ).all<{ competition_name: string; category: string | null; stage: string | null }>();
   const seen = new Set<string>();
@@ -1016,18 +1494,33 @@ export async function listApprovedProfiles(account?: AdminAccount): Promise<Comp
  *
  * Hata durumunda BAŞVURU DÜŞMEZ: atama yapılamazsa başvuru "submitted" kalır.
  */
-async function autoAssignJudge(applicationId: string, timestamp: string): Promise<{ id: string; name: string } | null> {
+async function autoAssignJudge(
+  applicationId: string,
+  competitionKey: string,
+  timestamp: string,
+): Promise<{ id: string; name: string; openFiles: number; scoped: boolean } | null> {
   const database = await workflowDatabase();
-  const row = await database.prepare(
+  /*
+   * Seçim ölçütü, sırayla:
+   *   1. Bu YARIŞMADA daha önce dosya almış aktif hakemler (varsa) tercih edilir;
+   *      aynı yarışmanın kriterlerine hâkim hakem işi daha hızlı bitirir.
+   *   2. AÇIK dosya sayısı en az olan hakem (tamamlanmamış ve arşivlenmemiş).
+   *   3. Eşitlikte en eski hesap, sonra kimlik sırası — deterministik ve adil:
+   *      aynı yük altında sıra her zaman aynı hakeme gider, kura atılmaz.
+   */
+  const candidate = await database.prepare(
     `SELECT j.id, j.full_name,
             (SELECT COUNT(*) FROM competition_applications a
-              WHERE a.assigned_judge_id = j.id AND a.status <> 'completed') AS open_files
+              WHERE a.assigned_judge_id = j.id AND a.status <> 'completed' AND a.deleted_at IS NULL) AS open_files,
+            (SELECT COUNT(*) FROM competition_applications a
+              WHERE a.assigned_judge_id = j.id AND a.competition_key = ?) AS competition_files
      FROM admin_accounts j
      WHERE j.role_code = '02' AND j.status = 'active'
-     ORDER BY open_files ASC, j.created_at ASC, j.id ASC
+     ORDER BY (competition_files > 0) DESC, open_files ASC, j.created_at ASC, j.id ASC
      LIMIT 1`,
-  ).first<{ id: string; full_name: string; open_files: number }>();
-  if (!row) return null;
+  ).bind(competitionKey).first<{ id: string; full_name: string; open_files: number; competition_files: number }>();
+  if (!candidate) return null;
+  const row = candidate;
 
   // Koşul WHERE'de tutulur: başka bir işlem bu arada atama yaptıysa üzerine yazılmaz.
   const updated = await database.prepare(
@@ -1037,6 +1530,8 @@ async function autoAssignJudge(applicationId: string, timestamp: string): Promis
   ).bind(row.id, row.full_name, timestamp, applicationId).run();
   if (!updated.meta.changes) return null;
 
+  // Atama satırı ve önceki atamanın kapatılması tek turda yazılır: aynı
+  // başvuru iki hakeme birden "aktif" görünemez.
   await database.batch([
     database.prepare(`UPDATE application_assignments SET active = 0 WHERE application_id = ? AND active = 1`).bind(applicationId),
     database.prepare(
@@ -1045,10 +1540,18 @@ async function autoAssignJudge(applicationId: string, timestamp: string): Promis
        VALUES (?, ?, ?, ?, NULL, ?, ?, 1, ?)`,
     ).bind(
       crypto.randomUUID(), applicationId, row.id, row.full_name, "sistem",
-      "Başvuru alındığında en az yüklü hakeme otomatik atandı.", timestamp,
+      candidate.competition_files > 0
+        ? `Bu yarışmada görevli, en az yüklü hakeme otomatik atandı (açık dosya: ${row.open_files}).`
+        : `En az açık dosyası bulunan hakeme otomatik atandı (açık dosya: ${row.open_files}).`,
+      timestamp,
     ),
   ]);
-  return { id: row.id, name: row.full_name };
+  return {
+    id: row.id,
+    name: row.full_name,
+    openFiles: Number(row.open_files) || 0,
+    scoped: Number(candidate.competition_files) > 0,
+  };
 }
 
 export async function createApplication(input: {
@@ -1113,20 +1616,33 @@ export async function createApplication(input: {
 
   // Atama başvurudan SONRA yapılır: başarısız olursa başvuru kaydı bozulmaz,
   // yalnızca atanmamış kalır ve 04 panosunda bekleyen olarak görünür.
-  let assignment: { id: string; name: string } | null = null;
+  let assignment: Awaited<ReturnType<typeof autoAssignJudge>> = null;
   try {
-    assignment = await autoAssignJudge(id, timestamp);
+    assignment = await autoAssignJudge(id, input.competitionKey, timestamp);
   } catch (assignError) {
     console.error("[workflow] otomatik hakem ataması yapılamadı", assignError);
   }
   if (assignment) {
+    const detail = `${assignment.name} · başvuru alındığında sistem tarafından otomatik atandı`
+      + ` · açık dosya: ${assignment.openFiles}${assignment.scoped ? " · bu yarışmada görevli" : ""}`;
     await recordWorkflowEvent({
       subjectType: "application",
       subjectId: id,
       event: "application_assigned",
       actor: null,
-      detail: `${assignment.name} · başvuru alındığında sistem tarafından otomatik atandı`,
+      detail,
     }).catch((eventError) => console.error("[workflow] atama olayı kaydedilemedi", eventError));
+    // Atama denetim iznine de yazılır: kim/ne zaman/neden sorusunun cevabı
+    // yalnızca süreç zaman çizelgesinde değil, denetim izinde de bulunur.
+    await recordAudit({
+      actorId: null,
+      actorEmail: null,
+      actorRole: null,
+      action: "application_auto_assigned",
+      targetType: "competition_application",
+      targetId: id,
+      detail,
+    }).catch((auditError) => console.error("[audit] otomatik atama", auditError));
   }
 
   const saved = await findApplication(id, input.participant);
@@ -1142,7 +1658,11 @@ export async function createApplication(input: {
  */
 function applicationVisibility(account: AdminAccount, alias = "a"): { sql: string; binds: unknown[] } {
   if (account.roleCode === "03") return { sql: `WHERE ${alias}.participant_id = ?`, binds: [account.id] };
-  if (account.roleCode === "02") return { sql: `WHERE ${alias}.assigned_judge_id = ?`, binds: [account.id] };
+  // Hakem arşivlediği (aktif listeden kaldırdığı) dosyayı görmez; kayıt
+  // silinmediği için Değerlendirme Yöneticisi denetim amacıyla görmeye devam eder.
+  if (account.roleCode === "02") {
+    return { sql: `WHERE ${alias}.assigned_judge_id = ? AND ${alias}.deleted_at IS NULL`, binds: [account.id] };
+  }
   if (account.roleCode === "01") {
     return {
       sql: `WHERE ${alias}.competition_key IN (SELECT competition_key FROM competition_profiles WHERE created_by = ?)`,
@@ -1205,7 +1725,10 @@ function redactEvaluation(evaluation: ReportEvaluation | null): ReportEvaluation
 const APPLICATION_SELECT = `SELECT a.*, d.applicant_full_name, d.team_name,
   d.outcome, d.outcome_note, d.decided_at,
   c.status AS competition_status,
-  (SELECT MAX(v.version_number) FROM submission_versions v WHERE v.application_id = a.id) AS current_version_number
+  c.is_active AS competition_is_active,
+  (SELECT MAX(v.version_number) FROM submission_versions v WHERE v.application_id = a.id) AS current_version_number,
+  (SELECT MAX(cv.criteria_version) FROM criteria_profile_versions cv
+    WHERE cv.competition_key = a.competition_key) AS current_criteria_version
   FROM competition_applications a
   LEFT JOIN application_submission_details d ON d.application_id = a.id
   LEFT JOIN competitions c ON c.competition_key = a.competition_key`;
@@ -1455,6 +1978,117 @@ export async function saveAndListSimilarityFingerprints(
   });
 }
 
+/* ------------------------------------------------------------------------- *
+ * DEĞERLENDİRME BÜTÜNLÜĞÜ (madde 3)
+ *
+ * Hakem "Yapay Zekâ Analizi" dediğinde sunucu İSTEMCİDEN GELEN kritere,
+ * profile veya PDF'e GÜVENMEZ. Zincir tamamen sunucuda kurulur:
+ *
+ *   application_id → competition_key → current_pdf_version (R2)
+ *                                    → latest_published_criteria_version (D1)
+ *                                    → evaluation_result
+ *
+ * Böylece istemci farklı bir PDF, farklı bir kriter seti veya eski bir profil
+ * göndererek sonucu yanlış başvuruya yazdıramaz. Uyuşmayan her bağ sessizce
+ * kaydedilmez; anlaşılır bir hata döner.
+ * ------------------------------------------------------------------------- */
+
+export type EvaluationContext = {
+  applicationId: string;
+  competitionKey: string;
+  competitionName: string;
+  competitionArchived: boolean;
+  competitionActive: boolean;
+  /** Sunucudan kurulmuş profil: künye kayıttan, kriterler SON yayımlanan sürümden. */
+  profile: ProfileExport;
+  criteriaVersion: CriteriaVersion;
+  /** Katılımcının GEÇERLİ rapor sürümü. */
+  submissionVersionId: string | null;
+  submissionVersionNumber: number;
+  fileKey: string;
+  fileName: string;
+  status: ApplicationStatus;
+  assignedJudgeId: string | null;
+};
+
+export type EvaluationContextFailure =
+  | "not_found"
+  | "forbidden"
+  | "criteria_missing"
+  | "document_missing"
+  | "competition_archived";
+
+/**
+ * Başvurunun değerlendirme bağlamını YALNIZCA sunucu kaynaklarından kurar.
+ * `judge` verilirse atama kontrolü de uygulanır.
+ */
+export async function resolveEvaluationContext(
+  applicationId: string,
+  actor: AdminAccount,
+): Promise<EvaluationContext | EvaluationContextFailure> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT a.id, a.competition_key, a.competition_name, a.profile_id, a.status,
+            a.assigned_judge_id, a.current_version_id, a.file_key, a.file_name,
+            c.deleted_at AS competition_deleted_at, c.is_active AS competition_is_active,
+            v.file_key AS version_file_key, v.file_name AS version_file_name,
+            v.version_number AS version_number
+     FROM competition_applications a
+     LEFT JOIN competitions c ON c.competition_key = a.competition_key
+     LEFT JOIN submission_versions v ON v.id = a.current_version_id
+     WHERE a.id = ?`,
+  ).bind(applicationId).first<{
+    id: string; competition_key: string; competition_name: string; profile_id: string | null;
+    status: string; assigned_judge_id: string | null; current_version_id: string | null;
+    file_key: string; file_name: string;
+    competition_deleted_at: string | null; competition_is_active: number | null;
+    version_file_key: string | null; version_file_name: string | null; version_number: number | null;
+  }>();
+  if (!row) return "not_found";
+  // Hakem yalnızca KENDİSİNE atanmış başvuruyu değerlendirebilir.
+  if (actor.roleCode === "02" && row.assigned_judge_id !== actor.id) return "forbidden";
+  if (row.competition_deleted_at) return "competition_archived";
+
+  // 1) Yarışmanın SON yayımlanmış kriter sürümü — istemci ne gönderirse göndersin.
+  const latest = await findLatestCriteriaVersion(row.competition_key);
+  if (!latest) return "criteria_missing";
+
+  // 2) Profil künyesi (yarışma, kategori, dil, dosya kuralları) kayıttan okunur.
+  const base = (row.profile_id ? await findProfile(row.profile_id) : null)
+    ?? await findProfile(latest.version.criteriaProfileId);
+  if (!base) return "criteria_missing";
+
+  // 3) Katılımcının geçerli PDF sürümü (R2 anahtarı) doğrulanır.
+  const fileKey = row.version_file_key ?? row.file_key;
+  if (!fileKey) return "document_missing";
+
+  const profile: ProfileExport = {
+    ...base.profile,
+    profileId: latest.version.criteriaProfileId,
+    // Kriterler DAİMA son yayımlanan sürümden gelir; profil JSON'undaki
+    // anlık görüntü değil. İkisi ayrışırsa yürürlükteki sürüm kazanır.
+    criteria: latest.criteria,
+  };
+
+  return {
+    applicationId: row.id,
+    competitionKey: row.competition_key,
+    competitionName: row.competition_name,
+    competitionArchived: false,
+    competitionActive: row.competition_is_active === null || row.competition_is_active === undefined
+      ? true
+      : row.competition_is_active === 1,
+    profile,
+    criteriaVersion: latest.version,
+    submissionVersionId: row.current_version_id,
+    submissionVersionNumber: Number(row.version_number) || 1,
+    fileKey,
+    fileName: row.version_file_name ?? row.file_name,
+    status: (APPLICATION_STATUSES as string[]).includes(row.status) ? row.status as ApplicationStatus : "submitted",
+    assignedJudgeId: row.assigned_judge_id,
+  };
+}
+
 /**
  * AI ön değerlendirmesini başlatır (Aşama C).
  * Yalnızca HAKEM ONAYLI profil varsa çalışır; onaysız profille değerlendirme yapılmaz.
@@ -1500,31 +2134,44 @@ export async function saveApplicationEvaluation(
   judge: AdminAccount,
   evaluation: ReportEvaluation | null,
   failed = false,
+  binding: { criteriaVersion: number | null; criteriaHash: string | null; pdfHash: string | null; submissionVersionId: string | null } | null = null,
 ): Promise<void> {
   const database = await workflowDatabase();
   const current = await database.prepare(
     `SELECT profile_id, current_version_id FROM competition_applications WHERE id = ?`,
   ).bind(id).first<{ profile_id: string | null; current_version_id: string | null }>();
   const timestamp = new Date().toISOString();
+  const versionId = binding?.submissionVersionId ?? current?.current_version_id ?? null;
   await database.batch([database.prepare(
     `UPDATE competition_applications
-     SET status = ?, evaluation_json = ?, judge_id = ?, judge_name = ?, updated_at = ?
+     SET status = ?, evaluation_json = ?, judge_id = ?, judge_name = ?,
+         evaluation_criteria_version = ?, evaluation_criteria_hash = ?,
+         evaluation_pdf_hash = ?, evaluation_version_id = ?, updated_at = ?
      WHERE id = ?`,
   ).bind(
     failed ? "analysis_failed" : "awaiting_judge",
     evaluation ? JSON.stringify(evaluation) : null,
     judge.id,
     judge.fullName,
+    // Başarısız analizde bağ temizlenir: eski sürüm bilgisi yeni denemeyi
+    // "güncel" gibi göstermemeli.
+    failed ? null : binding?.criteriaVersion ?? null,
+    failed ? null : binding?.criteriaHash ?? null,
+    failed ? null : binding?.pdfHash ?? null,
+    failed ? null : versionId,
     timestamp,
     id,
   ), database.prepare(
     `INSERT INTO evaluation_results
-      (id, application_id, submission_version_id, profile_id, status, ai_raw_analysis, model, created_at, completed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, application_id, submission_version_id, profile_id, status, ai_raw_analysis, model,
+       criteria_version, criteria_hash, pdf_hash, created_at, completed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
-    crypto.randomUUID(), id, current?.current_version_id ?? null, current?.profile_id ?? null,
+    crypto.randomUUID(), id, versionId, current?.profile_id ?? null,
     failed ? "failed" : "completed", evaluation ? JSON.stringify(evaluation) : null,
-    evaluation?.model ?? null, timestamp, failed ? null : timestamp,
+    evaluation?.model ?? null,
+    binding?.criteriaVersion ?? null, binding?.criteriaHash ?? null, binding?.pdfHash ?? null,
+    timestamp, failed ? null : timestamp,
   )]);
   await recordWorkflowEvent({
     subjectType: "application",
@@ -1533,7 +2180,7 @@ export async function saveApplicationEvaluation(
     actor: judge,
     detail: failed || !evaluation
       ? "Analiz tamamlanamadı; başvuru yeniden başlatılabilir."
-      : `AI bulguları: ${evaluation.summary?.basarili ?? 0} ${RULE_VERDICT_LABELS.BASARILI} · ${evaluation.summary?.revizyon ?? 0} ${RULE_VERDICT_LABELS.REVIZYON} · ${evaluation.summary?.kritikHata ?? 0} ${RULE_VERDICT_LABELS.KRITIK_HATA} · genel durum: ${evaluation.summary ? RULE_VERDICT_LABELS[evaluation.summary.overall] : "—"} · ${evaluation.summary?.total ?? evaluation.findings.length} kural hakem kararı bekliyor`,
+      : `Kriter sürümü v${binding?.criteriaVersion ?? "?"} · PDF ${(binding?.pdfHash ?? "").slice(0, 12) || "?"} · AI bulguları: ${evaluation.summary?.basarili ?? 0} ${RULE_VERDICT_LABELS.BASARILI} · ${evaluation.summary?.revizyon ?? 0} ${RULE_VERDICT_LABELS.REVIZYON} · ${evaluation.summary?.kritikHata ?? 0} ${RULE_VERDICT_LABELS.KRITIK_HATA} · genel durum: ${evaluation.summary ? RULE_VERDICT_LABELS[evaluation.summary.overall] : "—"} · ${evaluation.summary?.total ?? evaluation.findings.length} kural hakem kararı bekliyor`,
   });
 }
 
@@ -1581,11 +2228,18 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
   const completed = review.status === "completed";
   const timestamp = new Date().toISOString();
   const before = await database.prepare(
-    `SELECT a.status, a.evaluation_json, a.assigned_judge_id, c.decisions_locked
+    `SELECT a.status, a.evaluation_json, a.assigned_judge_id, a.evaluation_criteria_version,
+            c.decisions_locked,
+            (SELECT MAX(cv.criteria_version) FROM criteria_profile_versions cv
+              WHERE cv.competition_key = a.competition_key) AS current_criteria_version
      FROM competition_applications a
      LEFT JOIN competitions c ON c.competition_key = a.competition_key
      WHERE a.id = ?`,
-  ).bind(id).first<{ status: string; evaluation_json: string | null; assigned_judge_id: string | null; decisions_locked: number | null }>();
+  ).bind(id).first<{
+    status: string; evaluation_json: string | null; assigned_judge_id: string | null;
+    evaluation_criteria_version: number | null; decisions_locked: number | null;
+    current_criteria_version: number | null;
+  }>();
   // Hata türleri bilinçli: 409 (çakışma) döner, 500 değil. Hakem "İşlem
   // tamamlanamadı" yerine neden karar veremediğini görür.
   if (!before) throw new ConflictError("Başvuru bulunamadı.");
@@ -1593,6 +2247,22 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
     throw new ConflictError("Bu başvuru size atanmadı; kararı yalnızca atanan hakem verebilir.");
   }
   if (before.decisions_locked === 1) throw new ConflictError("Bu yarışmanın hakem kararları donduruldu; değişiklik yapılamaz.");
+  /*
+   * KRİTER TAZELİĞİ (madde 2): kriterler analizden sonra yeniden yayımlandıysa
+   * eski analiz yeni kriterler için kullanılamaz. Nihai karar da bu eski analiz
+   * üzerine verilemez; hakem önce yeniden analiz etmelidir. Geçmişte KAYITLI
+   * kararlar bundan etkilenmez, kendi sürümleriyle korunur.
+   */
+  if (completed && before.evaluation_json && before.current_criteria_version) {
+    const bound = before.evaluation_criteria_version;
+    if (bound === null || bound === undefined || Number(bound) < Number(before.current_criteria_version)) {
+      throw new ConflictError(
+        "Kriterler güncellendi, yeniden analiz gerekli. Bu başvurunun AI analizi "
+        + `v${bound ?? "?"} kriter sürümüyle üretildi; yürürlükteki sürüm `
+        + `v${before.current_criteria_version}. Karar vermeden önce "Analizi yenile" deyin.`,
+      );
+    }
+  }
   const evaluation = parseJson<ReportEvaluation>(before?.evaluation_json ?? null);
   await database.batch([database.prepare(
     `UPDATE competition_applications
@@ -1742,6 +2412,17 @@ export async function touchStoredAnalysis(cacheKey: string): Promise<void> {
   ).bind(new Date().toISOString(), cacheKey).run();
 }
 
+/**
+ * Kalıcı analiz kaydını siler.
+ *
+ * "Yeniden analiz et" seçeneği bunu kullanır: eski (belki hatalı) sonucun
+ * yerine modelin taze çıktısı gelir. Kaydın bulunmaması hata değildir.
+ */
+export async function deleteStoredAnalysis(cacheKey: string): Promise<void> {
+  const database = await workflowDatabase();
+  await database.prepare(`DELETE FROM criteria_analysis_cache WHERE cache_key = ?`).bind(cacheKey).run();
+}
+
 /** Taze analiz sonucunu kalıcı önbelleğe yazar ve satır sınırını uygular. */
 export async function saveStoredAnalysis(input: {
   cacheKey: string;
@@ -1809,9 +2490,15 @@ export async function operationsSummary(account: AdminAccount): Promise<Operatio
   const at = (status: ApplicationStatus) => counts.get(status) ?? 0;
   const total = [...counts.values()].reduce((sum, value) => sum + value, 0);
   const completed = at("completed");
+  // "AI bekliyor" sayacı yalnızca 'submitted' değildir: hakeme atanmış ama
+  // analizi başlatılmamış ('assigned'), yeniden gönderilmiş ('resubmitted') ve
+  // belge beklenen dosyalar da analiz kuyruğundadır. Eski sayaç bunları
+  // görmediği için pano "0 bekleyen" gösterip tıkanmayı gizliyordu.
+  const aiPending = at("submitted") + at("assigned") + at("resubmitted")
+    + at("analysis_failed") + at("document_reupload_requested");
   return {
     total,
-    aiPending: at("submitted"),
+    aiPending,
     aiProcessing: at("analyzing"),
     aiCompleted: at("awaiting_judge") + at("judge_in_review") + completed,
     judgePending: at("awaiting_judge"),

@@ -28,6 +28,31 @@ değerden biridir (`RuleVerdict`):
 | `BASARILI` | BAŞARILI | Kural karşılandı. |
 | `REVIZYON` | REVİZYON | Kural eksik/kısmi karşılandı; düzeltme gerekir. |
 | `KRITIK_HATA` | KRİTİK HATA | Zorunlu kural karşılanmadı veya açık ihlal var. |
+| `DEGERLENDIRILEMEDI` | PDF'DEN DEĞERLENDİRİLEMEZ | Kuralın kanıtı rapor PDF'inin dışındadır. **İhlal değildir.** |
+
+### `DEGERLENDIRILEMEDI` — PDF dışı kanıt
+
+Her kriter, kanıtının nerede bulunduğunu söyleyen bir `verifiability` alanı
+taşır (`CriterionVerifiability`):
+
+| Değer | Rapor analizindeki davranış |
+| --- | --- |
+| `PDF_DENETLENEBILIR` | Kriter modele gönderilir; AI rapor üzerinde değerlendirir. |
+| `HARICI_KANIT_GEREKLI` | Modele GÖNDERİLMEZ. Sunucu `DEGERLENDIRILEMEDI` atar: "PDF üzerinden değerlendirilemez; harici kanıt kontrol edilmeli". |
+| `HAKEM_KONTROLU_GEREKLI` | Modele GÖNDERİLMEZ. Sunucu `DEGERLENDIRILEMEDI` atar; karar hakeme bırakılır. |
+
+Kural: tanıtım videosu, saha teslimi, portal yüklemesi veya kurul kararı
+gerektiren bir madde, raporda karşılığı olmadığı için ASLA `KRITIK_HATA`,
+`REVIZYON` veya "eksik" sayılmaz. Bu durum:
+
+- hata sayaçlarına girmez (`summary.disiKanit` ayrı sayılır),
+- aşama sonucunu kötüleştirmez (`VERDICT_RANK` içinde BAŞARILI'nın da altındadır),
+- zorunlu olsa bile aşamayı kritik hataya çeviremez (`capStageVerdict`),
+- yarışmacı geri bildirimine "gelişime açık yön" olarak yazılmaz (`feedbackOf`),
+- hakem ekranında AYRI ve açık bir bölümde listelenir.
+
+Modele giden şema yalnızca üç PDF durumunu içerir (`PDF_RULE_VERDICTS`);
+`DEGERLENDIRILEMEDI` değerini model üretemez, yalnızca sunucu atar.
 
 **Yoktur:** puan, ağırlık, ceza, baraj, normalizasyon, karar kuralı denetimi,
 güven seviyesi, "emin olamadım"/`needs_human` durumu. Kriterler **Zorunlu**
@@ -44,16 +69,35 @@ doğrudan güvenilir kabul edilmez; bulgular yayımlı profile göre yeniden kur
 
 ### İstek: `multipart/form-data`
 
+**BÜTÜNLÜK: istemci kriter seti veya PDF GÖNDEREMEZ.** İstekte yalnızca başvuru
+kimliği bulunur; zincir tamamen sunucuda kurulur:
+
+```
+application_id → competition_key → current_pdf_version (R2)
+                                 → latest_published_criteria_version (D1)
+                                 → evaluation_result
+```
+
 | Alan | Tür | Açıklama |
 | --- | --- | --- |
-| `file` | File | Katılımcı raporu PDF'si. PDF değilse `415`, 50 MB üstü `413`, bozuksa `422`. |
-| `profile` | string | Yayımlı profil JSON'u (`ProfileExport`). `validateProfileExport` 1.0 profillerini 2.0'a yükseltir; geçersizse `400`. |
+| `applicationId` | string | **Zorunlu.** Değerlendirilecek başvuru. Hakem bu başvuruya atanmamışsa `403`. |
 | `pageCount` | string | İstemcinin pdfjs ile saydığı sayfa sayısı. **Danışma amaçlıdır**; sunucu sayfayı kendisi sayar. |
-| `pages` | string (isteğe bağlı) | İstemcinin çıkardığı sayfa metinleri, JSON dizisi (≤ 2 MB). Yalnızca sunucudaki **deterministik** kontrollerde (dil tespiti, başlık yedeği) kullanılır; modele gönderilmez. |
+| `pages` | string (isteğe bağlı) | İstemcinin çıkardığı sayfa metinleri, JSON dizisi. Yalnızca sunucudaki **deterministik** kontrollerde (dil tespiti, başlık yedeği) kullanılır; modele gönderilmez. Sayfa sayısı sunucunun ölçümüyle tutmuyorsa TAMAMEN yok sayılır ve uyarıya yazılır. |
+| `force` | `"1"` (isteğe bağlı) | "Analizi yenile": kayıtlı sonuç atlanır, model yeniden çalıştırılır. |
 
-İstemci sarmalayıcısı `app/lib/report-evaluator.ts` bu isteği atar; `501`/`404`/`503`
-alan ortamlarda çevrimdışı deterministik yedeğe (`demo-report-evaluator.ts`,
-`provider: "demo"`) düşer. Diğer hatalar gizlenmez.
+Çözümleme hataları sessiz değildir:
+
+| Durum | Yanıt |
+| --- | --- |
+| Başvuru yok | `404` |
+| Hakem bu başvuruya atanmamış | `403` |
+| Yarışmanın yayımlanmış kriter sürümü yok | `409` |
+| Başvurunun geçerli PDF sürümü yok / R2'de bulunamıyor | `409` |
+| Yarışma arşivlenmiş | `409` |
+
+`GEMINI_API_KEY` bu ortamda tanımlı değilse istek DÜŞMEZ: sunucu aynı bağlamla
+yalnızca deterministik kontrolleri çalıştırır, her kuralı hakeme REVİZYON olarak
+bırakır ve `provider: "demo"` ile döner.
 
 ### Modele giden içerik
 
@@ -80,9 +124,18 @@ alan ortamlarda çevrimdışı deterministik yedeğe (`demo-report-evaluator.ts`
     "competition": "İnsansız Deniz Aracı Yarışması",
     "year": "2026",
     "stage": "Kritik tasarım değerlendirmesi",
-    "reportType": "Kritik Tasarım Raporu (KTR)"
+    "reportType": "Kritik Tasarım Raporu (KTR)",
+    // Sonucun üretildiği DEĞİŞMEZ kriter sürümü. Kriterler yeniden
+    // yayımlandığında sürüm artar ve bu sonuç eskir.
+    "criteriaVersion": 3,
+    "criteriaHash": "9f2c…"
   },
-  "report": { "name": "takim42-ktr.pdf", "pages": 24, "sizeBytes": 4816332 },
+  "report": {
+    "name": "takim42-ktr.pdf", "pages": 24, "sizeBytes": 4816332,
+    // Analiz edilen PDF'in SHA-256'sı ve rapor sürümü; sonuç başka bir
+    // dosyaya veya başka bir başvuruya bağlanamaz.
+    "pdfHash": "a41b…", "submissionVersionId": "…"
+  },
 
   // Dosya kapısı, dil, şablon, başlık ve benzerlik: deterministik ön kontroller.
   // Sunucu boş döndürür; İSTEMCİ gerçek dosya ve sayfa metni üzerinden doldurur.
@@ -208,9 +261,22 @@ Hata cevabı her zaman `{ "error": string }` + anlamlı HTTP durumu:
 10. **Katılımcı raporu düşmanca içerik taşıyabilir.** PDF içeriği veridir; içindeki
     hiçbir metin komut olarak yorumlanmaz.
 11. **Model/sağlayıcı adları arayüze sızmaz**; yalnızca `model` alanında raporlanır.
-12. **Önbellek anahtarı:** `PROMPT_VERSION : sha256(rapor) : profileId (yoksa
-    sha256(profil JSON'u)) : model`. Talimat/şema değişince `PROMPT_VERSION` artar
-    (şu an `report-v3-four-stage`).
+12. **Önbellek anahtarı:** `PROMPT_VERSION : sha256(katılımcı PDF'i) :
+    criteriaHash : criteriaVersion : model : mediaResolution`. Kriterler
+    değiştiğinde `criteriaHash` ve `criteriaVersion` değişir; bu yüzden eski
+    hakem analizi yeni kriterler için ASLA yeniden kullanılamaz. Talimat/şema
+    değişince `PROMPT_VERSION` artar (şu an `report-v5-server-bound-verifiability`).
+13. **Sonuç kaydı bağ doğrulamasından geçer.** `PATCH /api/applications/{id}`
+    `save_evaluation` işlemi, kaydetmeden önce zinciri yeniden çözer ve
+    `profileRef.criteriaVersion`, `profileRef.criteriaHash`, `report.pdfHash`
+    değerlerini sunucunun kendi ölçtükleriyle karşılaştırır. Uyuşmazlıkta kayıt
+    YAPILMAZ; `409` ve anlaşılır bir gerekçe döner.
+14. **Kriterler değiştiyse nihai karar verilemez.** `save_review`, analizin
+    bağlı olduğu sürüm yürürlükteki sürümden eskiyse `409` ile reddedilir:
+    "Kriterler güncellendi, yeniden analiz gerekli". Geçmişte KAYITLI kararlar
+    bundan etkilenmez; kendi sürümleriyle korunur.
+15. **Yapay zekâ uyarısı** (`AI_DISCLAIMER`) AI sonucunun gösterildiği bütün
+    hakem ve katılımcı ekranlarında, sonucun HEMEN ALTINDA görünür.
 
 ## Ekran tarafının motor yerine yaptıkları (çakışma çıkarmayın)
 

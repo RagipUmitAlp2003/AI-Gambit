@@ -3,57 +3,50 @@
 import { useEffect, useState } from "react";
 import { adminApi } from "../lib/admin-client";
 import type { BootstrapStatus } from "../lib/admin-client";
-import { PARTICIPANT_ROLE, ROLES } from "../lib/admin-roles";
-import type { AdminAccount, RoleCode } from "../lib/admin-types";
+import type { AdminAccount } from "../lib/admin-types";
 import { workflowApi } from "../lib/workflow-client";
 
 type Props = { onSignedIn: (account: AdminAccount) => void | Promise<void> };
-type Audience = "admin" | "participant";
+type Panel = "signin" | "register";
 
-/** Yarışmacı yönetim girişinde listelenmez; kendi sekmesinden girer. */
-const QUICK_ROLES = ROLES.filter((role) => role.code !== PARTICIPANT_ROLE);
-
+/**
+ * Giriş ekranı (madde 7).
+ *
+ * TEK giriş formu vardır: kullanıcı adı (veya e-posta) + şifre. Rol seçimi ve
+ * şifresiz rol kısayolları KALDIRILDI. Sistem hesabı veri tabanından doğrular
+ * ve rolüne göre doğru paneli otomatik açar (bkz. management-app · ManagementApp).
+ *
+ * Yarışmacılar da aynı formdan girer; hesabı olmayan yarışmacı ikinci
+ * sekmeden kendi kaydını açar.
+ */
 export default function AccessLogin({ onSignedIn }: Props) {
-  const [audience, setAudience] = useState<Audience>("admin");
-  const [selectedRole, setSelectedRole] = useState<RoleCode>("00");
-  const [email, setEmail] = useState("");
+  const [panel, setPanel] = useState<Panel>("signin");
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [status, setStatus] = useState<BootstrapStatus | null>(null);
   const [bootstrap, setBootstrap] = useState({ token: "", fullName: "", email: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [participantMode, setParticipantMode] = useState<"login" | "register">("login");
-  const [participantName, setParticipantName] = useState("");
+  const [registerName, setRegisterName] = useState("");
+  const [registerEmail, setRegisterEmail] = useState("");
+  const [registerPassword, setRegisterPassword] = useState("");
 
   useEffect(() => {
     let active = true;
     adminApi.bootstrapStatus()
       .then((value) => { if (active) setStatus(value); })
-      .catch(() => { /* Giriş seçenekleri çalışmaya devam eder. */ });
+      .catch(() => { /* Giriş formu her hâlükârda çalışır. */ });
     return () => { active = false; };
   }, []);
 
-  async function quickLogin() {
-    setBusy(true);
-    setError("");
-    setNotice("");
-    try {
-      const result = await adminApi.devLogin(selectedRole);
-      await onSignedIn(result.account);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Hızlı giriş tamamlanamadı.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function realLogin(event: React.FormEvent) {
+  async function signIn(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError("");
     try {
-      const result = await adminApi.login(email.trim(), password);
+      // Rol GÖNDERİLMEZ: sunucu hesabın rolünü kendisi okur ve panel ona göre açılır.
+      const result = await adminApi.login(identifier.trim(), password);
       await onSignedIn(result.account);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Giriş yapılamadı.");
@@ -62,40 +55,37 @@ export default function AccessLogin({ onSignedIn }: Props) {
     }
   }
 
-  async function participantLogin(event: React.FormEvent) {
+  async function registerParticipant(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError("");
     try {
-      const result = await adminApi.login(email.trim(), password);
-      if (result.account.roleCode !== PARTICIPANT_ROLE) {
-        await adminApi.logout();
-        throw new Error("Bu hesap yarışmacı hesabı değil. Yönetici girişini kullanın.");
-      }
-      await onSignedIn(result.account);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Yarışmacı girişi yapılamadı.");
-    } finally { setBusy(false); }
-  }
-
-  async function participantRegister(event: React.FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      const result = await workflowApi.registerParticipant(participantName.trim(), email.trim(), password);
+      const result = await workflowApi.registerParticipant(registerName.trim(), registerEmail.trim(), registerPassword);
       await onSignedIn(result.account);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Yarışmacı hesabı oluşturulamadı.");
-    } finally { setBusy(false); }
+    } finally {
+      setBusy(false);
+    }
   }
 
-  async function participantQuickLogin() {
+  /** Geliştirme/demo kurulumu: `admin` / `1234`. İkinci çağrıda yeni hesap açmaz. */
+  async function createDevAdmin() {
     setBusy(true);
     setError("");
-    try { await onSignedIn((await adminApi.devLogin(PARTICIPANT_ROLE)).account); }
-    catch (caught) { setError(caught instanceof Error ? caught.message : "Deneme girişi tamamlanamadı."); }
-    finally { setBusy(false); }
+    setNotice("");
+    try {
+      const result = await adminApi.bootstrapDevAdmin();
+      setIdentifier(result.username);
+      setNotice(result.created
+        ? `Bootstrap Admin hesabı oluşturuldu. Kullanıcı adı: ${result.username} · geçici şifre: ${result.oneTimePassword}. ${result.warning}`
+        : result.warning);
+      setStatus((current) => current ? { ...current, required: false, devBootstrapAvailable: false } : current);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Kurulum hesabı oluşturulamadı.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function createFirstAdmin(event: React.FormEvent) {
@@ -109,7 +99,7 @@ export default function AccessLogin({ onSignedIn }: Props) {
         fullName: bootstrap.fullName.trim(),
         email: bootstrap.email.trim(),
       });
-      setNotice(`Moderatör hesabı oluşturuldu. Tek kullanımlık şifre: ${result.oneTimePassword}`);
+      setNotice(`Admin hesabı oluşturuldu. Tek kullanımlık şifre: ${result.oneTimePassword}`);
       setStatus((current) => current ? { ...current, required: false } : current);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "İlk hesap oluşturulamadı.");
@@ -117,8 +107,6 @@ export default function AccessLogin({ onSignedIn }: Props) {
       setBusy(false);
     }
   }
-
-  const chosen = QUICK_ROLES.find((role) => role.code === selectedRole) ?? QUICK_ROLES[0];
 
   return (
     <main className="access-page">
@@ -137,7 +125,7 @@ export default function AccessLogin({ onSignedIn }: Props) {
         </div>
         <div className="access-principle">
           <strong>Yetki görünür, karar izlenebilir.</strong>
-          <span>Oturum ve rol bilgileri yönetici veri tabanında saklanır.</span>
+          <span>Rolünüz hesabınıza bağlıdır; giriş sırasında rol seçilmez.</span>
         </div>
       </section>
 
@@ -146,104 +134,79 @@ export default function AccessLogin({ onSignedIn }: Props) {
           <button
             type="button"
             role="tab"
-            aria-selected={audience === "admin"}
-            className={audience === "admin" ? "active" : ""}
-            onClick={() => { setAudience("admin"); setError(""); }}
+            aria-selected={panel === "signin"}
+            className={panel === "signin" ? "active" : ""}
+            onClick={() => { setPanel("signin"); setError(""); }}
           >
-            Yönetici
+            Giriş yap
           </button>
           <button
             type="button"
             role="tab"
-            aria-selected={audience === "participant"}
-            className={audience === "participant" ? "active" : ""}
-            onClick={() => { setAudience("participant"); setError(""); }}
+            aria-selected={panel === "register"}
+            className={panel === "register" ? "active" : ""}
+            onClick={() => { setPanel("register"); setError(""); }}
           >
-            Yarışmacı
+            Yarışmacı kaydı
           </button>
         </div>
 
-        {audience === "participant" ? (
-          <div className="participant-entry">
-            <header>
-              <span className="section-kicker">Yarışmacı portalı</span>
-              <h2 id="access-title">Başvurularına eriş</h2>
-              <p>Yarışma seçin, PDF raporunuzu gönderin ve hakem onaylı sonucunu takip edin.</p>
-            </header>
-            <div className="participant-mode-switch" role="tablist" aria-label="Yarışmacı hesap işlemi">
-              <button type="button" role="tab" aria-selected={participantMode === "login"} className={participantMode === "login" ? "active" : ""} onClick={() => { setParticipantMode("login"); setError(""); }}>Giriş yap</button>
-              <button type="button" role="tab" aria-selected={participantMode === "register"} className={participantMode === "register" ? "active" : ""} onClick={() => { setParticipantMode("register"); setError(""); }}>Hesap oluştur</button>
-            </div>
-            <form className="participant-login-form" onSubmit={participantMode === "login" ? participantLogin : participantRegister}>
-              {participantMode === "register" ? <label className="field"><span className="field-label">İsim Soyisim</span><input value={participantName} onChange={(event) => setParticipantName(event.target.value)} autoComplete="name" required /></label> : null}
-              <label className="field"><span className="field-label">E-posta</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required /></label>
-              <label className="field"><span className="field-label">Şifre</span><input type="password" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={participantMode === "register" ? "new-password" : "current-password"} required /></label>
-              {error ? <p className="admin-error login-feedback">{error}</p> : null}
-              <button type="submit" className="primary-button" disabled={busy}>{busy ? "İşlem yapılıyor…" : participantMode === "login" ? "Yarışmacı olarak giriş yap" : "Hesabımı oluştur"}</button>
-            </form>
-            <div className="participant-demo-entry"><span>Yerel deneme</span><button type="button" className="secondary-button" disabled={busy} onClick={participantQuickLogin}>Şifresiz yarışmacı girişi</button></div>
-          </div>
-        ) : (
+        {panel === "signin" ? (
           <div className="admin-entry">
             <header>
-              <span className="section-kicker">Yerel geliştirme girişi</span>
-              <h2 id="access-title">Yönetim alanına gir</h2>
-              <p>Şimdilik kullanıcı adı ve şifre gerekmeden denemek istediğiniz rolü seçin.</p>
+              <span className="section-kicker">Hesap girişi</span>
+              <h2 id="access-title">Kullanıcı adınız ve şifrenizle girin</h2>
+              <p>Panel, hesabınızın rolüne göre otomatik açılır. Giriş sırasında rol seçmezsiniz.</p>
             </header>
 
-            <div className="quick-role-list" role="radiogroup" aria-label="Hızlı giriş rolü">
-              {QUICK_ROLES.map((role) => (
-                <button
-                  key={role.code}
-                  type="button"
-                  role="radio"
-                  aria-checked={selectedRole === role.code}
-                  className={selectedRole === role.code ? "selected" : ""}
-                  onClick={() => setSelectedRole(role.code)}
-                >
-                  <span>{role.code}</span>
-                  <strong>{role.shortTitle}</strong>
-                  <small>{role.area}</small>
+            <form className="signin-form" onSubmit={signIn}>
+              <label className="field">
+                <span className="field-label">Kullanıcı adı veya e-posta</span>
+                <input
+                  value={identifier}
+                  onChange={(event) => setIdentifier(event.target.value)}
+                  autoComplete="username"
+                  required
+                />
+              </label>
+              <label className="field">
+                <span className="field-label">Şifre</span>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  autoComplete="current-password"
+                  required
+                />
+              </label>
+              {error ? <p className="admin-error login-feedback" role="alert">{error}</p> : null}
+              {notice ? <p className="success-note login-feedback" role="status">{notice}</p> : null}
+              <button type="submit" className="primary-button" disabled={busy}>
+                {busy ? "Giriş yapılıyor…" : "Giriş yap"}
+              </button>
+            </form>
+
+            {/*
+              Geliştirme/demo kurulumu. Üretimde sunucu bu ucu 404 ile kapatır ve
+              buton hiç görünmez; hesap yalnızca bir kez açılır.
+            */}
+            {status?.devBootstrapAvailable ? (
+              <div className="dev-bootstrap-box">
+                <strong>Sistemde henüz Admin hesabı yok</strong>
+                <p>
+                  Geliştirme/demo ortamı için tek tıkla bir kurulum Admini oluşturabilirsiniz:
+                  kullanıcı adı <code>{status.devUsername}</code>, geçici şifre <code>1234</code>.
+                  Bu hesap yalnızca geliştirme ve demo içindir; üretimde kullanılmamalıdır.
+                </p>
+                <button type="button" className="secondary-button" disabled={busy} onClick={createDevAdmin}>
+                  Kurulum Admini oluştur (admin / 1234)
                 </button>
-              ))}
-            </div>
-
-            <div className="chosen-role-summary" aria-live="polite">
-              <span>{chosen.code}</span>
-              <div>
-                <strong>{chosen.title}</strong>
-                <p>{chosen.summary}</p>
               </div>
-            </div>
-
-            {error ? <p className="admin-error login-feedback">{error}</p> : null}
-            {notice ? <p className="success-note login-feedback">{notice}</p> : null}
-
-            <button type="button" className="primary-button quick-login-button" disabled={busy} onClick={quickLogin}>
-              {busy ? "Giriş hazırlanıyor…" : `${chosen.shortTitle} olarak giriş yap`}
-            </button>
-            <p className="development-note">
-              Bu şifresiz kısayol yalnızca geliştirme ortamında çalışır ve üretimde otomatik olarak kapanır.
-            </p>
-
-            <details className="real-login-disclosure">
-              <summary>Gerçek yönetici hesabıyla giriş</summary>
-              <form onSubmit={realLogin}>
-                <label className="field">
-                  <span className="field-label">E-posta</span>
-                  <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required />
-                </label>
-                <label className="field">
-                  <span className="field-label">Şifre</span>
-                  <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required />
-                </label>
-                <button type="submit" className="secondary-button" disabled={busy}>Güvenli giriş yap</button>
-              </form>
-            </details>
+            ) : null}
 
             {status?.required && status.tokenConfigured ? (
               <details className="real-login-disclosure setup-disclosure">
-                <summary>İlk Moderatör hesabını oluştur</summary>
+                <summary>Üretim kurulumu · anahtarla ilk Admin hesabı</summary>
                 <form onSubmit={createFirstAdmin}>
                   <label className="field">
                     <span className="field-label">Kurulum anahtarı</span>
@@ -261,6 +224,35 @@ export default function AccessLogin({ onSignedIn }: Props) {
                 </form>
               </details>
             ) : null}
+          </div>
+        ) : (
+          <div className="participant-entry">
+            <header>
+              <span className="section-kicker">Yarışmacı portalı</span>
+              <h2 id="access-title">Yarışmacı hesabı oluştur</h2>
+              <p>Hesabınızı açtıktan sonra yarışma seçip PDF raporunuzu gönderebilirsiniz.</p>
+            </header>
+            <form className="participant-login-form" onSubmit={registerParticipant}>
+              <label className="field">
+                <span className="field-label">İsim Soyisim</span>
+                <input value={registerName} onChange={(event) => setRegisterName(event.target.value)} autoComplete="name" required />
+              </label>
+              <label className="field">
+                <span className="field-label">E-posta</span>
+                <input type="email" value={registerEmail} onChange={(event) => setRegisterEmail(event.target.value)} autoComplete="username" required />
+              </label>
+              <label className="field">
+                <span className="field-label">Şifre</span>
+                <input type="password" minLength={8} value={registerPassword} onChange={(event) => setRegisterPassword(event.target.value)} autoComplete="new-password" required />
+              </label>
+              {error ? <p className="admin-error login-feedback" role="alert">{error}</p> : null}
+              <button type="submit" className="primary-button" disabled={busy}>
+                {busy ? "Hesap oluşturuluyor…" : "Hesabımı oluştur"}
+              </button>
+            </form>
+            <p className="page-note">
+              Hesabınız zaten varsa <button type="button" className="text-button" onClick={() => { setPanel("signin"); setError(""); }}>giriş yapın</button>.
+            </p>
           </div>
         )}
       </section>

@@ -6,6 +6,7 @@ import type {
   MailDelivery,
   RoleCode,
 } from "./admin-types";
+
 import type { RoleDefinition } from "./admin-roles";
 
 /**
@@ -98,21 +99,27 @@ export type AuditEntryView = {
   createdAt: string;
 };
 
-export type BootstrapStatus = { required: boolean; tokenConfigured: boolean; authConfigured: boolean };
+export type BootstrapStatus = {
+  /** Sistemde hiç hesap yok; kurulum gerekiyor. */
+  required: boolean;
+  tokenConfigured: boolean;
+  authConfigured: boolean;
+  /** Geliştirme/demo ortamında tek tıkla bootstrap Admin açılabilir mi? */
+  devBootstrapAvailable: boolean;
+  devUsername: string;
+};
 
 export const adminApi = {
   me: () => request<SessionResponse>("/api/admin/session"),
 
-  login: (email: string, password: string) =>
+  /**
+   * Giriş: kullanıcı adı VEYA e-posta + şifre. Rol seçimi yoktur; panel
+   * hesabın veri tabanındaki rolüne göre açılır (madde 7).
+   */
+  login: (identifier: string, password: string) =>
     request<SessionResponse>("/api/admin/session", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
-    }),
-
-  devLogin: (roleCode: RoleCode) =>
-    request<SessionResponse>("/api/admin/dev-session", {
-      method: "POST",
-      body: JSON.stringify({ roleCode }),
+      body: JSON.stringify({ identifier, password }),
     }),
 
   logout: () => request<{ signedOut: boolean }>("/api/admin/session", { method: "DELETE" }),
@@ -124,6 +131,17 @@ export const adminApi = {
       method: "POST",
       body: JSON.stringify(input),
     }),
+
+  /**
+   * Geliştirme/demo bootstrap Admin hesabı: kullanıcı adı `admin`, geçici
+   * şifre `1234`. Yalnızca üretim DIŞI ortamda ve sistemde hiç aktif Admin
+   * yokken çalışır; ikinci kez çağrılırsa yeni hesap AÇMAZ.
+   */
+  bootstrapDevAdmin: () =>
+    request<{ account: AdminAccount; username: string; oneTimePassword: string; created: boolean; warning: string }>(
+      "/api/admin/bootstrap",
+      { method: "POST", body: JSON.stringify({ mode: "development" }) },
+    ),
 
   accounts: () => request<AccountsResponse>("/api/admin/accounts"),
 

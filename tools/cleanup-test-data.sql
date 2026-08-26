@@ -10,10 +10,12 @@
 -- profil veya kriter etkilenmez. Bu yüzden üretim verisi üzerinde de güvenle
 -- çalıştırılabilir.
 --
--- ÇALIŞTIRMA:
+-- ÇALIŞTIRMA (YALNIZCA YEREL GELİŞTİRME):
 --   Yerel (miniflare D1):  node tools/cleanup_test_data.mjs --apply
 --   Kuru çalıştırma:       node tools/cleanup_test_data.mjs
---   Uzak D1:               npx wrangler d1 execute <DB> --remote --file tools/cleanup-test-data.sql
+--
+-- Bu dosyayı üretim veri tabanında çalıştırmayın. Bütün geliştirme verisini
+-- sıfırlamak için: node tools/dev_reset.mjs --apply
 --
 -- NOT: Başvuru PDF'leri R2'de durur. SQL bunları silemez; nesne anahtarları
 -- temizlik öncesi raporlanır (bkz. tools/cleanup_test_data.mjs · --apply çıktısı).

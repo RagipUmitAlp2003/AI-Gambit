@@ -94,7 +94,7 @@ export const workflowApi = {
     return new File([await response.blob()], fileName, { type: "application/pdf" });
   },
   /** `notificationWarning`: karar kaydedildi ama yarışmacıya e-posta gönderilemedi. */
-  updateApplication: (id: string, action: string, value: { evaluation?: ReportEvaluation; review?: JudgeReview; judgeId?: string; note?: string } = {}) =>
+  updateApplication: (id: string, action: string, value: { evaluation?: ReportEvaluation; review?: JudgeReview; judgeId?: string; note?: string; archived?: boolean } = {}) =>
     jsonRequest<{ application: CompetitionApplication; notificationWarning?: string }>(`/api/applications/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify({ action, ...value }),
@@ -120,8 +120,15 @@ export const workflowApi = {
    * bağlantısı profil geçmişten açıldığında ancak bu kopya sayesinde çalışır.
    */
   submitProfileForReview: async (profile: ProfileExport, sourceFile?: File | null) => {
+    type PublishResponse = {
+      profile: CompetitionProfile;
+      criteriaVersion: { criteriaVersion: number; criteriaHash: string; criteriaCount: number };
+      versionCreated: boolean;
+      /** Kaynak sayfa/alıntı değiştirilmeye çalışıldıysa sunucunun uyarısı (madde 12). */
+      sourceLockWarning?: string;
+    };
     if (!sourceFile) {
-      return jsonRequest<{ profile: CompetitionProfile }>("/api/profiles", {
+      return jsonRequest<PublishResponse>("/api/profiles", {
         method: "POST",
         body: JSON.stringify({ profile }),
       });
@@ -129,7 +136,7 @@ export const workflowApi = {
     const form = new FormData();
     form.set("profile", JSON.stringify(profile));
     form.set("sourceFile", sourceFile);
-    return responseJson<{ profile: CompetitionProfile }>(
+    return responseJson<PublishResponse>(
       await fetch("/api/profiles", { method: "POST", credentials: "same-origin", body: form }),
     );
   },
@@ -150,6 +157,27 @@ export const workflowApi = {
     competitions: CompetitionWorkflow[];
     /** Yarışma bazlı sayısal izleme satırları (katılımcı adı ve rapor içeriği taşımaz). */
     overview: CompetitionOverview[];
+    /** Kim neyi ne zaman ve neden arşivledi (madde 11); yalnızca görüntülenir. */
+    archiveTrail: Array<{
+      id: string;
+      kind: "competition" | "application";
+      subject: string;
+      actorName: string;
+      at: string;
+      reason: string;
+      previousStatus: string;
+      nextStatus: string;
+    }>;
+    audit: Array<{
+      id: string;
+      actorEmail: string | null;
+      actorRole: string | null;
+      action: string;
+      targetType: string | null;
+      targetId: string | null;
+      detail: string;
+      createdAt: string;
+    }>;
   }>("/api/operations"),
   /** Role göre yarışma listesi; 02 öncelik rozetini buradan okur. */
   competitions: () => jsonRequest<{ competitions: CompetitionWorkflow[] }>("/api/competitions"),
@@ -157,6 +185,20 @@ export const workflowApi = {
   changeCompetitionStage: (competitionId: string, nextStatus: CompetitionStatus, reason = "", force = false) =>
     jsonRequest<{ competition: CompetitionWorkflow }>("/api/competitions", {
       method: "PATCH", body: JSON.stringify({ action: "stage", competitionId, nextStatus, reason, force }),
+    }),
+  /**
+   * Yarışmayı AKTİF / PASİF yap — Yarışma Yöneticisi (kendi yarışması) ve
+   * Değerlendirme Yöneticisi. Süreç aşamasını değiştirmez; yalnızca yeni
+   * başvuru ve yeni değerlendirme kuyruğu üretimini durdurur/açar (madde 6).
+   */
+  setCompetitionActive: (competitionId: string, active: boolean, note = "") =>
+    jsonRequest<{ competition: CompetitionWorkflow }>("/api/competitions", {
+      method: "PATCH", body: JSON.stringify({ action: "activation", competitionId, active, note }),
+    }),
+  /** Yarışmayı arşivle (soft delete) — yalnızca yarışmanın sahibi 01 (madde 11). */
+  archiveCompetition: (competitionId: string, archived: boolean, reason = "") =>
+    jsonRequest<{ competition: CompetitionWorkflow }>("/api/competitions", {
+      method: "PATCH", body: JSON.stringify({ action: "archive", competitionId, archived, reason }),
     }),
   /** ÖNCELİKLİ işareti koy/kaldır — yalnızca 04. */
   setCompetitionPriority: (competitionId: string, priority: boolean, note = "") =>

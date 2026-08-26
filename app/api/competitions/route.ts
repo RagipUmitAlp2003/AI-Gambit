@@ -1,9 +1,11 @@
 import { recordAudit } from "../../lib/admin-db";
 import { handleError, json, jsonError, readJson, requirePermission } from "../../lib/admin-guard";
 import {
+  archiveCompetition,
   changeCompetitionStage,
   listCompetitionsFor,
   ownsCompetition,
+  setCompetitionActive,
   setCompetitionPriority,
 } from "../../lib/workflow-db";
 import type { CompetitionStatus } from "../../lib/workflow-types";
@@ -37,7 +39,63 @@ export async function PATCH(request: Request): Promise<Response> {
     const body = await readJson(request);
     const competitionId = typeof body.competitionId === "string" ? body.competitionId.trim() : "";
     if (!competitionId) return jsonError(400, "Yarışma kimliği gerekli.");
-    const action = body.action === "priority" ? "priority" : "stage";
+    const action = ["priority", "activation", "archive"].includes(String(body.action))
+      ? String(body.action)
+      : "stage";
+
+    /*
+     * AKTİF / PASİF (madde 6)
+     *
+     * Hem Yarışma Yöneticisi hem Değerlendirme Yöneticisi çevirebilir.
+     * Yarışmanın süreç aşamasını değiştirmez; yalnızca yeni başvuru ve yeni
+     * değerlendirme kuyruğu üretimini durdurur veya yeniden açar. Değişiklik
+     * ilgili bütün panellere aynı sorgudan yansır.
+     */
+    if (action === "activation") {
+      const auth = await requirePermission(request, "toggle_competition_activation");
+      if (!auth.ok) return auth.response;
+      // 01 yalnızca KENDİ yayımladığı yarışmayı çevirebilir; 04 süreç yöneticisi
+      // olarak hepsini çevirebilir.
+      if (auth.account.roleCode === "01" && !await ownsCompetition(competitionId, auth.account)) {
+        return jsonError(403, "Bu yarışmayı yalnızca kriterlerini yayımlayan Yarışma Yöneticisi veya Değerlendirme Yöneticisi aktif/pasif yapabilir.");
+      }
+      const active = body.active === true;
+      const note = typeof body.note === "string" ? body.note : "";
+      const result = await setCompetitionActive(competitionId, active, note, auth.account);
+      if (result === "not_found") return jsonError(404, "Yarışma bulunamadı.");
+      if (result === "archived") return jsonError(409, "Arşivlenmiş yarışma yeniden aktifleştirilemez; önce arşivden çıkarın.");
+      await recordAudit({
+        actorId: auth.account.id, actorEmail: auth.account.email, actorRole: auth.account.roleCode,
+        action: "competition_activation_changed",
+        targetType: "competition", targetId: competitionId,
+        detail: `${result.competitionName} · ${active ? "AKTİF" : "PASİF"}${note.trim() ? ` · ${note.trim().slice(0, 200)}` : ""}`,
+      }).catch((auditError) => console.error("[audit] competition activation", auditError));
+      return json({ competition: result });
+    }
+
+    /*
+     * ARŞİVLEME (madde 11) — soft delete. Kayıt silinmez; kim, ne zaman ve
+     * hangi gerekçeyle arşivlediği Değerlendirme Yöneticisi panosunda görünür.
+     */
+    if (action === "archive") {
+      const auth = await requirePermission(request, "archive_competition");
+      if (!auth.ok) return auth.response;
+      if (!await ownsCompetition(competitionId, auth.account)) {
+        return jsonError(403, "Yalnızca kriterlerini yayımladığınız yarışmaları arşivleyebilirsiniz.");
+      }
+      const archived = body.archived !== false;
+      const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+      if (archived && !reason) return jsonError(400, "Arşivleme gerekçesi zorunludur.");
+      const result = await archiveCompetition(competitionId, archived, reason, auth.account);
+      if (result === "not_found") return jsonError(404, "Yarışma bulunamadı.");
+      await recordAudit({
+        actorId: auth.account.id, actorEmail: auth.account.email, actorRole: auth.account.roleCode,
+        action: archived ? "competition_archived" : "competition_restored",
+        targetType: "competition", targetId: competitionId,
+        detail: `${result.competitionName}${reason ? ` · gerekçe: ${reason.slice(0, 200)}` : ""}`,
+      }).catch((auditError) => console.error("[audit] competition archive", auditError));
+      return json({ competition: result });
+    }
 
     if (action === "priority") {
       const auth = await requirePermission(request, "flag_competition_priority");

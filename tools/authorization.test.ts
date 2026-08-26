@@ -113,13 +113,17 @@ test("başvuru görünürlüğü SQL'inde hakem için atanmamış dosya kaçağ�
   const start = WORKFLOW_DB.indexOf("function applicationVisibility");
   assert.ok(start > 0, "applicationVisibility bulunmalı.");
   const body = WORKFLOW_DB.slice(start, WORKFLOW_DB.indexOf("\nfunction ", start + 10));
-  const judgeBranch = body.split("\n").find((line) => line.includes(`roleCode === "02"`));
-  assert.ok(judgeBranch, "applicationVisibility içinde 02 dalı bulunmalı.");
-  assert.match(judgeBranch!, /assigned_judge_id = \?/);
+  const judgeStart = body.indexOf(`roleCode === "02"`);
+  assert.ok(judgeStart > 0, "applicationVisibility içinde 02 dalı bulunmalı.");
+  // Dal artık çok satırlı (arşivlenmiş dosyalar da dışarıda bırakılır).
+  const judgeBranch = body.slice(judgeStart, body.indexOf("roleCode === \"01\"", judgeStart));
+  assert.match(judgeBranch, /assigned_judge_id = \?/);
   assert.ok(
-    !/IS NULL/.test(judgeBranch!),
+    !/assigned_judge_id IS NULL/.test(judgeBranch),
     "Hakem filtresi atanmamış başvuruları (assigned_judge_id IS NULL) kapsamamalıdır.",
   );
+  // Arşivlenen (soft delete) dosya hakemin aktif listesinde görünmez; kayıt silinmez.
+  assert.match(judgeBranch, /deleted_at IS NULL/, "Arşivlenen başvuru hakem listesinden çıkmalıdır.");
 });
 
 test("hakem AI analizini başlatarak atanmamış dosyayı üstlenemez", () => {
@@ -279,7 +283,13 @@ test("başvuru alındığında sistem en az yüklü hakeme atar", () => {
   assert.ok(start > 0, "autoAssignJudge bulunmalı.");
   const body = WORKFLOW_DB.slice(start, WORKFLOW_DB.indexOf("\nexport async function createApplication", start));
   assert.match(body, /role_code = '02' AND j\.status = 'active'/, "Yalnızca aktif Hakem hesapları atanabilir.");
-  assert.match(body, /ORDER BY open_files ASC/, "En az yüklü hakem seçilmelidir.");
+  assert.match(body, /open_files ASC/, "En az yüklü hakem seçilmelidir.");
+  // Mümkünse ilgili yarışmaya daha önce dosya almış hakem tercih edilir.
+  assert.match(body, /\(competition_files > 0\) DESC/, "İlgili yarışmanın hakemi öncelikli olmalıdır.");
+  // Eşitlikte adil ve DETERMİNİSTİK: en eski hesap, sonra kimlik sırası. Kura yok.
+  assert.match(body, /j\.created_at ASC, j\.id ASC/, "Eşit yükte sıralama deterministik olmalıdır.");
+  // Arşivlenmiş dosyalar yük sayımına girmez.
+  assert.match(body, /a\.deleted_at IS NULL\) AS open_files/, "Yük sayımı arşivlenen dosyaları saymamalıdır.");
   // Yarış koşulu: iki eşzamanlı başvuru aynı satırı iki kez atayamamalı.
   assert.match(
     body,
@@ -358,9 +368,15 @@ test("öncelik işareti yarışmanın süreç durumunu değiştirmez", () => {
 
 test("operasyon panosu katılımcı adı ve rapor içeriği taşımaz", () => {
   const route = readFileSync("app/api/operations/route.ts", "utf8");
-  const overview = route.slice(route.indexOf("const overview"), route.indexOf("return json("));
+  // Yalnızca yarışma özeti bloğu: bu tablo sayı ve durum taşır, kimlik taşımaz.
+  const overview = route.slice(route.indexOf("const overview"), route.indexOf("const archiveTrail"));
   for (const leak of ["participantName", "applicantFullName", "fileName", "teamName", "evaluation"]) {
     assert.ok(!overview.includes(leak), `Yarışma özeti ${leak} alanını içermemelidir.`);
+  }
+  // Arşiv izi de yarışmacı kimliği taşımaz: takım adı ve yarışma adı yeterlidir.
+  const trail = route.slice(route.indexOf("const archiveTrail"), route.indexOf("const auditRows"));
+  for (const leak of ["participantName", "applicantFullName", "fileName", "evaluation"]) {
+    assert.ok(!trail.includes(leak), `Arşiv izi ${leak} alanını içermemelidir.`);
   }
   const panel = readFileSync("app/components/operations-panel.tsx", "utf8");
   assert.ok(!/criteria\.map/.test(panel), "04 panosunda kriter adları listelenmemelidir.");
