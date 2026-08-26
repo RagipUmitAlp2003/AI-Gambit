@@ -1,8 +1,8 @@
 import { env } from "cloudflare:workers";
-import { getDatabase, recordWorkflowEvent, recordWorkflowEvents } from "./admin-db";
-import { fold } from "./competitions";
+import { ConflictError, getDatabase, recordWorkflowEvent, recordWorkflowEvents } from "./admin-db";
+import { COMPETITIONS, fold, type CompetitionEntry } from "./competitions";
 import type { AdminAccount, WorkflowEventInput } from "./admin-types";
-import { can } from "./authorization";
+import { can, canUpdateProfile } from "./authorization";
 import { validateProfileExport } from "./profile-loader";
 import { RULE_VERDICT_LABELS, type AnalysisResult, type JudgeReview, type ProfileExport, type ReportEvaluation, type RuleVerdict } from "./types";
 import type { SimilarityFingerprint } from "./similarity-engine";
@@ -190,6 +190,16 @@ const PROFILE_REVIEW_COLUMNS: Array<{ name: string; definition: string }> = [
   { name: "submitted_at", definition: "TEXT" },
 ];
 
+/**
+ * Yarışma önceliği (Problem 4 · Değerlendirme Yöneticisi aksiyonu).
+ * Eklemeli ve geriye uyumlu; bkz. migrations/0006_competition_priority.sql.
+ */
+const COMPETITION_COLUMNS: Array<{ name: string; definition: string }> = [
+  { name: "is_priority", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { name: "priority_note", definition: "TEXT" },
+  { name: "priority_set_at", definition: "TEXT" },
+];
+
 const APPLICATION_WORKFLOW_COLUMNS: Array<{ name: string; definition: string }> = [
   { name: "assigned_judge_id", definition: "TEXT" },
   { name: "assigned_judge_name", definition: "TEXT" },
@@ -216,13 +226,28 @@ async function upgradeApplicationTable(database: D1Database): Promise<void> {
   }
 }
 
+async function upgradeCompetitionTable(database: D1Database): Promise<void> {
+  const columns = await database.prepare(`PRAGMA table_info(competitions)`).all<{ name: string }>();
+  const present = new Set((columns.results ?? []).map((row) => row.name));
+  for (const column of COMPETITION_COLUMNS.filter((item) => !present.has(item.name))) {
+    await database.prepare(`ALTER TABLE competitions ADD COLUMN ${column.name} ${column.definition}`).run();
+  }
+  await database.prepare(
+    `CREATE INDEX IF NOT EXISTS idx_competitions_priority ON competitions (is_priority DESC, updated_at DESC)`,
+  ).run().catch(() => undefined);
+}
+
 let workflowSchemaPromise: Promise<void> | null = null;
 
 async function workflowDatabase(): Promise<D1Database> {
   const database = await getDatabase();
   if (!workflowSchemaPromise) {
     workflowSchemaPromise = database.batch(WORKFLOW_SCHEMA.map((sql) => database.prepare(sql)))
-      .then(async () => { await upgradeProfileTable(database); await upgradeApplicationTable(database); })
+      .then(async () => {
+        await upgradeProfileTable(database);
+        await upgradeApplicationTable(database);
+        await upgradeCompetitionTable(database);
+      })
       .catch((error: unknown) => {
         workflowSchemaPromise = null;
         throw error;
@@ -329,6 +354,9 @@ type CompetitionRow = {
   current_profile_id: string | null;
   decisions_locked: number;
   results_published_at: string | null;
+  is_priority: number | null;
+  priority_note: string | null;
+  priority_set_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -347,6 +375,10 @@ function toCompetition(row: CompetitionRow): CompetitionWorkflow {
     currentProfileId: row.current_profile_id,
     decisionsLocked: row.decisions_locked === 1,
     resultsPublishedAt: row.results_published_at,
+    // Eski satırlarda sütun bulunmayabilir; yokluk "öncelikli değil" demektir.
+    isPriority: row.is_priority === 1,
+    priorityNote: row.priority_note ?? "",
+    prioritySetAt: row.priority_set_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -377,9 +409,18 @@ function upgradeStoredProfile(json: string, rowId: string): ProfileExport {
   return profile ? { ...profile, profileId: profile.profileId ?? rowId } : parsed;
 }
 
-/** Kriter satırı kimliği profile bağlanır: "criterion-1" gibi kimlikler profiller arasında tekrar eder. */
-function criterionRowId(profileId: string, criterionId: string): string {
-  return `${profileId}:${criterionId || crypto.randomUUID()}`;
+/**
+ * Kriter satırı kimliği profil VE sıra ile nitelenir.
+ *
+ * `criteria.id` genel bir birincil anahtardır; analiz çıktısı ise her belgede
+ * aynı "criterion-1..N" kimliklerini üretir. Yalnızca profil ile nitelemek,
+ * aynı profilde yanlışlıkla tekrarlanan bir kriter kimliği geldiğinde UNIQUE
+ * ihlaline ve "İşlem tamamlanamadı" hatasına yol açıyordu. Kriterin kendi
+ * kimliği `criterion_json` içinde olduğu gibi korunur; bulgu eşleştirmesi
+ * orayı kullanır.
+ */
+function criterionRowId(profileId: string, position: number, criterionId: string): string {
+  return `${profileId}:${position}:${criterionId || "kriter"}`;
 }
 
 function toProfile(row: ProfileRow): CompetitionProfile {
@@ -417,8 +458,11 @@ function toApplication(
   view: "full" | "participant" | "operations",
 ): CompetitionApplication {
   const operations = view === "operations";
+  // Kabul sonucu, yarışma sonuçları yayımlanana kadar yarışmacıya kapalıdır.
+  // Ret ve revizyon kararları bunun dışındadır: yarışmacı reddedildiğini ve
+  // gerekçesini anında görmelidir, aksi hâlde düzeltme hakkını kullanamaz.
   const participantResultHidden = view === "participant"
-    && row.outcome !== "revision_required"
+    && !["revision_required", "rejected"].includes(row.outcome ?? "")
     && !["results_published", "archived"].includes(row.competition_status ?? "");
   const storedEvaluation = parseJson<ReportEvaluation>(row.evaluation_json);
   // Eski (puanlı, 1.0) AI sonucu dört aşamalı ekranda incelenemez; başvuru
@@ -481,10 +525,29 @@ function toExtractionRun(row: ExtractionRow): CriteriaExtractionRun {
  * Hakem kriter oluşturma ya da profil onaylama akışına katılmaz; yayımlanmış
  * profil katılımcı raporunda kullanılabilecek tek kaynaktır.
  */
+/**
+ * Başka bir yöneticinin profilini güncelleme denemesi.
+ * Uçlar bunu 403'e çevirir (bkz. app/api/profiles/route.ts).
+ */
+export class ProfileOwnershipError extends Error {
+  constructor() {
+    super("Bu kriter profilini yalnızca onu hazırlayan Yarışma Yöneticisi güncelleyebilir.");
+    this.name = "ProfileOwnershipError";
+  }
+}
+
 export async function submitProfileForReview(profile: ProfileExport, actor: AdminAccount): Promise<CompetitionProfile> {
   const database = await workflowDatabase();
   const id = profile.profileId ?? crypto.randomUUID();
   const timestamp = new Date().toISOString();
+  // SAHİPLİK: `profileId` istemciden gelir ve aşağıdaki INSERT ... ON CONFLICT(id)
+  // varolan satırı günceller. Kontrol olmadan bir yönetici, başka bir yöneticinin
+  // profil kimliğini gövdeye yazarak onun yayımlanmış kriter setini değiştirebilirdi.
+  // Yeni kayıt (satır yok) serbesttir; varolan kaydı yalnızca sahibi güncelleyebilir.
+  const existing = await database.prepare(
+    `SELECT created_by FROM competition_profiles WHERE id = ?`,
+  ).bind(id).first<{ created_by: string | null }>();
+  if (!canUpdateProfile(actor.id, existing?.created_by)) throw new ProfileOwnershipError();
   // Aynı yarışmanın farklı yıl ve aşamalarındaki raporlar birbirine karışmaz.
   const key = competitionKey(profile.setup.competition, profile.setup.year, profile.setup.stage);
   await database.prepare(
@@ -544,7 +607,7 @@ export async function submitProfileForReview(profile: ProfileExport, actor: Admi
          source_page, source_text, criterion_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(
-      criterionRowId(id, criterion.id),
+      criterionRowId(id, position, criterion.id),
       id,
       position,
       criterion.name,
@@ -680,22 +743,163 @@ export async function findLatestProfileForCompetition(name: string): Promise<Com
   return row ? toProfile(row) : null;
 }
 
+/**
+ * Ada göre yarışma kaydı.
+ *
+ * DİKKAT — neden basit bir "en son güncellenen" sorgusu DEĞİL:
+ * Aynı şartname iki kez analiz edildiğinde, modelin çıkardığı yıl/aşama biraz
+ * farklı olursa `competitionKey` de farklı olur ve AYNI ADLA ikinci bir satır
+ * açılır (bkz. saveCriteriaExtractionRun). Bu satırın profili yoktur ve
+ * `criteria_review` durumundadır. Yalnızca `updated_at` ile sıralayan eski
+ * sorgu bu boş satırı seçiyor, yayımlanmış ve başvuruya AÇIK olan satırı
+ * gölgeliyordu: yarışmacı yarışmayı listede görüyor ama başvurusu
+ * "yayımlanmış kriter profili yok" diye reddediliyordu.
+ *
+ * Sıralama bu yüzden KULLANILABİLİRLİĞE göredir: önce yayımlanmış profili
+ * olanlar, sonra başvuruya açık olanlar, en son güncellik.
+ */
 export async function findCompetitionWorkflow(name: string): Promise<CompetitionWorkflow | null> {
   const database = await workflowDatabase();
-  const row = await database.prepare(`SELECT * FROM competitions WHERE competition_name = ? ORDER BY updated_at DESC LIMIT 1`)
-    .bind(name).first<CompetitionRow>();
+  const row = await database.prepare(
+    `SELECT * FROM competitions
+     WHERE competition_name = ?
+     ORDER BY (current_profile_id IS NOT NULL) DESC,
+              (status = 'open') DESC,
+              updated_at DESC
+     LIMIT 1`,
+  ).bind(name).first<CompetitionRow>();
   return row ? toCompetition(row) : null;
 }
 
 export async function listCompetitionWorkflows(): Promise<CompetitionWorkflow[]> {
   const database = await workflowDatabase();
-  const result = await database.prepare(`SELECT * FROM competitions ORDER BY updated_at DESC`).all<CompetitionRow>();
+  // Öncelikli yarışmalar başta: hakem listesi de bu sırayı kullanır.
+  const result = await database.prepare(
+    `SELECT * FROM competitions ORDER BY is_priority DESC, updated_at DESC`,
+  ).all<CompetitionRow>();
   return (result.results ?? []).map(toCompetition);
 }
 
+/**
+ * Role göre yarışma listesi.
+ *   01 yalnızca KENDİ profilini yayımladığı yarışmaları görür ve yönetir.
+ *   02 ve 04 yayımlanmış profili olan yarışmaları görür (02 öncelik rozeti için).
+ *   Diğer roller boş liste alır.
+ */
+export async function listCompetitionsFor(account: AdminAccount): Promise<CompetitionWorkflow[]> {
+  const database = await workflowDatabase();
+  if (account.roleCode === "01") {
+    const result = await database.prepare(
+      `SELECT * FROM competitions
+       WHERE competition_key IN (SELECT competition_key FROM competition_profiles WHERE created_by = ?)
+       ORDER BY is_priority DESC, updated_at DESC`,
+    ).bind(account.id).all<CompetitionRow>();
+    return (result.results ?? []).map(toCompetition);
+  }
+  if (["02", "04"].includes(account.roleCode)) return listCompetitionWorkflows();
+  return [];
+}
+
+/** Bu yarışmanın kriter profilini yayımlayan yönetici mi? */
+export async function ownsCompetition(competitionId: string, account: AdminAccount): Promise<boolean> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT 1 AS ok FROM competitions c
+     WHERE c.id = ?
+       AND EXISTS (SELECT 1 FROM competition_profiles p
+                   WHERE p.competition_key = c.competition_key AND p.created_by = ?)`,
+  ).bind(competitionId, account.id).first<{ ok: number }>();
+  return Boolean(row);
+}
+
+/**
+ * Yarışmaya ÖNCELİKLİ işareti koyar veya kaldırır (Rol 04).
+ *
+ * Yalnızca sıralama/görünürlük işaretidir: yarışmanın süreç durumunu, kriter
+ * setini veya hiçbir kararı değiştirmez. Hakem panelinde 🔥 rozeti olarak
+ * görünür ve liste başında sıralanır.
+ */
+export async function setCompetitionPriority(
+  competitionId: string,
+  priority: boolean,
+  note: string,
+  actor: AdminAccount,
+): Promise<CompetitionWorkflow | "not_found"> {
+  const database = await workflowDatabase();
+  const timestamp = new Date().toISOString();
+  const trimmed = note.trim().slice(0, 300);
+  const result = await database.prepare(
+    `UPDATE competitions
+     SET is_priority = ?, priority_note = ?, priority_set_at = ?, updated_at = ?
+     WHERE id = ?`,
+  ).bind(priority ? 1 : 0, priority ? trimmed : "", priority ? timestamp : null, timestamp, competitionId).run();
+  if (!result.meta.changes) return "not_found";
+  const row = await database.prepare(`SELECT * FROM competitions WHERE id = ?`).bind(competitionId).first<CompetitionRow>();
+  if (!row) return "not_found";
+  const saved = toCompetition(row);
+  await recordWorkflowEvent({
+    subjectType: "competition",
+    subjectId: competitionId,
+    event: "competition_stage_changed",
+    actor,
+    detail: priority
+      ? `${saved.competitionName} · ÖNCELİKLİ işaretlendi${trimmed ? ` · ${trimmed}` : ""}`
+      : `${saved.competitionName} · öncelik kaldırıldı`,
+  }).catch((eventError) => console.error("[workflow] öncelik olayı kaydedilemedi", eventError));
+  return saved;
+}
+
+/**
+ * Bu adla başvuru alınabilir mi?
+ *
+ * Aynı adla birden çok satır olabildiği için (yukarıdaki nota bakın) tek bir
+ * satıra değil, "bu adla başvuruya AÇIK ve profili olan bir satır var mı"
+ * sorusuna bakılır. Seçim listesini üreten `listOpenCompetitions` ile aynı
+ * ölçüt; ikisi ayrışırsa yarışmacı listede görüp başvuramaz.
+ */
 export async function competitionAcceptsApplications(name: string): Promise<boolean> {
-  const competition = await findCompetitionWorkflow(name);
-  return competition?.status === "open" && Boolean(competition.currentProfileId);
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT 1 AS ok FROM competitions
+     WHERE competition_name = ? AND status = 'open' AND current_profile_id IS NOT NULL
+     LIMIT 1`,
+  ).bind(name).first<{ ok: number }>();
+  return Boolean(row);
+}
+
+/**
+ * Şu anda başvuruya açık yarışmalar.
+ *
+ * Yayımlanmış profilin yarışma adı ŞARTNAMEDEN çıkarılır ve kodda sabit duran
+ * `COMPETITIONS` havuzunda bulunmayabilir (ör. "TEKNOFEST Havacılık, Uzay ve
+ * Teknoloji Festivali"). Yarışmacının seçim listesi bu yüzden sabit havuzdan
+ * değil yayımlanmış profillerden beslenir — aksi hâlde yönetici "yayımlandı"
+ * bildirimi alırken yarışmacı aynı yarışmayı listede hiç göremiyordu.
+ *
+ * `field` yalnızca gösterim etiketidir: profilin kategorisi, yoksa aşama,
+ * o da yoksa kayıtlı havuzdaki alan adı.
+ */
+export async function listOpenCompetitions(): Promise<CompetitionEntry[]> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(
+    `SELECT c.competition_name, p.category, p.stage
+     FROM competitions c
+     LEFT JOIN competition_profiles p ON p.id = c.current_profile_id
+     WHERE c.status = 'open' AND c.current_profile_id IS NOT NULL
+     ORDER BY c.competition_name`,
+  ).all<{ competition_name: string; category: string | null; stage: string | null }>();
+  const seen = new Set<string>();
+  const entries: CompetitionEntry[] = [];
+  for (const row of result.results ?? []) {
+    if (seen.has(row.competition_name)) continue;
+    seen.add(row.competition_name);
+    const registered = COMPETITIONS.find((item) => item.name === row.competition_name);
+    entries.push({
+      name: row.competition_name,
+      field: (row.category ?? "").trim() || (row.stage ?? "").trim() || registered?.field || "Başvuruya açık",
+    });
+  }
+  return entries;
 }
 
 export type CompetitionStageResult = CompetitionWorkflow | "not_found" | "invalid_transition" | "unresolved";
@@ -705,7 +909,9 @@ const COMPETITION_TRANSITIONS: Record<CompetitionStatus, CompetitionStatus[]> = 
   criteria_processing: ["criteria_review"],
   criteria_review: ["open"],
   open: ["applications_closed"],
-  applications_closed: ["evaluating"],
+  // Yarışma Yöneticisi yanlışlıkla kapattığı başvuruyu yeniden açabilmeli;
+  // değerlendirme başlamadan önce bu geri dönüş kayıpsızdır.
+  applications_closed: ["evaluating", "open"],
   evaluating: ["decisions_frozen"],
   decisions_frozen: ["results_published", "evaluating"],
   results_published: ["archived"],
@@ -779,6 +985,59 @@ export async function listApprovedProfiles(account?: AdminAccount): Promise<Comp
   return (await listProfiles(account)).filter((profile) => profile.status === "approved");
 }
 
+/**
+ * Yeni başvuruya sistem tarafından hakem atar (ilk atama).
+ *
+ * NEDEN: hakem yalnızca kendisine ATANMIŞ dosyaları görür ve dosyayı kendi
+ * üzerine alamaz. Atama yapılmadığı sürece yarışmacının raporu hiçbir hakem
+ * panelinde görünmüyor, süreç sessizce duruyordu. Atamayı SİSTEM yapar:
+ *
+ *   - Hakem hâlâ kendi dosyasını seçemez (güvenlik kuralı korunur).
+ *   - Değerlendirme Yöneticisi (04) gerektiğinde başka hakeme aktarabilir.
+ *   - Aktif hakem yoksa başvuru atanmamış kalır; 04 panosu bunu sayar ve
+ *     kırmızı "Hakem atanmadı" etiketiyle gösterir.
+ *
+ * Dağıtım en az yüklü hakeme yapılır: tamamlanmamış dosya sayısı en düşük olan,
+ * eşitlikte en eski hesap. Eşitlik bozucu kimlik sırasıdır; böylece eşzamanlı
+ * iki başvuru aynı hakeme yığılmaz.
+ *
+ * Hata durumunda BAŞVURU DÜŞMEZ: atama yapılamazsa başvuru "submitted" kalır.
+ */
+async function autoAssignJudge(applicationId: string, timestamp: string): Promise<{ id: string; name: string } | null> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT j.id, j.full_name,
+            (SELECT COUNT(*) FROM competition_applications a
+              WHERE a.assigned_judge_id = j.id AND a.status <> 'completed') AS open_files
+     FROM admin_accounts j
+     WHERE j.role_code = '02' AND j.status = 'active'
+     ORDER BY open_files ASC, j.created_at ASC, j.id ASC
+     LIMIT 1`,
+  ).first<{ id: string; full_name: string; open_files: number }>();
+  if (!row) return null;
+
+  // Koşul WHERE'de tutulur: başka bir işlem bu arada atama yaptıysa üzerine yazılmaz.
+  const updated = await database.prepare(
+    `UPDATE competition_applications
+     SET assigned_judge_id = ?, assigned_judge_name = ?, status = 'assigned', updated_at = ?
+     WHERE id = ? AND assigned_judge_id IS NULL AND status = 'submitted'`,
+  ).bind(row.id, row.full_name, timestamp, applicationId).run();
+  if (!updated.meta.changes) return null;
+
+  await database.batch([
+    database.prepare(`UPDATE application_assignments SET active = 0 WHERE application_id = ? AND active = 1`).bind(applicationId),
+    database.prepare(
+      `INSERT INTO application_assignments
+        (id, application_id, judge_id, judge_name, assigned_by, assigned_by_name, reason, active, assigned_at)
+       VALUES (?, ?, ?, ?, NULL, ?, ?, 1, ?)`,
+    ).bind(
+      crypto.randomUUID(), applicationId, row.id, row.full_name, "sistem",
+      "Başvuru alındığında en az yüklü hakeme otomatik atandı.", timestamp,
+    ),
+  ]);
+  return { id: row.id, name: row.full_name };
+}
+
 export async function createApplication(input: {
   participant: AdminAccount;
   applicantFullName: string;
@@ -831,8 +1090,6 @@ export async function createApplication(input: {
      VALUES (?, ?, ?, ?)`,
   ).bind(crypto.randomUUID(), id, index, fullName))];
   await database.batch(statements);
-  const saved = await findApplication(id, input.participant);
-  if (!saved) throw new Error("Başvuru kaydedildi ancak geri okunamadı.");
   await recordWorkflowEvent({
     subjectType: "application",
     subjectId: id,
@@ -840,6 +1097,27 @@ export async function createApplication(input: {
     actor: input.participant,
     detail: `${input.teamName} · ${input.competitionName} · ${input.fileName}`,
   });
+
+  // Atama başvurudan SONRA yapılır: başarısız olursa başvuru kaydı bozulmaz,
+  // yalnızca atanmamış kalır ve 04 panosunda bekleyen olarak görünür.
+  let assignment: { id: string; name: string } | null = null;
+  try {
+    assignment = await autoAssignJudge(id, timestamp);
+  } catch (assignError) {
+    console.error("[workflow] otomatik hakem ataması yapılamadı", assignError);
+  }
+  if (assignment) {
+    await recordWorkflowEvent({
+      subjectType: "application",
+      subjectId: id,
+      event: "application_assigned",
+      actor: null,
+      detail: `${assignment.name} · başvuru alındığında sistem tarafından otomatik atandı`,
+    }).catch((eventError) => console.error("[workflow] atama olayı kaydedilemedi", eventError));
+  }
+
+  const saved = await findApplication(id, input.participant);
+  if (!saved) throw new Error("Başvuru kaydedildi ancak geri okunamadı.");
   return saved;
 }
 
@@ -1295,9 +1573,13 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
      LEFT JOIN competitions c ON c.competition_key = a.competition_key
      WHERE a.id = ?`,
   ).bind(id).first<{ status: string; evaluation_json: string | null; assigned_judge_id: string | null; decisions_locked: number | null }>();
-  if (!before) throw new Error("Başvuru bulunamadı.");
-  if (judge.roleCode === "02" && before.assigned_judge_id !== judge.id) throw new Error("Bu başvuru size atanmadı.");
-  if (before.decisions_locked === 1) throw new Error("Bu yarışmanın hakem kararları donduruldu; değişiklik yapılamaz.");
+  // Hata türleri bilinçli: 409 (çakışma) döner, 500 değil. Hakem "İşlem
+  // tamamlanamadı" yerine neden karar veremediğini görür.
+  if (!before) throw new ConflictError("Başvuru bulunamadı.");
+  if (judge.roleCode === "02" && before.assigned_judge_id !== judge.id) {
+    throw new ConflictError("Bu başvuru size atanmadı; kararı yalnızca atanan hakem verebilir.");
+  }
+  if (before.decisions_locked === 1) throw new ConflictError("Bu yarışmanın hakem kararları donduruldu; değişiklik yapılamaz.");
   const evaluation = parseJson<ReportEvaluation>(before?.evaluation_json ?? null);
   await database.batch([database.prepare(
     `UPDATE competition_applications
@@ -1370,17 +1652,27 @@ export async function saveCriteriaExtractionRun(
     result.analyzedAt || timestamp,
     timestamp,
   ).run();
-  const key = competitionKey(result.setup.competition, result.setup.year, result.setup.stage);
-  await database.prepare(
-    `INSERT INTO competitions
-      (id, competition_key, competition_name, status, current_profile_id, decisions_locked,
-       results_published_at, created_at, updated_at)
-     VALUES (?, ?, ?, 'criteria_review', NULL, 0, NULL, ?, ?)
-     ON CONFLICT(competition_key) DO UPDATE SET
-       competition_name = excluded.competition_name,
-       status = CASE WHEN competitions.status IN ('draft_criteria', 'criteria_processing', 'criteria_review') THEN 'criteria_review' ELSE competitions.status END,
-       updated_at = excluded.updated_at`,
-  ).bind(crypto.randomUUID(), key, result.setup.competition.slice(0, 240), timestamp, timestamp).run();
+  // Analiz, yarışmayı "kriter incelemesinde" olarak işaretler. Ama bu ad için
+  // ZATEN yayımlanmış bir profil varsa yeni satır AÇILMAZ: modelin çıkardığı
+  // yıl/aşama iki analiz arasında biraz farklı olduğunda `competitionKey` de
+  // farklı çıkıyor ve aynı adla profilsiz ikinci bir satır oluşuyordu. Bu satır
+  // yayımlanmış olanı gölgeleyip başvuruları reddettiriyordu.
+  const published = await database.prepare(
+    `SELECT 1 AS ok FROM competitions WHERE competition_name = ? AND current_profile_id IS NOT NULL LIMIT 1`,
+  ).bind(result.setup.competition.slice(0, 240)).first<{ ok: number }>();
+  if (!published) {
+    const key = competitionKey(result.setup.competition, result.setup.year, result.setup.stage);
+    await database.prepare(
+      `INSERT INTO competitions
+        (id, competition_key, competition_name, status, current_profile_id, decisions_locked,
+         results_published_at, created_at, updated_at)
+       VALUES (?, ?, ?, 'criteria_review', NULL, 0, NULL, ?, ?)
+       ON CONFLICT(competition_key) DO UPDATE SET
+         competition_name = excluded.competition_name,
+         status = CASE WHEN competitions.status IN ('draft_criteria', 'criteria_processing', 'criteria_review') THEN 'criteria_review' ELSE competitions.status END,
+         updated_at = excluded.updated_at`,
+    ).bind(crypto.randomUUID(), key, result.setup.competition.slice(0, 240), timestamp, timestamp).run();
+  }
   const row = await database.prepare(`SELECT * FROM criteria_extraction_runs WHERE id = ?`)
     .bind(id).first<ExtractionRow>();
   if (!row) throw new Error("Analiz geçmişi kaydedildi ancak geri okunamadı.");

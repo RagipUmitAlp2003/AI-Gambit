@@ -1,18 +1,26 @@
 import type { AnalysisResult } from "./types";
 
-export async function analyzeWithGemini(
-  file: File,
-  pageCount: number,
-  templateFile?: File | null,
-  templatePageCount?: number,
-): Promise<AnalysisResult> {
+/**
+ * Şartname analizi istemci sarmalayıcısı.
+ *
+ * Yalnızca şartname PDF'si gönderilir; ayrı bir resmî rapor şablonu alanı
+ * yoktur. Sunucu tek `generateContent` çağrısı yapar (bkz. api/analyze).
+ */
+
+/** Sunucunun bildirdiği analiz hatası; `retryable` "Yeniden dene" düğmesini açar. */
+export class AnalysisRequestError extends Error {
+  retryable: boolean;
+  constructor(message: string, retryable = false) {
+    super(message);
+    this.name = "AnalysisRequestError";
+    this.retryable = retryable;
+  }
+}
+
+export async function analyzeWithGemini(file: File, pageCount: number): Promise<AnalysisResult> {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("pageCount", String(pageCount));
-  if (templateFile) {
-    formData.append("templateFile", templateFile);
-    formData.append("templatePageCount", String(templatePageCount || 1));
-  }
 
   const response = await fetch("/api/analyze", {
     method: "POST",
@@ -20,10 +28,13 @@ export async function analyzeWithGemini(
   });
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("application/json")
-    ? await response.json() as AnalysisResult & { error?: string }
+    ? await response.json() as AnalysisResult & { error?: string; retryable?: boolean }
     : { error: (await response.text()).trim() || `Sunucu ${response.status} hatası döndürdü.` };
   if (!response.ok || "error" in payload) {
-    throw new Error(("error" in payload && payload.error) || "AI belge analizi tamamlanamadı.");
+    throw new AnalysisRequestError(
+      ("error" in payload && payload.error) || "AI belge analizi tamamlanamadı.",
+      "retryable" in payload && payload.retryable === true,
+    );
   }
   return payload;
 }

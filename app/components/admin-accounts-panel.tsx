@@ -310,10 +310,15 @@ export default function AdminAccountsPanel({ accounts, roles, mailReady, mail, v
                   </span>
                   <span role="cell">
                     {roles.find((role) => role.code === account.roleCode)?.assignable === false ? (
-                      // Yarışmacı hesabı yönetici rolüne çevrilmez; kendi kaydıyla açılır.
+                      // Atanamaz roller: Yarışmacı (03) kendi kaydıyla açılır, Admin (00)
+                      // yalnızca kurulum ucuyla oluşturulur. Sunucu da bu iki kodu reddeder.
                       <>
                         <span className="fixed-value"><span>{account.roleCode}</span><small>{roleTitle(roles, account.roleCode)}</small></span>
-                        <small>Yarışmacı rolü yönetici rolüne çevrilemez.</small>
+                        <small>
+                          {account.roleCode === "00"
+                            ? "Admin rolü panelden atanamaz ve değiştirilemez."
+                            : "Yarışmacı rolü yönetici rolüne çevrilemez."}
+                        </small>
                       </>
                     ) : (
                       <>

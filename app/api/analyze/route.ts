@@ -9,43 +9,70 @@ import {
   normalizeExtraction,
   type RawExtraction,
 } from "../../lib/criteria-extraction";
+import { MEDIA_RESOLUTION, describeGeminiFailure, mediaResolutionPart, runSingleGeneration } from "../../lib/gemini-generation";
 import { recordUsage } from "../../lib/usage-metrics";
 import { pdfIntegrityError } from "../../lib/pdf-integrity";
+import { sourcePageLimit } from "../../lib/pdf-page-count";
 import { saveCriteriaExtractionRun } from "../../lib/workflow-db";
 import type { AnalysisDiagnostics, AnalysisResult } from "../../lib/types";
 
 /**
  * Şartname analizi ucu — dört aşamalı prensip, TEK LLM çağrısı.
  *
- * PDF'nin tamamı bir kez modele verilir; model dört aşamaya ayrılmış kriterleri
- * (dil/şablon, başlık/içerik, kategori, teknik kural) kaynak sayfası ve birebir
- * alıntıyla döndürür. Sayfa aralığı, bağımsız denetim turu, puan planı veya
- * güven seviyesi yoktur. Model çıktısı sunucuda doğrulanır (sayfa sınırı, tekrar,
- * boş alan); karar yöneticide kalır.
+ * Yarışma Yöneticisi YALNIZCA şartname PDF'sini yükler; ayrı bir resmî rapor
+ * şablonu alanı yoktur. PDF'nin tamamı bir kez modele verilir; model dört
+ * aşamaya ayrılmış kriterleri (dil/şablon, başlık/içerik, kategori, teknik
+ * kural) kaynak sayfası ve birebir alıntıyla döndürür.
+ *
+ * TEK ÇAĞRI: bir "Belgeyi analiz et" işlemi için modele tam olarak bir
+ * `generateContent` isteği gider. Yedek model kademesi, model taraması ve gizli
+ * yeniden deneme döngüsü kaldırıldı; 429/503/zaman aşımında uç açık bir hata ve
+ * `retryable: true` döndürür, kullanıcı "Yeniden dene" ile kendisi karar verir.
+ * Tanılamadaki `apiCalls` gerçekten yapılan istek sayısıdır.
+ *
+ * Model çıktısı sunucuda doğrulanır (sayfa sınırı, tekrar, boş alan); karar
+ * yöneticide kalır. Puan planı, güven seviyesi ve pasif kriter üretilmez.
  */
 
+/** Analizde kullanılan TEK model. Yedek kademe yoktur. */
 const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
-const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite";
-// Birincil ve yedek modelin aynı anda "high demand" (503) döndürdüğü dalgalarda
-// analizin tamamen düşmemesi için isteğe bağlı üçüncü kademe.
-const THIRD_MODEL = process.env.GEMINI_THIRD_MODEL || "";
-// Model listesinin kaç kez baştan taranacağı: geçici 503/429 dalgası tek
-// turda bütün kademeleri tüketirse ikinci tur belgeyi kurtarır.
-const MODEL_SWEEPS = Math.min(4, Math.max(1, Number(process.env.GEMINI_MODEL_SWEEPS) || 2));
-// Yeniden denemeler için toplam duvar saati bütçesi: ek tur, isteği
-// süresiz uzatmasın. Bütçe dolduğunda yeni deneme başlatılmaz.
-const MODEL_RETRY_BUDGET_MS = Math.max(60_000, Number(process.env.GEMINI_RETRY_BUDGET_MS) || 300_000);
 
 const CACHE_LIMIT = 12;
 const MAX_PDF_BYTES = 18 * 1024 * 1024;
-const MAX_TEMPLATE_BYTES = 10 * 1024 * 1024;
 // Küçük PDF'ler satır içi gönderilir; büyük belgeler bir kez Files API'ye
-// yüklenip URI ile verilir ki yeniden deneme çağrılarında PDF tekrar taşınmasın.
+// yüklenip URI ile verilir ki gövde gereksiz büyümesin.
 const INLINE_PDF_FAST_PATH_BYTES = 512 * 1024;
 // Multipart sınırına dosya dışında başlıklar için küçük pay eklenir.
-const MAX_MULTIPART_BYTES = MAX_PDF_BYTES + MAX_TEMPLATE_BYTES + 768 * 1024;
-// Tek çağrı bütün belgeyi kapsadığı için uzun belgelerde daha geniş zaman tanınır.
+const MAX_MULTIPART_BYTES = MAX_PDF_BYTES + 768 * 1024;
+// Tek çağrı bütün belgeyi kapsadığı için uzun belgelerde geniş zaman tanınır.
 const GENERATION_TIMEOUT_MS = 150_000;
+
+/**
+ * Çıktı token tavanı. Eskiden 65536'ydı; şema sıkılaştıktan sonra (şablon ve
+ * kapsam-dışı listesi çıkarıldı, açıklamalar tek cümleye indi) en yoğun
+ * şartname bile bunun çok altında kalıyor. Düşük tavan modelin uzun, dolambaçlı
+ * metin üretmesini de caydırır ve yanıt süresini kısaltır.
+ */
+const MAX_OUTPUT_TOKENS = 24_576;
+
+/**
+ * Modelin "düşünme" bütçesi — analiz süresinin en büyük belirleyicisi.
+ *
+ * Çelikkubbe şartnamesi (25 sayfa · 1,75 MB) üzerinde ölçüm:
+ *   LOW    47,6 sn · 13 kriter · 13/13 kaynak sayfa dolu
+ *   MEDIUM 73,6 sn · 16 kriter · 16/16 kaynak sayfa dolu
+ *
+ * Orta boy şartnamelerde LOW, hedeflenen 13 maddelik derinliği kaynak
+ * sayfalarıyla birlikte yakalıyor ve süreyi üçte bir kısaltıyor. Uzun
+ * belgelerde model bağlamı bir arada tutmak için bütçeye ihtiyaç duyduğundan
+ * kademe yükselir. `GEMINI_THINKING_LEVEL` ile elle sabitlenebilir.
+ */
+const THINKING_OVERRIDE = (process.env.GEMINI_THINKING_LEVEL || "").toUpperCase();
+function thinkingLevelFor(pageCount: number): string {
+  if (["LOW", "MEDIUM", "HIGH"].includes(THINKING_OVERRIDE)) return THINKING_OVERRIDE;
+  if (pageCount >= 80) return "HIGH";
+  return pageCount >= 40 ? "MEDIUM" : "LOW";
+}
 
 function extractGeminiText(payload: unknown) {
   if (!payload || typeof payload !== "object") return "";
@@ -134,48 +161,8 @@ async function uploadPdfOnce(
 type CachedExtraction = {
   raw: RawExtraction;
   model: string;
-  /** Devre kesici nedeniyle bu istekte hiç denenmeyen modeller. */
-  skippedModels?: string[];
   pageCount: number;
 };
-
-/**
- * Model devre kesici. Bir model zaman aşımına uğrar veya 5xx dönerse kısa süre
- * devre dışı bırakılır; sonraki analizler doğrudan çalışan modelle başlar.
- * Süre dolduğunda model kendiliğinden yeniden denenir.
- */
-const MODEL_COOLDOWN_MS = Number(process.env.MODEL_COOLDOWN_MS) > 0
-  ? Number(process.env.MODEL_COOLDOWN_MS)
-  : 10 * 60 * 1000;
-
-const breakerHost = globalThis as unknown as { __kriterModelCooldown?: Map<string, number> };
-
-function modelCooldown(): Map<string, number> {
-  if (!breakerHost.__kriterModelCooldown) breakerHost.__kriterModelCooldown = new Map();
-  return breakerHost.__kriterModelCooldown;
-}
-
-function isModelCooling(model: string): boolean {
-  const until = modelCooldown().get(model);
-  if (!until) return false;
-  if (Date.now() >= until) { modelCooldown().delete(model); return false; }
-  return true;
-}
-
-function markModelUnavailable(model: string) {
-  modelCooldown().set(model, Date.now() + MODEL_COOLDOWN_MS);
-}
-
-function markModelHealthy(model: string) {
-  modelCooldown().delete(model);
-}
-
-/** Denenecek modeller: soğumada olanlar atlanır, hepsi soğumadaysa liste korunur. */
-function usableModels(models: string[]): { models: string[]; skipped: string[] } {
-  const skipped = models.filter(isModelCooling);
-  const usable = models.filter((model) => !isModelCooling(model));
-  return usable.length ? { models: usable, skipped } : { models, skipped: [] };
-}
 
 const cacheHost = globalThis as unknown as { __kriterAnalysisCache?: Map<string, CachedExtraction> };
 
@@ -202,12 +189,7 @@ function extractUsage(payload: unknown) {
 
 function buildResult(extraction: CachedExtraction, diagnostics: AnalysisDiagnostics): AnalysisResult {
   const normalized = normalizeExtraction(extraction.raw, extraction.pageCount);
-  const analysisWarnings = [
-    ...normalized.warnings,
-    ...(extraction.skippedModels?.length
-      ? [`Yanıt vermediği için geçici olarak atlanan model: ${extraction.skippedModels.join(", ")}. Analiz yedek modelle tamamlandı.`]
-      : []),
-  ];
+  const analysisWarnings = [...normalized.warnings];
   return {
     setup: normalized.setup,
     templateProfile: normalized.templateProfile,
@@ -264,43 +246,37 @@ export async function POST(request: Request) {
     if (file.size > MAX_PDF_BYTES) {
       return Response.json({ error: "Bu sürümde doğrudan analiz sınırı 18 MB. Daha büyük kaynak belgeler için dosya akışı desteği etkinleştirilmelidir." }, { status: 413 });
     }
-    const templateEntry = formData.get("templateFile");
-    const templateFile = templateEntry instanceof File && templateEntry.size > 0 ? templateEntry : null;
-    if (templateFile && templateFile.type !== "application/pdf" && !templateFile.name.toLocaleLowerCase("tr-TR").endsWith(".pdf")) {
-      return Response.json({ error: "Rapor şablonu yalnızca PDF olabilir." }, { status: 415 });
-    }
-    if (templateFile && templateFile.size > MAX_TEMPLATE_BYTES) {
-      return Response.json({ error: "Rapor şablonu en fazla 10 MB olabilir." }, { status: 413 });
-    }
-
     const rawPageCount = Number(formData.get("pageCount"));
-    const pageCount = Number.isFinite(rawPageCount)
-      ? Math.min(1_000, Math.max(1, Math.round(rawPageCount)))
-      : 1;
+    const clientPageCount = Number.isFinite(rawPageCount) ? Math.min(1_000, Math.max(0, Math.round(rawPageCount))) : 0;
     const pdfBytes = await file.arrayBuffer();
     const sourceIntegrityError = pdfIntegrityError(pdfBytes);
     if (sourceIntegrityError) return Response.json({ error: sourceIntegrityError }, { status: 422 });
-    const templateBytes = templateFile ? await templateFile.arrayBuffer() : null;
-    const templateIntegrityError = templateBytes ? pdfIntegrityError(templateBytes) : null;
-    if (templateIntegrityError) return Response.json({ error: `Rapor şablonu okunamıyor: ${templateIntegrityError}` }, { status: 422 });
-    const rawTemplatePageCount = Number(formData.get("templatePageCount"));
-    const templatePageCount = templateFile && Number.isFinite(rawTemplatePageCount)
-      ? Math.min(500, Math.max(1, Math.round(rawTemplatePageCount)))
-      : templateFile ? 1 : 0;
+    // Sayfa sayısı yalnızca bilgi değil, kaynak sayfa DOĞRULAMASININ üst sınırıdır.
+    // İstemci değeri eksik/hatalı geldiğinde (form alanı düşerse 0 → eski kodda 1)
+    // bütün kriterlerin kaynak sayfası "aralık dışı" sayılıp siliniyordu; bu yüzden
+    // sınır belgenin kendisinden okunur ve iki ölçümün büyüğü alınır.
+    const { limit: pageCount, server: serverPages } = sourcePageLimit(pdfBytes, clientPageCount);
+    if (!serverPages.trusted && !clientPageCount) {
+      console.warn("[analyze] sayfa sayısı kesin belirlenemedi; kaynak sayfa sınırı tahmini.", { pageCount });
+    }
 
-    // Aynı belge ve aynı talimat daha önce işlendiğinde modeli çağırma.
+    // Aynı belge ve aynı talimat daha önce işlendiğinde modeli hiç çağırma.
+    // Önbellek isabetinde `apiCalls: 0` yazılır; sayı uydurulmaz.
     const cacheContext = JSON.stringify({
       promptVersion: EXTRACTION_PROMPT_VERSION,
       document: await documentHash(pdfBytes),
-      template: templateBytes ? await documentHash(templateBytes) : null,
-      models: [PRIMARY_MODEL, FALLBACK_MODEL, THIRD_MODEL],
+      model: PRIMARY_MODEL,
+      // Çözünürlük ve düşünme bütçesi çıktıyı değiştirir; ayar değişince eski
+      // önbellek kaydı geçersiz olmalı, aksi hâlde yeni ayar hiç denenmez.
+      mediaResolution: MEDIA_RESOLUTION,
+      thinking: thinkingLevelFor(pageCount),
       pageCount,
     });
     const cacheKey = await documentHash(new TextEncoder().encode(cacheContext).buffer);
     const cachedExtraction = analysisCache().get(cacheKey);
     if (cachedExtraction) {
       const totalMs = Date.now() - startedAt;
-      recordUsage({ model: cachedExtraction.model, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: totalMs, cached: true, error: false });
+      recordUsage({ model: cachedExtraction.model, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: totalMs, cached: true, error: false, apiCalls: 0 });
       const cachedResult = buildResult(cachedExtraction, {
         totalMs, modelMs: 0, promptTokens: 0, outputTokens: 0, cached: true, apiCalls: 0, documentTransfers: 0,
       });
@@ -317,139 +293,55 @@ export async function POST(request: Request) {
     uploadedGeminiFileName = uploadedFile?.name ?? "";
     const uploadMs = Date.now() - uploadStartedAt;
     const documentPart = fileUri
-      ? { fileData: { mimeType: "application/pdf", fileUri }, mediaResolution: { level: "MEDIA_RESOLUTION_MEDIUM" } }
-      : { inlineData: { mimeType: "application/pdf", data: Buffer.from(pdfBytes).toString("base64") }, mediaResolution: { level: "MEDIA_RESOLUTION_MEDIUM" } };
-    const templatePart = templateBytes
-      ? { inlineData: { mimeType: "application/pdf", data: Buffer.from(templateBytes).toString("base64") }, mediaResolution: { level: "MEDIA_RESOLUTION_MEDIUM" } }
-      : null;
+      ? { fileData: { mimeType: "application/pdf", fileUri }, ...mediaResolutionPart() }
+      : { inlineData: { mimeType: "application/pdf", data: Buffer.from(pdfBytes).toString("base64") }, ...mediaResolutionPart() };
 
     /** TEK üretim çağrısının gövdesi: bütün belge, dört aşamalı şema. */
     const body = JSON.stringify({
       systemInstruction: { parts: [{ text: EXTRACTION_SYSTEM_INSTRUCTION }] },
       contents: [{
         role: "user",
-        parts: [
-          documentPart,
-          ...(templatePart ? [{ text: `Aşağıdaki ikinci PDF ayrı RAPOR ŞABLONUDUR: ${templateFile?.name || "rapor-sablonu.pdf"}.` }, templatePart] : []),
-          { text: buildExtractionPrompt({ pageCount, templateName: templateFile?.name ?? null, templatePageCount }) },
-        ],
+        parts: [documentPart, { text: buildExtractionPrompt({ pageCount }) }],
       }],
       generationConfig: {
-        thinkingConfig: { thinkingLevel: pageCount >= 80 ? "HIGH" : "MEDIUM" },
-        maxOutputTokens: 65536,
+        // Kural çıkarımı yaratıcı bir görev değil: sıcaklık 0 hem kararlı çıktı
+        // verir hem örnekleme adımını kısaltır. Aynı belge aynı kriterleri üretir.
+        temperature: 0,
+        topP: 1,
+        thinkingConfig: { thinkingLevel: thinkingLevelFor(pageCount) },
+        maxOutputTokens: MAX_OUTPUT_TOKENS,
         responseMimeType: "application/json",
         responseJsonSchema: EXTRACTION_SCHEMA,
       },
     });
 
-    const allModels = [...new Set([PRIMARY_MODEL, FALLBACK_MODEL, THIRD_MODEL].filter(Boolean))];
-    const { models: attempts, skipped: skippedModels } = usableModels(allModels);
-    let modelUsed = attempts[0];
+    let modelUsed = PRIMARY_MODEL;
+    /** Gerçekten yapılan `generateContent` isteği sayısı; tanılamaya bu yazılır. */
+    let apiCalls: 0 | 1 = 0;
 
     const failWith = (status: number, detail: string) => {
-      console.error("AI analiz isteği başarısız:", { status, detail });
-      recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true });
-      const upstreamAuthFailure = status === 401 || status === 403;
-      // Google tükenmiş bakiyeyi de 429 ile bildiriyor; "bir dakika sonra
-      // dene" yönlendirmesi bu durumda yanlış olduğu için mesaj ayrıştırılır.
-      const billingDepleted = /prepayment credits|billing|exceeded your current quota/i.test(detail);
-      const publicMessage = status === 504
-        ? "AI modeli zaman sınırı içinde yanıt vermedi. Lütfen yeniden deneyin."
-        : billingDepleted
-          ? "AI servisi isteği bakiye/kota nedeniyle reddetti: Google AI Studio projesinin ön ödemeli kredisi tükenmiş görünüyor. Anahtar geçerli; ai.dev/projects üzerinden faturalama bakiyesini yenileyin."
-        : status === 429
-          ? "AI servisinin geçici kullanım sınırına ulaşıldı. Yaklaşık bir dakika sonra yeniden deneyin."
-        : status === 503
-          ? "AI modeli şu anda yoğun ve yedek modeller de yanıt vermedi. Birkaç dakika sonra yeniden deneyin; sorun sürerse GEMINI_MODEL değerini erişilebilir başka bir modele alın."
-        : upstreamAuthFailure
-          ? "AI servisi anahtarı reddetti (kimlik doğrulama hatası). Bu bir kota sorunu değildir: GEMINI_API_KEY geçersiz, süresi dolmuş ya da Gemini API için yetkili değil. Google AI Studio'dan yeni bir API anahtarı alıp sunucu ortamını güncelleyin."
-        : "AI belge analizi tamamlanamadı. Lütfen yeniden deneyin.";
-      // Uygulamanın kendi oturum katmanı 401'i "yeniden giriş yap" olarak
-      // yorumladığı için yukarı akış kimlik hatası 502 ile iletilir.
-      return Response.json({ error: publicMessage }, { status: upstreamAuthFailure || status === 503 ? 502 : status });
-    };
-
-    type GenerationOutcome =
-      | { ok: true; payload: unknown; model: string }
-      | { ok: false; status: number; detail: string };
-
-    /** Tek çağrı; hata ve yedek model politikası korunur. */
-    const runGeneration = async (): Promise<GenerationOutcome> => {
-      let lastDetail = "AI belge analizi tamamlanamadı.";
-      let lastStatus = 502;
-      const plan: string[] = [];
-      for (let sweep = 0; sweep < MODEL_SWEEPS; sweep += 1) plan.push(...attempts);
-      for (let planIndex = 0; planIndex < plan.length; planIndex += 1) {
-        const model = plan[planIndex];
-        const alternativeAhead = plan.slice(planIndex + 1).some((candidate) => !isModelCooling(candidate));
-        if (isModelCooling(model) && alternativeAhead) continue;
-        // Bütçe dolduysa yeni model denemesi başlatmak yerine elde edilen
-        // en son hatayla dön: istek belirsiz süre askıda kalmasın.
-        if (planIndex > 0 && Date.now() - startedAt > MODEL_RETRY_BUDGET_MS) break;
-        let response: Response;
-        try {
-          response = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-              body,
-              signal: AbortSignal.timeout(GENERATION_TIMEOUT_MS),
-            },
-          );
-        } catch {
-          markModelUnavailable(model);
-          lastDetail = "AI modeli zaman sınırı içinde yanıt vermedi.";
-          lastStatus = 504;
-          continue;
-        }
-        if (response.ok) {
-          let payload: unknown;
-          try {
-            payload = await response.json();
-          } catch {
-            return { ok: false, status: 502, detail: "AI servisi geçerli JSON taşımayan bir yanıt döndürdü." };
-          }
-          markModelHealthy(model);
-          return { ok: true, payload, model };
-        }
-        const errorPayload = await response.json().catch(() => ({})) as {
-          error?: { message?: string; status?: string; details?: unknown[] };
-        };
-        // API anahtarı ve PDF içeriği bu kayda dahil edilmez; yalnızca servis
-        // hata tanısı geliştirme günlüğüne yazılır.
-        console.error("[gemini] generateContent reddedildi", {
-          model,
-          httpStatus: response.status,
-          status: errorPayload.error?.status,
-          message: errorPayload.error?.message,
-          details: errorPayload.error?.details,
-        });
-        lastDetail = errorPayload.error?.message || `AI analiz isteği ${response.status} koduyla başarısız oldu.`;
-        // Kimlik doğrulama hatası yeniden denemeyle veya yedek modelle
-        // çözülmez; durum kodu kotayla karışmasın diye korunur.
-        lastStatus = response.status === 429 || response.status === 503
-          ? response.status
-          : response.status === 401 || response.status === 403
-            ? response.status
-            : 502;
-        const retryable = [429, 500, 502, 503, 504].includes(response.status);
-        if (!retryable) return { ok: false, status: lastStatus, detail: lastDetail };
-        if ([500, 502, 503, 504].includes(response.status)) markModelUnavailable(model);
-        if (planIndex + 1 < plan.length) {
-          // Kademe değişiminde kısa, aynı kademenin tekrarında artan bekleme:
-          // "high demand" dalgaları genelde saniyeler içinde geçiyor.
-          const sweepIndex = Math.floor(planIndex / Math.max(1, attempts.length));
-          const base = lastStatus === 429 ? 2_500 : 1_200;
-          await delay(Math.min(12_000, base * 2 ** sweepIndex));
-        }
-      }
-      return { ok: false, status: /zaman sınırı/i.test(lastDetail) ? 504 : lastStatus, detail: lastDetail };
+      console.error("AI analiz isteği başarısız:", { status, detail, apiCalls });
+      recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls });
+      const failure = describeGeminiFailure(status, detail, "AI belge analizi");
+      // `retryable` istemciye "Yeniden dene" düğmesini göstermesini söyler;
+      // sunucu kendiliğinden ikinci bir çağrı yapmaz.
+      return Response.json(
+        { error: failure.message, retryable: failure.transient, apiCalls },
+        { status: failure.httpStatus },
+      );
     };
 
     const modelStartedAt = Date.now();
-    const outcome = await runGeneration();
+    // TEK çağrı: yedek model, tarama turu ve gizli yeniden deneme yoktur.
+    const outcome = await runSingleGeneration({
+      apiKey,
+      body,
+      model: PRIMARY_MODEL,
+      timeoutMs: GENERATION_TIMEOUT_MS,
+      label: "analyze",
+    });
     const modelMs = Date.now() - modelStartedAt;
+    apiCalls = outcome.apiCalls;
     if (!outcome.ok) return failWith(outcome.status, outcome.detail);
     modelUsed = outcome.model;
 
@@ -462,7 +354,7 @@ export async function POST(request: Request) {
       return failWith(502, "Belge analizi şemaya uygun JSON olarak okunamadı.");
     }
 
-    const extraction: CachedExtraction = { raw, model: modelUsed, skippedModels, pageCount };
+    const extraction: CachedExtraction = { raw, model: modelUsed, pageCount };
     const cache = analysisCache();
     cache.set(cacheKey, extraction);
     if (cache.size > CACHE_LIMIT) {
@@ -480,6 +372,7 @@ export async function POST(request: Request) {
       durationMs: totalMs,
       cached: false,
       error: false,
+      apiCalls,
     });
 
     const result = buildResult(extraction, {
@@ -489,7 +382,8 @@ export async function POST(request: Request) {
       outputTokens: usage.output,
       cached: false,
       uploadMs: fileUri ? uploadMs : 0,
-      apiCalls: 1,
+      // Gerçek istek sayısı; "1 dedik ama 6 gönderdik" durumu yaşanmaz.
+      apiCalls,
       documentTransfers: 1,
       documentDelivery: fileUri ? "file_uri" : "inline",
     });
@@ -498,7 +392,7 @@ export async function POST(request: Request) {
     return Response.json(result);
   } catch (error) {
     console.error("Beklenmeyen analiz hatası:", error);
-    recordUsage({ model: PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true });
+    recordUsage({ model: PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls: 0 });
     return Response.json({ error: "Belge analizi sırasında beklenmeyen bir hata oluştu." }, { status: 500 });
   } finally {
     if (cleanupApiKey && uploadedGeminiFileName) {

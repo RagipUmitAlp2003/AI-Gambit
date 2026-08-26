@@ -136,6 +136,8 @@ export function validateProfileExport(value: unknown): { profile: ProfileExport 
       name: stringOr(sourceDocument.name, "kaynak.pdf"),
       pages: Number.isFinite(Number(sourceDocument.pages)) ? Math.max(0, Math.round(Number(sourceDocument.pages))) : 0,
       analyzedAt: stringOr(sourceDocument.analyzedAt, ""),
+      // Eski profillerde yok; bulunduğunda kaynak sayfa bağlantısını besler.
+      ...(typeof sourceDocument.fileKey === "string" && sourceDocument.fileKey ? { fileKey: sourceDocument.fileKey } : {}),
     },
     templateProfile: normalizeTemplateProfile(candidate.templateProfile),
     criteria,

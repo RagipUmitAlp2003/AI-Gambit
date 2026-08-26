@@ -147,6 +147,10 @@ export const adminApi = {
 
   outbox: () => request<{ mail: MailDelivery[]; mailReady: boolean; production: boolean }>("/api/admin/outbox"),
 
+  /**
+   * Denetim izi. Admin ekranındaki "İşlem Geçmişi" paneli kaldırıldı; kayıtlar
+   * sunucuda tutulmaya devam eder ve gerektiğinde bu uçtan okunur.
+   */
   audit: () => request<{ entries: AuditEntryView[] }>("/api/admin/audit"),
 };
 

@@ -9,6 +9,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   MAX_CRITERIA,
+  MAX_DESCRIPTION_CHARS,
+  MAX_SOURCE_TEXT_CHARS,
   normalizeCriteria,
   normalizeDocumentSetup,
   normalizeExtraction,
@@ -55,16 +57,33 @@ test("aynı adlı ve aynı alıntılı tekrar birleşir; farklı adlı kriterler
   assert.equal(otherStage.criteria.length, 2);
 });
 
-test("PDF sınırı dışındaki kaynak sayfası null olur ve uyarı yazılır", () => {
+test("kaynak sayfası doğrulanamayan kriter KAYDEDİLMEZ ve adıyla bildirilir", () => {
   const { criteria, warnings } = normalizeCriteria([
-    raw({ sourcePage: 12 }),
+    raw({ name: "Sınır dışı", sourcePage: 12 }),
     raw({ name: "Kapak sayfası", sourcePage: 0, sourceText: "Kapak sayfası bulunmalıdır." }),
-    raw({ name: "Punto", sourcePage: "3", sourceText: "Metin 12 punto yazılmalıdır." }),
-    raw({ name: "Kenar boşluğu", sourcePage: 3.4, sourceText: "Kenar boşlukları 2,5 cm olmalıdır." }),
+    raw({ name: "Dizge sayfa", sourcePage: "3", sourceText: "Metin 12 punto yazılmalıdır." }),
+    raw({ name: "Sayfasız", sourcePage: undefined, sourceText: "Kenar boşlukları 2,5 cm olmalıdır." }),
+    raw({ name: "Geçerli", sourcePage: 3.4, sourceText: "Ondalık sayfa yuvarlanır." }),
   ], 5);
-  assert.equal(criteria.length, 4);
-  assert.deepEqual(criteria.map((criterion) => criterion.sourcePage), [null, null, null, 3]);
-  assert.match(warnings[0], /^3 kriterin kaynak sayfası PDF sınırları dışında/);
+  // Yalnızca yuvarlanabilir, aralık içindeki sayfa kabul edilir.
+  assert.deepEqual(criteria.map((criterion) => criterion.name), ["Geçerli"]);
+  assert.deepEqual(criteria.map((criterion) => criterion.sourcePage), [3]);
+  assert.match(warnings[0], /^4 kriter, kaynak sayfası doğrulanamadığı için kaydedilmedi \(1–5 aralığında/);
+  // Hangi kriterlerin düştüğü ada göre yazılır; sessiz kayıp yok.
+  assert.ok(warnings[0].includes("Sınır dışı"));
+  assert.ok(warnings[0].includes("Sayfasız"));
+});
+
+test("düşen kriter sayısı beşi aşınca uyarı özetlenir", () => {
+  const many = Array.from({ length: 8 }, (_, index) => raw({
+    name: `Sayfasız ${index + 1}`,
+    sourcePage: null,
+    sourceText: `Alıntı ${index + 1}`,
+  }));
+  const { criteria, warnings } = normalizeCriteria(many, 5);
+  assert.equal(criteria.length, 0);
+  assert.match(warnings[0], /^8 kriter, kaynak sayfası doğrulanamadığı için kaydedilmedi/);
+  assert.ok(warnings[0].includes("ve 3 kriter daha"));
 });
 
 test("tanınmayan aşama criteria_evidence'a düşer", () => {
@@ -95,9 +114,10 @@ test("aşama sırası, sayfa sırası ve kararlı kimlikler", () => {
       raw({ name: "F", stage: "category_similarity", sourcePage: 4, sourceText: "f metni" }),
     ],
   }, 10);
-  assert.deepEqual(criteria.map((criterion) => criterion.name), ["D", "B", "C", "F", "A", "E"]);
-  assert.deepEqual(criteria.map((criterion) => criterion.id), ["criterion-1", "criterion-2", "criterion-3", "criterion-4", "criterion-5", "criterion-6"]);
-  assert.equal(criteria.at(-1)?.sourcePage, null);
+  // E'nin sayfası (99) belge sınırının dışında; kaydedilmez.
+  assert.deepEqual(criteria.map((criterion) => criterion.name), ["D", "B", "C", "F", "A"]);
+  assert.deepEqual(criteria.map((criterion) => criterion.id), ["criterion-1", "criterion-2", "criterion-3", "criterion-4", "criterion-5"]);
+  assert.ok(criteria.every((criterion) => typeof criterion.sourcePage === "number"));
   const stageIndexes = criteria.map((criterion) => CHECK_STAGE_IDS.indexOf(criterion.stage));
   assert.deepEqual(stageIndexes, [...stageIndexes].sort((left, right) => left - right));
 });
@@ -126,18 +146,13 @@ test("varsayılan açıklama ve ihlal sonucu; boşluk temizliği; köken ve akti
   assert.equal(criterion.id, "criterion-1");
 });
 
-test("kapsam dışı maddeler sayılır ve uyarıya dönüşür", () => {
-  const result = normalizeExtraction({
-    criteria: [raw()],
-    excludedRules: [
-      { name: "Parkur puanı", reason: "fiziksel aşama", sourcePage: 14 },
-      { name: "Ceza puanı", reason: "puanlama", sourcePage: 18 },
-      { name: "Hakem onayı", reason: "haricî onay", sourcePage: 13 },
-    ],
-  }, 20);
-  assert.equal(result.excludedRuleCount, 3);
-  assert.ok(result.warnings.some((warning) => warning.startsWith("3 madde")));
-  assert.equal(result.criteria.length, 1);
+test("uzun açıklama ve alıntı token bütçesi için kırpılır", () => {
+  const { criteria } = normalizeCriteria([raw({
+    description: "a".repeat(MAX_DESCRIPTION_CHARS + 400),
+    sourceText: "b".repeat(MAX_SOURCE_TEXT_CHARS + 400),
+  })], 5);
+  assert.equal(criteria[0].description.length, MAX_DESCRIPTION_CHARS);
+  assert.equal(criteria[0].sourceText.length, MAX_SOURCE_TEXT_CHARS);
 });
 
 test("belge profili: rapor dili, dosya biçimleri ve sayısal sınırlar temizlenir", () => {
@@ -184,16 +199,10 @@ test("boş liste ve liste olmayan girdi uyarıları", () => {
   assert.ok(nothing.warnings.includes("Belgede PDF aşamasında kontrol edilebilecek kural bulunamadı."));
 });
 
-test("şablon profili normalize edilir", () => {
-  const { templateProfile } = normalizeExtraction({
-    criteria: [raw()],
-    templateProfile: { provided: true, name: "sablon.pdf", pages: "4", requiredHeadings: ["Giriş", 3, " Yöntem "], notes: [] },
-  }, 5);
-  assert.equal(templateProfile.provided, true);
-  assert.equal(templateProfile.pages, 4);
-  assert.deepEqual(templateProfile.requiredHeadings, ["Giriş", "Yöntem"]);
-
-  const absent = normalizeExtraction({ criteria: [raw()] }, 5).templateProfile;
-  assert.equal(absent.provided, false);
-  assert.deepEqual(absent.requiredHeadings, []);
+test("şablon profili her zaman boş üretilir (ayrı şablon yüklenmiyor)", () => {
+  const { templateProfile } = normalizeExtraction({ criteria: [raw()] }, 5);
+  assert.equal(templateProfile.provided, false);
+  assert.equal(templateProfile.pages, 0);
+  assert.deepEqual(templateProfile.requiredHeadings, []);
+  assert.deepEqual(templateProfile.notes, []);
 });

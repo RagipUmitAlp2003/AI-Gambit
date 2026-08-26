@@ -35,10 +35,9 @@ if (!apiKey) {
 console.log(`Anahtar: ${apiKey.length} karakter, ön ek "${apiKey.slice(0, 4)}…"`);
 console.log("Anahtar biçimi yerelde doğrulanmaz; geçerliliğe API'nin yanıtı karar verir.");
 
-const models = [
-  env.GEMINI_MODEL || "gemini-3-flash-preview",
-  env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite",
-];
+// Sistem tek model kullanır; yedek kademe kaldırıldı. Tanı aracı da yalnızca
+// yapılandırılmış modeli sınar.
+const models = [env.GEMINI_MODEL || "gemini-3-flash-preview"];
 
 const request = async (url, init = {}) => {
   const controller = new AbortController();
@@ -138,7 +137,7 @@ if (failed && list.status === 200) {
     if (probe.status === 200) working.push(model);
   }
   console.log(working.length
-    ? `   Çalışan modeller: ${working.join(", ")}\n   GEMINI_MODEL / GEMINI_FALLBACK_MODEL bunlardan biriyle güncellenebilir.`
+    ? `   Çalışan modeller: ${working.join(", ")}\n   GEMINI_MODEL bunlardan biriyle güncellenebilir.`
     : "   Hiçbir model üretim çağrısına yanıt vermedi; sorun model adı değil hesap/bakiye düzeyinde.");
 }
 

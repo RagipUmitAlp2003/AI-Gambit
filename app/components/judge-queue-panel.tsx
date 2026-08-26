@@ -30,8 +30,11 @@ export default function JudgeQueuePanel() {
     () => applications.filter((item) => item.status === "awaiting_judge" || item.status === "judge_in_review"),
     [applications],
   );
+  // Hakem YALNIZCA kendisine atanmış başvuruları görür; bu sayaçlar da yalnızca
+  // onları sayar. "submitted" durumu bu listede görünmez (atanan başvuru en az
+  // "assigned" durumundadır), bu yüzden sayaç adı "atandı"dır.
   const counts = useMemo(() => ({
-    pending: applications.filter((item) => item.status === "submitted").length,
+    assigned: applications.filter((item) => ["assigned", "resubmitted", "analysis_failed"].includes(item.status)).length,
     analyzing: applications.filter((item) => item.status === "analyzing").length,
     awaiting: applications.filter((item) => item.status === "awaiting_judge").length,
     inReview: applications.filter((item) => item.status === "judge_in_review").length,
@@ -53,7 +56,7 @@ export default function JudgeQueuePanel() {
       {error ? <p className="admin-error" role="alert">{error}</p> : null}
 
       <div className="operations-summary">
-        <div><strong>{counts.pending}</strong><span>AI ön değerlendirmesi bekliyor</span></div>
+        <div><strong>{counts.assigned}</strong><span>size atandı · AI analizi bekliyor</span></div>
         <div><strong>{counts.analyzing}</strong><span>AI ön değerlendirmesinde</span></div>
         <div><strong>{counts.awaiting}</strong><span>hakem bekliyor</span></div>
         <div><strong>{counts.inReview}</strong><span>değerlendirmemde</span></div>
@@ -83,7 +86,19 @@ export default function JudgeQueuePanel() {
           })}
         </div>
       ) : (
-        <div className="participant-empty"><strong>Kuyrukta bekleyen başvuru yok</strong><p>AI ön değerlendirmesi tamamlanan başvurular burada listelenir.</p></div>
+        <div className="participant-empty">
+          <strong>Kuyrukta bekleyen başvuru yok</strong>
+          {/*
+            "0 başvuru" tek başına bozuk sistem gibi görünüyordu. Yarışmacı rapor
+            gönderdiğinde sistem dosyayı en az yüklü hakeme otomatik atar; liste
+            boşsa gerçekten başvuru yoktur ya da hepsi başka hakemdedir.
+          */}
+          <p>
+            {applications.length
+              ? "Size atanmış başvuruların AI ön değerlendirmesi tamamlandığında burada listelenir."
+              : "Henüz size atanmış bir başvuru yok. Yarışmacı raporunu gönderdiğinde sistem dosyayı en az yüklü hakeme otomatik atar; size düşen başvurular anında bu listede görünür."}
+          </p>
+        </div>
       )}
     </section>
   );

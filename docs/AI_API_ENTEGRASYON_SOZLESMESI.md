@@ -16,10 +16,18 @@ API anahtarı hiçbir zaman `app/components` veya tarayıcıya gönderilen başk
 | --- | --- | --- |
 | `file` | File | Şartname PDF'si. En fazla 18 MB. |
 | `pageCount` | string | İstemcinin pdfjs ile saydığı sayfa sayısı; kaynak sayfa doğrulamasında üst sınır olarak kullanılır. |
-| `templateFile` | File (isteğe bağlı) | Ayrı resmî rapor şablonu PDF'si. |
-| `templatePageCount` | string (isteğe bağlı) | Şablonun sayfa sayısı. |
+
+**Üretim ayarları:** `temperature: 0`, `topP: 1`, `maxOutputTokens: 24576`. Kural çıkarımı yaratıcı bir görev değildir; sıfır sıcaklık aynı belgede aynı kriterleri üretir ve örnekleme adımını kısaltır.
+
+**Görüntü çözünürlüğü** `MEDIA_RESOLUTION_LOW`'dur (`GEMINI_MEDIA_RESOLUTION` ile değiştirilebilir). `MEDIUM` ile çok sayfalı şartnameler Gemini tarafında yüksek kapasiteli istek sayılıp **503 "high demand"** ile reddedilir; ölçüm (29 sayfa · 1,8 MB, aynı gövde): `MEDIUM` 4/4 kez 503, `LOW` 3/3 kez başarılı — aynı 14 kriter, aynı 14/14 kaynak sayfa. Kural ve kanıt metinleri PDF'in metin katmanından okunduğu için düşük çözünürlük kaliteyi düşürmez. Ayar önbellek anahtarına dahildir.
+
+**Düşünme bütçesi** analiz süresinin ikinci belirleyicisidir ve belge uzunluğuna göre seçilir: `< 40 sayfa → LOW`, `40–79 → MEDIUM`, `80+ → HIGH`. `GEMINI_THINKING_LEVEL` ile sabitlenebilir. Çelikkubbe şartnamesi (25 sayfa · 1,75 MB) ölçümü: LOW 47,6 sn / 13 kriter, MEDIUM 73,6 sn / 16 kriter — her ikisinde de kaynak sayfa doluluğu %100.
 
 İstemci ayrı bir ayar formu göndermez; yarışma, kategori, aşama, rapor türü, dil ve teslim sınırları belgeden çıkarılır.
+
+**Tek belge:** Yarışma Yöneticisi yalnızca şartname PDF'sini yükler. Ayrı resmî rapor şablonu yükleme alanı kaldırıldı; `templateFile` ve `templatePageCount` alanları artık kabul edilmez. Zorunlu başlıklar 2. aşama (`headings_content`) kriterlerinden okunur.
+
+**Tek çağrı:** Bir "Belgeyi analiz et" işlemi modele **tam olarak bir** `generateContent` isteği gönderir. Yedek model kademesi, model tarama turu ve gizli yeniden deneme döngüsü yoktur. 429/503/zaman aşımında uç `{ "error": "...", "retryable": true, "apiCalls": 1 }` döndürür ve arayüz kullanıcıya "Yeniden dene" sunar. `diagnostics.apiCalls` gerçekten yapılan istek sayısıdır (önbellek isabetinde 0).
 
 ## Modelden istenen ham cevap
 
@@ -39,36 +47,33 @@ Model, `EXTRACTION_SCHEMA` ile sınırlandırılmış tek bir JSON döndürür:
     "maxFileCount": 1,
     "defaultViolationAction": "block"                   // block | warn | jury | unspecified
   },
-  "templateProfile": {
-    "provided": true,
-    "name": "KTR_Sablonu.pdf",
-    "pages": 6,
-    "requiredHeadings": ["Özet", "Sistem Mimarisi", "Test Planı"],
-    "notes": ["Times New Roman 12 punto", "2,5 cm kenar boşluğu"]
-  },
+  // templateProfile ve excludedRules ŞEMADAN ÇIKARILDI: ayrı rapor şablonu
+  // yüklenmiyor ve kapsam dışı madde listesi yalnızca bir sayaç uyarısı
+  // üretiyordu. İkisi de çıktı token maliyeti ve yanıt süresi demekti.
   "criteria": [
     {
       "name": "KTR azami 30 sayfa",
       "stage": "language_template",       // language_template | headings_content | category_similarity | criteria_evidence
       "required": true,                    // Zorunlu → true, Diğer → false
-      "description": "Kritik Tasarım Raporu ekler hariç en fazla 30 sayfa olmalıdır; raporun sayfa sayısı kontrol edilir, aşılırsa değerlendirmeye alınmaz.",
+      "description": "KTR ekler hariç en fazla 30 sayfa olmalıdır.",  // tek cümle, en fazla 300 karakter
       "violationOutcome": "Değerlendirmeye alınmaz",   // yoksa "Belgede belirtilmemiş"
-      "sourcePage": 12,                    // PDF dosyasındaki 1 tabanlı sıra; basılı etiket değil
-      "sourceText": "KTR en fazla 30 sayfa olmalıdır."
+      "sourcePage": 12,                    // ZORUNLU · PDF dosyasındaki 1 tabanlı sıra; basılı etiket değil
+      "sourceText": "KTR en fazla 30 sayfa olmalıdır." // tek cümle, en fazla 320 karakter
     }
-  ],
-  "excludedRules": [
-    { "name": "Görev 2 seyir puanı", "reason": "Saha aşaması puanlaması", "sourcePage": 19 }
   ]
 }
 ```
+
+### Kaynak sayfa zorunludur
+
+`sourcePage` şemada `minimum: 1` ile zorunlu alandır ve sistem istemi bunu ayrıca vurgular: kuralın geçtiği sayfanın **PDF dosyasındaki** 1 tabanlı sırasıdır, belgenin altındaki basılı etiket değildir. Model sayfadan emin değilse o kuralı hiç yazmamalıdır.
 
 ## Dört aşama
 
 | `stage` | Aşama | Kriter olarak ne çıkarılır |
 | --- | --- | --- |
 | `language_template` | Dil ve Şablon Uygunluğu | Rapor dili; sayfa sınırı, punto, kenar boşluğu, kapak, dosya adı/türü/boyutu, sayfa düzeni. |
-| `headings_content` | Başlık ve İçerik Kontrolü | Raporda bulunması zorunlu her başlık için ayrı kriter; açıklama altındaki içeriğin ne olması gerektiğini söyler. Şablon verildiyse başlıklar ondan alınır. |
+| `headings_content` | Başlık ve İçerik Kontrolü | Raporda bulunması zorunlu her başlık için ayrı kriter; açıklama altındaki içeriğin ne olması gerektiğini söyler. |
 | `category_similarity` | Kategori Uygunluğu ve Benzerlik | Konu, seviye ve kapsamın kategoriye uygun sayılması için belgede yazan koşullar; açık özgünlük/intihal kuralı. Benzerlik karşılaştırmasını sistem kendisi yapar. |
 | `criteria_evidence` | Kriter Bazlı Kanıt Çıkarma | Raporda kanıtlanması gereken her teknik kural (tasarım kısıtı, zorunlu analiz/hesap/test planı, güvenlik ve sistem gereksinimi, teslim edilecek çizim/tablo). |
 
@@ -78,16 +83,18 @@ Model, `EXTRACTION_SCHEMA` ile sınırlandırılmış tek bir JSON döndürür:
 
 - Adı veya kaynak alıntısı boş kriter alınmaz; tanınmayan `stage` değeri `criteria_evidence`'a düşer.
 - Aynı aşamada aynı ad + sayfa veya aynı alıntı metnine sahip tekrarlar birleştirilir.
-- `sourcePage` PDF sınırı dışındaysa kriter silinmez; sayfa `null` yapılır ve uyarı yazılır (yönetici düzeltir).
+- **`sourcePage` doğrulanmadan kaydedilmez.** 1 ile belgenin sayfa sayısı arasında tam sayı değilse kriter listeye alınmaz; düşen kriterlerin adları `analysisWarnings` içinde tek tek yazılır. Böylece "kaynak sayfa girilmedi" durumundaki bir profil hiç oluşmaz.
+- Doğrulamanın üst sınırı olan sayfa sayısı **sunucuda belgenin kendisinden** okunur (`app/lib/pdf-page-count.ts`); istemciden gelen değerle karşılaştırılıp büyüğü alınır. Eskiden yalnızca istemci değeri kullanılıyordu ve alan eksik geldiğinde sınır 1'e düşüp bütün kaynak sayfaları siliniyordu.
+- `description` en fazla 300, `sourceText` en fazla 320 karakterde kırpılır.
 - Liste aşama sırası ve kaynak sayfasına göre dizilir; kimlikler `criterion-1 … n` olarak yeniden verilir. Üst sınır 400 kriterdir.
-- `excludedRules` sayısı ve boş kriter listesi `analysisWarnings` içinde raporlanır.
+- Boş kriter listesi `analysisWarnings` içinde raporlanır.
 
 ```jsonc
 {
   "setup": { "competition": "…", "category": "…", "stage": "…", "reportType": "…", "year": "…",
              "allowedFormats": ["PDF"], "maxFileSizeMb": 25, "maxFileCount": 1,
              "defaultViolationAction": "block", "reportLanguage": "Türkçe" },
-  "templateProfile": { "provided": true, "name": "…", "pages": 6, "requiredHeadings": ["…"], "notes": ["…"] },
+  "templateProfile": { "provided": false, "name": "", "pages": 0, "requiredHeadings": [], "notes": [] },
   "criteria": [ { "id": "criterion-1", "name": "…", "stage": "language_template", "required": true,
                   "description": "…", "violationOutcome": "…", "sourcePage": 12, "sourceText": "…",
                   "active": true, "origin": "document" } ],
@@ -112,7 +119,7 @@ Hata cevabı her zaman `{ "error": string }` + anlamlı HTTP durumu: `400` eksik
 2. "Belirtilmemiş" ile "uygun değil" birbirinden ayrılır; belge sessizse değer uydurulmaz.
 3. Her kriterin PDF sayfa sırası ve özgün dilde birebir kısa alıntısı bulunur; çeviri, özet veya yorum `sourceText` olamaz.
 4. Amaç, tanım, örnek, tavsiye ve genel açıklamalar açık bir rapor gerekliliği doğurmuyorsa kriter yapılmaz.
-5. Puan tabloları, ağırlıklar, cezalar, barajlar, puanlama sistemleri ve saha/fiziksel aşama maddeleri kriter yapılmaz; `excludedRules` içinde kısaca listelenir. Aynı maddede hem rapor gerekliliği hem saha koşulu varsa yalnızca rapor gerekliliği kriter olur.
+5. Puan tabloları, ağırlıklar, cezalar, barajlar, puanlama sistemleri ve saha/fiziksel aşama maddeleri kriter yapılmaz ve çıktıya hiç yazılmaz. Aynı maddede hem rapor gerekliliği hem saha koşulu varsa yalnızca rapor gerekliliği kriter olur.
 6. `required` yalnızca belge "zorunlu / olmalıdır / şarttır / gereklidir / aksi hâlde değerlendirilmez" diyorsa `true`; tavsiye veya beklenti `false`.
 7. Tablo, açıklama ve dipnotta tekrarlanan kural bir kez çıkarılır; bağımsız sonuç doğuran maddeler tek kriterde eritilmez.
 8. Güven seviyesi, olasılık veya "emin değilim" ifadesi üretilmez; dayanağı olmayan kural hiç yazılmaz.

@@ -1,7 +1,10 @@
+import { env } from "cloudflare:workers";
 import { handleError, json, jsonError, readJson, requirePermission } from "../../../lib/admin-guard";
 import { assignApplication, coordinateApplication, findApplication, markApplicationAnalyzing, saveApplicationEvaluation, saveApplicationReview } from "../../../lib/workflow-db";
 import { isRuleVerdict, type JudgeReview, type ReportEvaluation } from "../../../lib/types";
-import { findAccountById, recordAudit } from "../../../lib/admin-db";
+import { findAccountById, recordAudit, recordMail } from "../../../lib/admin-db";
+import type { CompetitionApplication } from "../../../lib/workflow-types";
+import { buildApplicationOutcomeMail, deliverMail } from "../../../lib/mailer";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -36,6 +39,61 @@ function validEvaluation(evaluation: ReportEvaluation | undefined): evaluation i
     && evaluation.stages.every((stage) => stage && typeof stage.stage === "string" && isRuleVerdict(stage.verdict));
 }
 
+/**
+ * Nihai karar yarışmacıya e-posta ile bildirilir. Ret kararında gerekçe mesajın
+ * gövdesindedir; aynı gerekçe yarışmacının "Başvurularım" ekranında da görünür
+ * (bkz. workflow-db · participantResultHidden).
+ *
+ * KARAR GERİ ALINMAZ: bu işlev `saveApplicationReview` BAŞARILI olduktan sonra
+ * çağrılır ve hiçbir koşulda hata fırlatmaz. Bildirim gönderilemezse sebep
+ * giden kutusuna ve sunucu günlüğüne yazılır, çağırana `notificationWarning`
+ * alanıyla bildirilir; kararın kendisi veri tabanında kalır.
+ */
+async function notifyOutcome(
+  application: CompetitionApplication,
+  review: JudgeReview,
+  requestUrl: string,
+): Promise<{ delivered: boolean; message: string }> {
+  if (review.status !== "completed" || review.outcome === "pending") return { delivered: false, message: "" };
+  if (!application.participantEmail) {
+    return { delivered: false, message: "Yarışmacının kayıtlı e-posta adresi bulunmadığı için bildirim gönderilemedi. Karar kaydedildi." };
+  }
+  try {
+    const baseUrl = env.APP_BASE_URL || new URL(requestUrl).origin;
+    const envelope = buildApplicationOutcomeMail({
+      fullName: application.applicantFullName || application.participantName,
+      email: application.participantEmail,
+      teamName: application.teamName,
+      competitionName: application.competitionName,
+      outcome: review.outcome,
+      reason: review.outcomeNote,
+      portalUrl: `${baseUrl.replace(/\/+$/, "")}/`,
+    });
+    const outcome = await deliverMail(env, envelope);
+    await recordMail({
+      accountId: application.participantId || null,
+      toEmail: envelope.to,
+      subject: envelope.subject,
+      body: envelope.storedBody,
+      status: outcome.status,
+      provider: outcome.provider,
+      error: outcome.error,
+    }).catch((mailError) => console.error("[mail] application outcome kaydedilemedi", mailError));
+    if (outcome.status === "sent") return { delivered: true, message: "" };
+    return {
+      delivered: false,
+      message: `${outcome.error ?? "Bildirim gönderilemedi; giden kutusuna alındı."} Karar kaydedildi.`,
+    };
+  } catch (notifyError) {
+    // Bildirim katmanının hiçbir hatası kararı düşürmez.
+    console.error("[mail] nihai karar bildirimi başarısız", notifyError);
+    return {
+      delivered: false,
+      message: "Karar kaydedildi ancak yarışmacıya bildirim gönderilemedi; sistem yöneticisi giden kutusunu kontrol etmelidir.",
+    };
+  }
+}
+
 export async function GET(request: Request, context: RouteContext): Promise<Response> {
   const auth = await requirePermission(request, "read_applications");
   if (!auth.ok) return auth.response;
@@ -66,6 +124,7 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
     if (!auth.ok) return auth.response;
     const visibleApplication = await findApplication(id, auth.account);
     if (!visibleApplication) return jsonError(404, "Başvuru bulunamadı.");
+    let notification: { delivered: boolean; message: string } = { delivered: false, message: "" };
     if (body.action === "assign_judge") {
       const judgeId = typeof body.judgeId === "string" ? body.judgeId.trim() : "";
       const judge = judgeId ? await findAccountById(judgeId) : null;
@@ -103,10 +162,24 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
       if (!["pending", "accepted", "rejected", "revision_required"].includes(review.outcome)) return jsonError(400, "Başvuru sonucu geçerli değil.");
       if (review.status === "completed" && review.outcome === "pending") return jsonError(400, "Değerlendirmeyi tamamlamak için kabul, ret veya düzeltme sonucu seçin.");
       if (typeof review.outcomeNote !== "string" || review.outcomeNote.length > 1_000) return jsonError(400, "Sonuç açıklaması en fazla 1000 karakter olabilir.");
+      if (review.status === "completed" && review.outcome === "rejected" && !review.outcomeNote.trim()) {
+        return jsonError(400, "Ret kararı için yarışmacıya iletilecek bir gerekçe yazın.");
+      }
       await saveApplicationReview(id, auth.account, review);
+      // Karar veri tabanına yazıldı; bildirim başarısız olsa bile geri alınmaz.
+      notification = await notifyOutcome(visibleApplication, review, request.url);
     } else return jsonError(400, "Başvuru işlemi tanınmadı.");
     const application = await findApplication(id, auth.account);
-    await recordAudit({ actorId: auth.account.id, actorEmail: auth.account.email, actorRole: auth.account.roleCode, action: String(body.action), targetType: "competition_application", targetId: id, detail: application?.competitionName ?? "" }).catch((auditError) => console.error("[audit] application update", auditError));
-    return json({ application });
+    await recordAudit({
+      actorId: auth.account.id,
+      actorEmail: auth.account.email,
+      actorRole: auth.account.roleCode,
+      action: String(body.action),
+      targetType: "competition_application",
+      targetId: id,
+      // Bildirim hatası ayrıca denetim izine yazılır; kararın kendisi etkilenmez.
+      detail: `${application?.competitionName ?? ""}${notification.message ? ` · bildirim başarısız: ${notification.message}` : ""}`,
+    }).catch((auditError) => console.error("[audit] application update", auditError));
+    return json({ application, ...(notification.message ? { notificationWarning: notification.message } : {}) });
   } catch (error) { return handleError(error); }
 }

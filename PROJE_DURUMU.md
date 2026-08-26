@@ -100,11 +100,14 @@ AI notları · çevrimdışı kriter sağlayıcısı · Admin'in hakem ataması.
 ### Aynı gün, önceki iş — AI erişim hatası
 
 "Belge analiz edilemedi" hatasının kök nedenleri faturalama (429 bakiye), yanıt vermeyen
-birincil model (503) ve ince yeniden deneme bütçesiydi. `GEMINI_MODEL_SWEEPS`,
-`GEMINI_THIRD_MODEL`, `GEMINI_RETRY_BUDGET_MS`, `MODEL_COOLDOWN_MS` ayarları, ayrıştırılmış
-hata mesajları ve `npm run check:gemini` aracı eklendi. Bu düzeltmeler geçerlidir ve tek
-çağrılık yeni mimaride de kullanılır. O gün alınan puan/kapsam ölçümleri eski prensibe ait
-olduğu için burada tutulmuyor (bkz. A1, A2).
+birincil model (503) ve ince yeniden deneme bütçesiydi. O gün eklenen `GEMINI_MODEL_SWEEPS`,
+`GEMINI_THIRD_MODEL`, `GEMINI_RETRY_BUDGET_MS`, `MODEL_COOLDOWN_MS` ayarları **kaldırıldı**:
+"tek çağrı" denen işlem için altı isteğe kadar gönderiliyor, üstelik tanılamaya sabit
+`apiCalls: 1` yazılıyordu. Yerine tek çağrı katmanı (`app/lib/gemini-generation.ts`), gerçek
+çağrı sayacı ve kullanıcıya sunulan "Yeniden dene" seçeneği geldi. O günden kalan
+ayrıştırılmış hata mesajları ve `npm run check:gemini` aracı geçerliliğini koruyor.
+O gün alınan puan/kapsam ölçümleri eski prensibe ait olduğu için burada tutulmuyor
+(bkz. A1, A2).
 
 ---
 

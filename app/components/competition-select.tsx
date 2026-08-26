@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { COMPETITIONS, searchCompetitions } from "../lib/competitions";
+import { COMPETITIONS, searchCompetitionList, searchCompetitions, type CompetitionEntry } from "../lib/competitions";
 
 /**
  * Arama destekli yarışma seçici. Görevli yazdıkça kayıtlı yarışmalar anlık,
@@ -13,11 +13,21 @@ export default function CompetitionSelect({
   value,
   onChange,
   onPick,
+  options,
+  emptyNote,
 }: {
   value: string;
   onChange: (value: string) => void;
   /** Listeden seçim yapıldığında çağrılır (serbest yazımda çağrılmaz); verilmezse onChange kullanılır. */
   onPick?: (value: string) => void;
+  /**
+   * Verilirse arama koddaki sabit havuz yerine BU listede yapılır. Yarışmacı
+   * portalı buraya başvuruya açık yarışmaları geçirir; böylece şartnameden
+   * çıkarılmış, kayıtlı havuzda bulunmayan bir yarışma da seçilebilir.
+   */
+  options?: CompetitionEntry[];
+  /** `options` boşken listede gösterilecek açıklama. */
+  emptyNote?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [highlighted, setHighlighted] = useState(0);
@@ -29,7 +39,11 @@ export default function CompetitionSelect({
   const listId = useId();
 
   const query = filtering ? value : "";
-  const { items, total } = useMemo(() => searchCompetitions(query), [query]);
+  const { items, total } = useMemo(
+    () => options ? searchCompetitionList(options, query) : searchCompetitions(query),
+    [options, query],
+  );
+  const poolSize = options ? options.length : COMPETITIONS.length;
   // Liste kısaldığında imleç listenin dışında kalabilir.
   const activeIndex = items.length ? Math.min(highlighted, items.length - 1) : 0;
   const hiddenCount = total - items.length;
@@ -61,7 +75,7 @@ export default function CompetitionSelect({
   }
 
   function shouldFilterCurrentValue() {
-    const exactSelection = COMPETITIONS.some((competition) => competition.name === value);
+    const exactSelection = (options ?? COMPETITIONS).some((competition) => competition.name === value);
     return Boolean(value.trim()) && !exactSelection;
   }
 
@@ -120,7 +134,11 @@ export default function CompetitionSelect({
           ))}
           {!items.length ? (
             <div className="combo-empty">
-              Eşleşen kayıtlı yarışma yok; yazdığınız ad serbest metin olarak kullanılacak.
+              {options
+                ? (options.length
+                  ? "Bu aramayla eşleşen, başvuruya açık yarışma yok."
+                  : emptyNote ?? "Şu anda başvuruya açık yarışma bulunmuyor.")
+                : "Eşleşen kayıtlı yarışma yok; yazdığınız ad serbest metin olarak kullanılacak."}
             </div>
           ) : (
             <div className="combo-footer">
@@ -128,7 +146,7 @@ export default function CompetitionSelect({
                 ? `${total} eşleşmenin ilk ${items.length} tanesi listelendi · +${hiddenCount} yarışma daha, aramayı daraltın`
                 : filtering
                   ? `${total} eşleşen yarışma`
-                  : `${COMPETITIONS.length} kayıtlı yarışma · yazmaya başlayın`}
+                  : `${poolSize} ${options ? "başvuruya açık" : "kayıtlı"} yarışma · yazmaya başlayın`}
             </div>
           )}
         </div>

@@ -79,7 +79,6 @@ yerine kendi anahtarınızı yazıp **kaydedin**:
 ```
 GEMINI_API_KEY=buraya_kendi_anahtariniz
 GEMINI_MODEL=gemini-3-flash-preview
-GEMINI_FALLBACK_MODEL=gemini-3.1-flash-lite
 ```
 
 Birkaç önemli nokta:
@@ -90,9 +89,21 @@ Birkaç önemli nokta:
 - Anahtar yalnızca sunucu tarafında okunur; tarayıcıya hiçbir zaman gönderilmez.
 - Dosyayı kaydettikten sonra **dev sunucusunu yeniden başlatın** — ortam değişkenleri
   yalnızca açılışta okunur.
-- Şartname analizi **tek model çağrısıyla** yapılır. Ek bir doğrulama turu veya bunu
-  açıp kapatan bir ayar yoktur; `.env.example` içindeki `GEMINI_*` ve yeniden deneme
-  ayarları bu tek çağrının model kademelerini yönetir.
+- Şartname analizi ve katılımcı rapor analizi **tek model çağrısıyla** yapılır: bir
+  kullanıcı işlemi için modele tam olarak bir `generateContent` isteği gider. Yedek
+  model kademesi, model tarama turu ve gizli yeniden deneme döngüsü yoktur; bu yüzden
+  `GEMINI_FALLBACK_MODEL`, `GEMINI_THIRD_MODEL`, `GEMINI_MODEL_SWEEPS`,
+  `GEMINI_RETRY_BUDGET_MS` ve `MODEL_COOLDOWN_MS` ayarları kaldırıldı. Geçici bir hatada
+  (429/503/zaman aşımı) ekranda açık bir hata ve **Yeniden dene** düğmesi görürsünüz.
+- **Aynı belgede sürekli "AI modeli şu anda yoğun" (503) alıyorsanız** sorun geçici
+  yoğunluk değildir: Gemini, çok sayfalı PDF'leri yüksek görüntü çözünürlüğüyle işlemeyi
+  bu kodla reddeder. `.env.local` içindeki `GEMINI_MEDIA_RESOLUTION` değeri `LOW` olmalıdır
+  (varsayılan budur). Ölçüm: 29 sayfalık şartname, `MEDIUM` → 4/4 denemede 503, `LOW` → 3/3
+  denemede başarılı, aynı kriter sayısı ve aynı kaynak sayfa doluluğu.
+- Analiz süresini en çok modelin "düşünme" bütçesi belirler. Sistem bunu belge uzunluğuna
+  göre seçer (40 sayfanın altı `LOW`, 40–79 sayfa `MEDIUM`, 80+ sayfa `HIGH`). Daha derin bir kriter
+  seti istiyorsanız `.env.local` içine `GEMINI_THINKING_LEVEL=MEDIUM` yazın; daha hızlı yanıt
+  için `LOW` yazın.
 
 ---
 

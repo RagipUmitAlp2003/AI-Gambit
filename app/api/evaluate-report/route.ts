@@ -7,6 +7,7 @@ import {
   buildHeadingChecks,
   capStageVerdict,
   detectLanguage,
+  expectedLanguageCode,
   feedbackOf,
   languageLabel,
   languageMismatch,
@@ -31,6 +32,8 @@ import {
   type RuleVerdict,
   type StageResult,
 } from "../../lib/types";
+import { MEDIA_RESOLUTION, describeGeminiFailure, mediaResolutionPart, runSingleGeneration } from "../../lib/gemini-generation";
+import { countPdfPages } from "../../lib/pdf-page-count";
 import { recordUsage } from "../../lib/usage-metrics";
 
 /**
@@ -43,10 +46,17 @@ import { recordUsage } from "../../lib/usage-metrics";
  * Sözleşme: docs/RAPOR_DEGERLENDIRME_SOZLESMESI.md
  */
 
+/**
+ * TEK ÇAĞRI: hakem "Yapay Zeka Analizi" düğmesine bastığında modele tam olarak
+ * bir `generateContent` isteği gider. Yedek model kademesi kaldırıldı; geçici
+ * hatada (429/503/zaman aşımı) uç `retryable: true` ile açık bir hata döndürür
+ * ve hakem düğmeye yeniden basarak karar verir.
+ */
 const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
-const FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite";
+/** Modele verilen tek isteğin zaman sınırı. */
+const GENERATION_TIMEOUT_MS = 150_000;
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
-const PROMPT_VERSION = "report-v3-four-stage";
+const PROMPT_VERSION = "report-v4-four-stage-language-normalized";
 const MAX_REPORT_BYTES = 50 * 1024 * 1024;
 const MAX_INLINE_REPORT_BYTES = 18 * 1024 * 1024;
 /** İstemcinin deterministik kontroller için gönderdiği sayfa metni üst sınırı. */
@@ -297,23 +307,6 @@ async function hash(value: ArrayBuffer): Promise<string> {
   return Buffer.from(digest).toString("hex");
 }
 
-function countPdfPages(bytes: ArrayBuffer, fallback: number): { pages: number; trusted: boolean } {
-  // PDF.js tarayıcı tarafında kullanılır; Cloudflare sunucu paketinde ise
-  // DOM/canvas bağımlılığı doğurur. Sunucuda PDF sayfa nesneleri ile /Pages
-  // ağacının /Count değerini bağımsız olarak çapraz kontrol ederiz.
-  const source = Buffer.from(bytes).toString("latin1");
-  const directPages = source.match(/\/Type\s*\/Page(?!s)\b/g)?.length ?? 0;
-  const treeCounts = [...source.matchAll(/(?:\/Type\s*\/Pages\b[\s\S]{0,500}?\/Count\s+(\d+)|\/Count\s+(\d+)[\s\S]{0,500}?\/Type\s*\/Pages\b)/g)]
-    .map((match) => Number(match[1] ?? match[2]))
-    .filter((value) => Number.isInteger(value) && value > 0 && value <= 1000);
-  const treeMax = treeCounts.length ? Math.max(...treeCounts) : 0;
-
-  if (directPages > 0 && (!treeMax || treeMax === directPages)) return { pages: directPages, trusted: true };
-  if (treeMax > 0 && !directPages) return { pages: treeMax, trusted: true };
-  if (directPages > 0) return { pages: directPages, trusted: false };
-  return { pages: fallback, trusted: false };
-}
-
 /** İstemcinin pdfjs ile çıkardığı sayfa metinleri; yalnızca deterministik kontrollerde kullanılır. */
 function parsePagesField(value: FormDataEntryValue | null): string[] | null {
   if (typeof value !== "string" || !value || value.length > MAX_PAGES_TEXT_CHARS) return null;
@@ -464,8 +457,17 @@ function buildEvaluation(input: {
   // Beklenen dil yalnızca yayımlı profilden okunur; şartname sessizse modelin
   // tahmini bilgi amaçlı gösterilir ama deterministik uyuşmazlık üretmez.
   const profileLanguage = profile.setup.reportLanguage ?? null;
-  const expectedLanguage = profileLanguage ?? stages[0].expectedLanguage ?? null;
-  const detectedLanguage = languageLabel(detected) ?? stages[0].detectedLanguage ?? null;
+  const rawExpected = profileLanguage ?? stages[0].expectedLanguage ?? null;
+  const expectedLanguage = rawExpected
+    ? languageLabel(expectedLanguageCode(rawExpected) ?? "unknown") ?? rawExpected
+    : null;
+  // Modelin dil adı İngilizce gelebiliyor ("Turkish"), profildeki beklenen dil
+  // ise Türkçe ("Türkçe"). Ham metinler karşılaştırılınca doğru dilde yazılmış
+  // rapor "dil uyuşmuyor" gibi kırmızı görünüyordu. Her iki taraf da sistemin
+  // kendi etiketine çevrilir; çevrilemeyen değer olduğu gibi gösterilir.
+  const modelLanguage = stages[0].detectedLanguage ?? null;
+  const detectedLanguage = languageLabel(detected)
+    ?? (modelLanguage ? languageLabel(expectedLanguageCode(modelLanguage) ?? "unknown") ?? modelLanguage : null);
   const mismatch = languageMismatch(detected, profileLanguage);
   stages[0] = { ...stages[0], detectedLanguage, expectedLanguage };
   if (mismatch) {
@@ -537,7 +539,15 @@ export async function POST(request: Request) {
       return Response.json({ error: "Katılımcı raporu izin verilen boyutu aşıyor." }, { status: 413 });
     }
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return Response.json({ error: "AI servis anahtarı sunucu ortamında bulunamadı." }, { status: 503 });
+    // `engineUnavailable` motorun bu ortamda HİÇ yapılandırılmadığını söyler;
+    // istemci bu durumda deterministik kontrollere düşer. Geçici model hataları
+    // (429/503) bundan ayrıdır ve hakeme "Yeniden dene" olarak gösterilir.
+    if (!apiKey) {
+      return Response.json(
+        { error: "AI servis anahtarı sunucu ortamında bulunamadı; yalnızca deterministik kontroller çalıştırılabilir.", engineUnavailable: true },
+        { status: 503 },
+      );
+    }
     cleanupKey = apiKey;
 
     let formData: FormData;
@@ -574,12 +584,12 @@ export async function POST(request: Request) {
     const pages = parsePagesField(formData.get("pages"));
     const profileHash = await hash(new TextEncoder().encode(profileRaw).buffer);
     const reportHash = await hash(bytes);
-    const cacheContext = `${PROMPT_VERSION}:${reportHash}:${profile.profileId || profileHash}:${PRIMARY_MODEL}:${FALLBACK_MODEL}`;
+    const cacheContext = `${PROMPT_VERSION}:${reportHash}:${profile.profileId || profileHash}:${PRIMARY_MODEL}:${MEDIA_RESOLUTION}`;
     const cacheKey = await hash(new TextEncoder().encode(cacheContext).buffer);
     const cached = evaluationCache().get(cacheKey);
     if (cached) {
       const totalMs = Date.now() - startedAt;
-      recordUsage({ model: cached.model || PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: totalMs, cached: true, error: false });
+      recordUsage({ model: cached.model || PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: totalMs, cached: true, error: false, apiCalls: 0 });
       return Response.json(cachedResponse(cached, file, totalMs));
     }
 
@@ -593,8 +603,8 @@ export async function POST(request: Request) {
       }, { status: 502 });
     }
     const documentPart = uploaded
-      ? { fileData: { mimeType: "application/pdf", fileUri: uploaded.uri }, mediaResolution: { level: "MEDIA_RESOLUTION_MEDIUM" } }
-      : { inlineData: { mimeType: "application/pdf", data: Buffer.from(bytes).toString("base64") }, mediaResolution: { level: "MEDIA_RESOLUTION_MEDIUM" } };
+      ? { fileData: { mimeType: "application/pdf", fileUri: uploaded.uri }, ...mediaResolutionPart() }
+      : { inlineData: { mimeType: "application/pdf", data: Buffer.from(bytes).toString("base64") }, ...mediaResolutionPart() };
     const body = JSON.stringify({
       systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
       contents: [{ role: "user", parts: [documentPart, { text: buildPrompt(profile, counted.pages) }] }],
@@ -607,49 +617,28 @@ export async function POST(request: Request) {
     });
 
     const modelStarted = Date.now();
-    let payload: unknown = null;
-    let modelUsed = PRIMARY_MODEL;
-    let lastStatus = 502;
-    let lastDetail = "";
-    for (const model of [...new Set([PRIMARY_MODEL, FALLBACK_MODEL])]) {
-      modelUsed = model;
-      try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-          body,
-          signal: AbortSignal.timeout(150_000),
-        });
-        if (response.ok) { payload = await response.json(); break; }
-        // 401/403 kota değil kimlik sorunudur; mesajı ayırt edilebilir kalsın.
-        lastStatus = response.status === 429
-          ? 429
-          : response.status === 401 || response.status === 403
-            ? response.status
-            : 502;
-        const error = await response.json().catch(() => ({})) as { error?: { message?: string } };
-        lastDetail = error.error?.message || `HTTP ${response.status}`;
-        if (![429, 500, 502, 503, 504].includes(response.status)) break;
-      } catch {
-        lastStatus = 504;
-        lastDetail = "zaman aşımı";
-      }
-    }
+    // TEK çağrı; model taraması, yedek kademe ve gizli yeniden deneme yoktur.
+    const outcome = await runSingleGeneration({
+      apiKey,
+      body,
+      model: PRIMARY_MODEL,
+      timeoutMs: GENERATION_TIMEOUT_MS,
+      label: "evaluate-report",
+    });
     const modelMs = Date.now() - modelStarted;
-    if (!payload) {
-      console.error("Katılımcı raporu AI analizi başarısız:", { status: lastStatus, detail: lastDetail });
-      recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true });
-      const upstreamAuthFailure = lastStatus === 401 || lastStatus === 403;
-      const message = lastStatus === 504
-        ? "AI modeli zaman sınırı içinde yanıt vermedi."
-        : lastStatus === 429
-          ? "AI servisinin geçici kullanım sınırına ulaşıldı. Yaklaşık bir dakika sonra yeniden deneyin."
-        : upstreamAuthFailure
-          ? "AI servisi anahtarı reddetti (kimlik doğrulama hatası). Bu bir kota sorunu değildir: GEMINI_API_KEY geçersiz, süresi dolmuş ya da Gemini API için yetkili değil."
-        : "AI rapor analizi tamamlanamadı. Lütfen yeniden deneyin.";
-      // Oturum katmanı 401'i "yeniden giriş yap" saydığı için 502 ile iletilir.
-      return Response.json({ error: message }, { status: upstreamAuthFailure ? 502 : lastStatus });
+    const modelUsed = outcome.model || PRIMARY_MODEL;
+    /** Gerçekten yapılan üretim isteği sayısı; tanılamaya bu yazılır. */
+    const apiCalls = outcome.apiCalls;
+    if (!outcome.ok) {
+      console.error("Katılımcı raporu AI analizi başarısız:", { status: outcome.status, detail: outcome.detail, apiCalls });
+      recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls });
+      const failure = describeGeminiFailure(outcome.status, outcome.detail, "AI rapor analizi");
+      return Response.json(
+        { error: failure.message, retryable: failure.transient, apiCalls },
+        { status: failure.httpStatus },
+      );
     }
+    const payload = outcome.payload;
 
     const rawText = extractGeminiText(payload);
     if (!rawText) return Response.json({ error: "AI modeli geçerli bir değerlendirme çıktısı döndürmedi." }, { status: 502 });
@@ -666,7 +655,8 @@ export async function POST(request: Request) {
       outputTokens: usage.output,
       cached: false,
       uploadMs: uploaded ? uploadMs : 0,
-      apiCalls: 1,
+      // Gerçek istek sayısı; sabit "1" yazılmaz.
+      apiCalls,
       documentTransfers: 1,
       documentDelivery: uploaded ? "file_uri" : "inline",
     };
@@ -681,7 +671,7 @@ export async function POST(request: Request) {
       model: modelUsed,
       diagnostics,
     });
-    recordUsage({ model: modelUsed, promptTokens: usage.prompt, outputTokens: usage.output, totalTokens: usage.total, durationMs: totalMs, cached: false, error: false });
+    recordUsage({ model: modelUsed, promptTokens: usage.prompt, outputTokens: usage.output, totalTokens: usage.total, durationMs: totalMs, cached: false, error: false, apiCalls });
 
     const cache = evaluationCache();
     cache.set(cacheKey, {
@@ -713,7 +703,7 @@ export async function POST(request: Request) {
     return Response.json(result);
   } catch (error) {
     console.error("Beklenmeyen katılımcı raporu analiz hatası:", error);
-    recordUsage({ model: PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true });
+    recordUsage({ model: PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls: 0 });
     return Response.json({ error: "Rapor analizi sırasında beklenmeyen bir hata oluştu." }, { status: 500 });
   } finally {
     if (cleanupKey && uploadedName) await deleteGeminiFile(cleanupKey, uploadedName);

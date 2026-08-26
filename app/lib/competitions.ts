@@ -187,13 +187,42 @@ export type CompetitionSearchResult = {
  * aranır; eşleşmeler "adın başı → kelime başı → içerik" sırasına göre döner.
  */
 export function searchCompetitions(query: string, limit = COMPETITION_RESULT_LIMIT): CompetitionSearchResult {
+  return rankCompetitions(SEARCH_INDEX, COMPETITIONS, query, limit);
+}
+
+/**
+ * Aynı arama, kayıtlı olmayan bir yarışma listesi üzerinde.
+ *
+ * Yayımlanmış profillerin yarışma adı şartnameden çıkarılır ve kayıtlı havuzda
+ * bulunmayabilir. Yarışmacı portalı başvuruya açık yarışmaları bu yolla arar ki
+ * "yayımlandı ama seçilemiyor" durumu oluşmasın. Türkçe karakter katlaması
+ * (fold) burada da uygulanır: "İHA" araması "iha" ile de bulunur.
+ */
+export function searchCompetitionList(
+  entries: CompetitionEntry[],
+  query: string,
+  limit = COMPETITION_RESULT_LIMIT,
+): CompetitionSearchResult {
+  const index = entries.map((entry) => {
+    const foldedName = fold(entry.name);
+    return { ...entry, foldedName, haystack: `${foldedName} ${fold(entry.field)}` };
+  });
+  return rankCompetitions(index, entries, query, limit);
+}
+
+function rankCompetitions(
+  index: IndexedCompetition[],
+  all: CompetitionEntry[],
+  query: string,
+  limit: number,
+): CompetitionSearchResult {
   const normalized = fold(query.trim());
   if (!normalized) {
-    return { items: COMPETITIONS.slice(0, limit), total: COMPETITIONS.length };
+    return { items: all.slice(0, limit), total: all.length };
   }
   const tokens = normalized.split(/\s+/).filter(Boolean);
   const ranked: Array<{ entry: CompetitionEntry; rank: number }> = [];
-  for (const indexed of SEARCH_INDEX) {
+  for (const indexed of index) {
     if (!tokens.every((token) => indexed.haystack.includes(token))) continue;
     const rank = indexed.foldedName.startsWith(normalized)
       ? 0

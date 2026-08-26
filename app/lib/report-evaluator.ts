@@ -21,7 +21,15 @@ import type { EvidenceRef, PreCheck, ProfileExport, ReportEvaluation } from "./t
  */
 
 /** Sunucunun bildirdiği hata; çevrimdışı yedeğe düşülmez, kullanıcıya gösterilir. */
-class ReportEngineError extends Error {}
+export class ReportEngineError extends Error {
+  /** Geçici model yokluğu mu? Arayüz bu durumda "Yeniden dene" gösterir. */
+  retryable: boolean;
+  constructor(message: string, retryable = false) {
+    super(message);
+    this.name = "ReportEngineError";
+    this.retryable = retryable;
+  }
+}
 
 /** Sunucuya gönderilen sayfa metni üst sınırı; deterministik kontroller için yeterlidir. */
 const MAX_PAGES_TEXT_CHARS = 1_500_000;
@@ -106,7 +114,7 @@ export async function evaluateReport(input: {
     const contentType = response.headers.get("content-type") || "";
     // Gövde en fazla bir kez okunur; ikinci okuma her zaman başarısız olurdu.
     const payload = contentType.includes("application/json")
-      ? await response.json().catch(() => null) as (Partial<ReportEvaluation> & { error?: string }) | null
+      ? await response.json().catch(() => null) as (Partial<ReportEvaluation> & { error?: string; retryable?: boolean; engineUnavailable?: boolean }) | null
       : null;
 
     if (response.ok && payload && !payload.error && payload.version === "2.0" && Array.isArray(payload.findings) && Array.isArray(payload.stages)) {
@@ -132,13 +140,17 @@ export async function evaluateReport(input: {
       return applySimilarity(merged, buildSimilarityCheck(pages.join(" "), peers));
     }
 
-    if (response.status === 501 || response.status === 404 || response.status === 503) {
-      offlineReason = response.status === 503
+    // Motor bu ortamda HİÇ yapılandırılmamışsa (uç yok / anahtar yok) deterministik
+    // yedeğe düşülür. Geçici model hatası (429/503 · `retryable`) yedeğe DÜŞMEZ:
+    // hakem sonucu "yapılmış" sanmasın, açık hatayı görüp yeniden denesin.
+    if (response.status === 501 || response.status === 404 || payload?.engineUnavailable === true) {
+      offlineReason = payload?.engineUnavailable === true
         ? "AI servis anahtarı bu ortamda kullanılamıyor; yalnızca deterministik kontroller çalıştırıldı."
         : "AI analiz motoru bu ortamda bağlı değil; yalnızca deterministik kontroller çalıştırıldı.";
     } else {
       throw new ReportEngineError(
         payload?.error || `Analiz motoru beklenmedik bir cevap döndürdü (HTTP ${response.status}).`,
+        payload?.retryable === true,
       );
     }
   } catch (error) {

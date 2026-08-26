@@ -4,28 +4,31 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import AccessLogin from "./access-login";
 import AdminAccountsPanel from "./admin-accounts-panel";
-import AuditPanel from "./audit-panel";
+import CompetitionStagePanel from "./competition-stage-panel";
 import JudgeQueuePanel from "./judge-queue-panel";
 import OperationsPanel from "./operations-panel";
 import ParticipantPortal from "./participant-portal";
 import ManagerProfileHistory from "./manager-profile-history";
 import { AdminApiError, adminApi } from "../lib/admin-client";
-import type { AuditEntryView } from "../lib/admin-client";
 import { PARTICIPANT_ROLE, ROLES, roleByCode } from "../lib/admin-roles";
 import type { AdminAccount, MailDelivery, RoleCode } from "../lib/admin-types";
 import { can } from "../lib/authorization";
 
-type Section = "overview" | "extractions" | "profiles" | "accounts";
+/**
+ * `history`: Yarışma Yöneticisinin TEK geçmiş ekranı — geçmiş ayıklamalar ve
+ * yayımlanan profiller birlikte. Daha önce iki ayrı bölümdü ve yayımlanmış bir
+ * profil hiçbirinden düzenlenemiyordu.
+ */
+type Section = "overview" | "history" | "accounts";
 
 type AdminData = {
   accounts: AdminAccount[];
   mail: MailDelivery[];
-  audit: AuditEntryView[];
   mailReady: boolean;
   production: boolean;
 };
 
-const EMPTY: AdminData = { accounts: [], mail: [], audit: [], mailReady: false, production: false };
+const EMPTY: AdminData = { accounts: [], mail: [], mailReady: false, production: false };
 
 /**
  * Rol çalışma alanları. Başlıklar merkezi rol katalogundan (admin-roles.ts)
@@ -33,12 +36,12 @@ const EMPTY: AdminData = { accounts: [], mail: [], audit: [], mailReady: false, 
  */
 const ROLE_WORKSPACES: Record<RoleCode, { title: string; intro: string }> = {
   "00": {
-    title: "Yönetici atama paneli",
-    intro: "Personel hesaplarını açın, rol atayın veya kaldırın. Admin girişi yalnızca yönetici ataması yapar; kriter, değerlendirme ve operasyon alanları bu hesaba kapalıdır.",
+    title: "Yetkili hesap yönetimi",
+    intro: "01, 02 ve 04 rollerinde personel hesabı açın, rol değiştirin veya hesabı pasife alın. Yeni Admin ve Yarışmacı hesabı bu panelden açılamaz; kriter, değerlendirme ve operasyon alanları bu hesaba kapalıdır.",
   },
   "01": {
     title: "Yarışma hazırlık alanı",
-    intro: "Şartnameyi ve varsa rapor şablonunu yükleyin; dört aşamalı kontrol için çıkarılan kriterleri doğrulayıp yayımlayın.",
+    intro: "Şartname PDF'sini yükleyin; dört aşamalı kontrol için çıkarılan kriterleri doğrulayıp yayımlayın. Ayrı bir rapor şablonu yüklenmez.",
   },
   "02": {
     title: "Hakem çalışma alanı",
@@ -72,15 +75,15 @@ export default function ManagementApp() {
       return;
     }
     try {
-      const [accounts, outbox, audit] = await Promise.all([
+      // Denetim izi Admin ekranında GÖSTERİLMEZ (İşlem Geçmişi paneli kaldırıldı);
+      // kayıtlar sunucuda tutulmaya devam eder ve /api/admin/audit ucundan okunur.
+      const [accounts, outbox] = await Promise.all([
         adminApi.accounts(),
         adminApi.outbox(),
-        adminApi.audit(),
       ]);
       setData({
         accounts: accounts.accounts,
         mail: outbox.mail,
-        audit: audit.entries,
         mailReady: accounts.mailReady,
         production: accounts.production,
       });
@@ -140,6 +143,7 @@ export default function ManagementApp() {
   const canOpenEvaluation = can(session, "run_ai_prescreen");
   const canOperate = can(session, "operations_dashboard");
   const canInitialAssign = can(session, "assign_judge");
+  const canManageStage = can(session, "manage_competition_stage");
 
   // Bölümler yetki matrisinden türetilir; hiçbir rol adı burada sabitlenmez.
   // Admin yalnızca yönetici atama panelini görür; başka bölüm listelenmez.
@@ -148,8 +152,7 @@ export default function ManagementApp() {
     : [
       { id: "overview", label: "Çalışma alanım", detail: role?.area ?? "Rol görünümü" },
       ...(canAuthorProfile ? [
-        { id: "extractions" as const, label: "Geçmiş ayıklamalar", detail: "Analiz edilen şartname PDF'leri" },
-        { id: "profiles" as const, label: "Yayımlanan profiller", detail: "Aktif kriter setleri" },
+        { id: "history" as const, label: "Kriter Geçmişi", detail: "Analiz edilen şartnameler ve yayımlanan profiller" },
       ] : []),
     ];
   const activeSection: Section = isAdmin ? "accounts" : section === "accounts" ? "overview" : section;
@@ -220,7 +223,9 @@ export default function ManagementApp() {
 
             {canJudge ? <JudgeQueuePanel /> : null}
             {canOperate ? <OperationsPanel canInitialAssign={canInitialAssign} /> : null}
-            {canAuthorProfile ? <ManagerProfileHistory mode="profiles" compact /> : null}
+            {/* Başvurunun açık/kapalı olması yarışmanın sahibinin kararıdır. */}
+            {canManageStage ? <CompetitionStagePanel /> : null}
+            {canAuthorProfile ? <ManagerProfileHistory compact /> : null}
 
             <div className="role-boundary">
               <strong>Bu rolün karar sınırı</strong>
@@ -230,8 +235,7 @@ export default function ManagementApp() {
           </section>
         ) : null}
 
-        {!loading && activeSection === "extractions" && canAuthorProfile ? <ManagerProfileHistory mode="extractions" /> : null}
-        {!loading && activeSection === "profiles" && canAuthorProfile ? <ManagerProfileHistory mode="profiles" /> : null}
+        {!loading && activeSection === "history" && canAuthorProfile ? <ManagerProfileHistory /> : null}
 
         {!loading && activeSection === "accounts" && isAdmin ? (
           <>
@@ -248,7 +252,6 @@ export default function ManagementApp() {
               <p>{role?.summary}</p>
               {role?.boundary ? <small>{role.boundary}</small> : null}
             </div>
-            <AuditPanel entries={data.audit} />
           </>
         ) : null}
       </div>

@@ -132,6 +132,14 @@ export type Criterion = {
   sourcePage: number | null;
   /** Kaynak sayfadan özgün dilde birebir kısa alıntı. */
   sourceText: string;
+  /**
+   * Geriye uyumluluk alanı: YENİ profillerde her zaman `true`.
+   *
+   * "Pasif kriter" kavramı kaldırıldı; Kriter Atölyesi'nde aktif/pasif anahtarı
+   * yoktur ve yayımlanan sette yarı etkin kriter bulunmaz — yönetici istemediği
+   * kriteri siler. Alan yalnızca eski (1.0) profillerde pasif taşınmış maddeleri
+   * okuyabilmek için korunur; değerlendirme motoru bu bayrağı hâlâ dikkate alır.
+   */
   active: boolean;
   origin: CriterionOrigin;
 };
@@ -153,7 +161,15 @@ export type AnalysisDiagnostics = {
   documentDelivery?: "file_uri" | "inline";
 };
 
-/** Organizatör ayrıca resmî rapor şablonu yüklediyse ondan çıkarılan yapı. */
+/**
+ * Şablon yapısı (geriye uyumluluk).
+ *
+ * Ayrı resmî rapor şablonu yükleme alanı kaldırıldı: Yarışma Yöneticisi yalnızca
+ * şartname PDF'si yükler. Yeni profillerde `provided` her zaman false kalır ve
+ * zorunlu başlıklar 2. aşama kriterlerinden okunur (bkz. report-prechecks ·
+ * requiredHeadingsOf). Alan, eski profillerde saklanmış şablon başlıklarını
+ * okuyabilmek için korunur.
+ */
 export type TemplateProfile = {
   provided: boolean;
   name: string;
@@ -193,6 +209,14 @@ export type ProfileExport = {
     name: string;
     pages: number;
     analyzedAt: string;
+    /**
+     * Şartname PDF'inin R2 nesne anahtarı (yayımlarken yüklendiyse).
+     *
+     * Kaynak sayfa bağlantısı bunu kullanır: profil geçmişten açıldığında
+     * tarayıcıdaki yerel taslak dosyası yoktur, bu yüzden kaynağa gitmenin
+     * tek yolu sunucudaki kopyadır. Eski profillerde bulunmaz (isteğe bağlı).
+     */
+    fileKey?: string | null;
   };
   templateProfile?: TemplateProfile;
   criteria: Criterion[];
@@ -296,12 +320,35 @@ export type VerdictSummary = {
   overall: RuleVerdict;
 };
 
-/** Yarışmacıya gösterilecek gelişim odaklı geri bildirim. */
+/**
+ * Yarışmacıya gösterilecek gelişim odaklı geri bildirim (Problem 4 · "AI 4. Göz").
+ *
+ * Yarışmacı portalında üç kart hâlinde görünür; alan adları veri sözleşmesinde
+ * korunur, ekrandaki başlıklar `PARTICIPANT_FEEDBACK_LABELS` üzerinden okunur.
+ *
+ *   strengths     → Güçlü Yönler          (karşılanan kriterler)
+ *   improvements  → Gelişime Açık Yönler  (hatalı kriterler ve sebepleri)
+ *   suggestions   → Gelişim Önerileri     (revizyon önerileri)
+ */
 export type ParticipantFeedback = {
   strengths: string[];
   improvements: string[];
   suggestions: string[];
 };
+
+/** Geri bildirim kartlarının kullanıcıya görünen başlıkları — tek doğruluk kaynağı. */
+export const PARTICIPANT_FEEDBACK_LABELS = {
+  strengths: "Güçlü Yönler",
+  improvements: "Gelişime Açık Yönler",
+  suggestions: "Gelişim Önerileri",
+} as const satisfies Record<keyof ParticipantFeedback, string>;
+
+/** Kartların altındaki kısa açıklamalar. */
+export const PARTICIPANT_FEEDBACK_HINTS = {
+  strengths: "Raporunuzda karşılanan kriterler.",
+  improvements: "Karşılanmayan kriterler ve hakem gerekçesi.",
+  suggestions: "Bir sonraki sürümde düzeltmeniz önerilen noktalar.",
+} as const satisfies Record<keyof ParticipantFeedback, string>;
 
 /** Rapor analiz çıktısının tam şeması; POST /api/evaluate-report bu JSON'u döndürür. */
 export type ReportEvaluation = {

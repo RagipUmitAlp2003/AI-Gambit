@@ -40,8 +40,21 @@ export const PERMISSIONS = {
   assign_judge: ["04"],
   /** Tıkanıklıkta yeniden atama, hatırlatma ve hata kuyruğu yönetimi. */
   coordinate_evaluation: ["04"],
-  /** Başvuru kabulünü kapatma, kararları dondurma ve sonuçları yayımlama. */
-  manage_competition_stage: ["04"],
+  /**
+   * Başvuru kabulünü açma/kapatma, kararları dondurma ve sonuçları yayımlama.
+   *
+   * Yarışmanın SAHİBİ Yarışma Yöneticisidir (01): kriterleri o çıkarır, o
+   * yayımlar ve başvuruya açık olup olmadığına o karar verir. Değerlendirme
+   * Yöneticisi (04) bu durumu yalnızca İZLER; süreç hızını yönetir, yarışmanın
+   * takvimini değiştirmez.
+   */
+  manage_competition_stage: ["01"],
+  /**
+   * Yarışmaya ÖNCELİKLİ işareti koyma/kaldırma — Değerlendirme Yöneticisinin
+   * operasyonel aksiyonu. Başvuru yığılan veya hakem değerlendirmesi geciken
+   * yarışmalar hakem panelinde öne çıkar. Karar değil, sıralama işaretidir.
+   */
+  flag_competition_priority: ["04"],
   /** Ayıklama (analiz) geçmişi. */
   read_extractions: ["01", "04"],
   /** Süreç zaman çizelgesi. Yarışmacı iç görüşmeyi görmez; kendi durumunu portalda izler. */
@@ -57,4 +70,54 @@ export function rolesFor(permission: Permission): RoleCode[] {
 /** Sunucu ve istemci tarafında aynı matristen okuyan saf kontrol. */
 export function can(account: Pick<AdminAccount, "roleCode"> | null | undefined, permission: Permission): boolean {
   return !!account && (PERMISSIONS[permission] as readonly string[]).includes(account.roleCode);
+}
+
+/**
+ * Bir başvurunun bu hesaba GÖSTERİLİP gösterilemeyeceği — saf karar.
+ *
+ * Yetkili uygulama noktası `workflow-db · applicationVisibility` içindeki SQL
+ * filtresidir (liste sorgusu hiç okumadığı satırı döndürmez). Bu işlev aynı
+ * kuralın test edilebilir ve okunabilir karşılığıdır; ikisi ayrışırsa
+ * regresyon testi kaynak üzerinden de uyarır.
+ *
+ *   03 Yarışmacı  yalnızca kendi başvurusu.
+ *   02 Hakem      YALNIZCA kendisine atanmış başvuru. Atanmamış dosya
+ *                 görünmez ve hakem dosyayı kendi üzerine alamaz; ilk atamayı
+ *                 Değerlendirme Yöneticisi (04) yapar.
+ *   04 Değerlendirme Yöneticisi  süreç takibi için hepsi (içerik ayrıca kısılır).
+ *   01 Yarışma Yöneticisi  yalnızca kendi yayımladığı profile bağlı başvurular.
+ *   00 Admin      hiçbiri; başvuru akışına erişmez.
+ */
+export function canViewApplication(
+  account: Pick<AdminAccount, "id" | "roleCode"> | null | undefined,
+  application: {
+    participantId: string;
+    assignedJudgeId: string | null;
+    /** Başvurunun bağlı olduğu profili hazırlayan yönetici. */
+    profileCreatedBy?: string | null;
+  },
+): boolean {
+  if (!account) return false;
+  switch (account.roleCode) {
+    case "03": return application.participantId === account.id;
+    case "02": return !!application.assignedJudgeId && application.assignedJudgeId === account.id;
+    case "04": return true;
+    case "01": return !!application.profileCreatedBy && application.profileCreatedBy === account.id;
+    default: return false;
+  }
+}
+
+/**
+ * Yayımlanmış bir kriter profilinin ÜZERİNE yazılabilir mi?
+ *
+ * `profileId` istemciden gelir ve kayıt "varsa güncelle" ile yazılır; kontrol
+ * olmadan bir yönetici başka bir yöneticinin profil kimliğini göndererek onun
+ * yayımlanmış kriter setini değiştirebilirdi. Yeni kayıt (sahip yok) serbesttir.
+ */
+export function canUpdateProfile(
+  actorId: string,
+  existingCreatedBy: string | null | undefined,
+): boolean {
+  if (!existingCreatedBy) return true;
+  return existingCreatedBy === actorId;
 }

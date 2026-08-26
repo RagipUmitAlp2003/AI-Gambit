@@ -15,7 +15,7 @@ Bu sistem belirli bir yarışma veya örnek PDF için kural listesi ezberlemez. 
 5. **Kapsam dışı bırakma:** Puan tabloları, ağırlıklar, cezalar, barajlar, puanlama sistemleri, saha/fiziksel aşama görevleri ve yalnızca kurul onayıyla verilen kararlar kriter yapılmaz; sayısı ve nedeni uyarı olarak raporlanır. Yalnızca yarışmanın PDF (rapor) aşaması kontrol edilir.
 6. **Kaynak bağı:** Her kriter PDF'nin 1 tabanlı gerçek sayfa sırasına ve özgün dilde birebir kısa alıntıya bağlanır.
 7. **Deterministik normalizasyon:** Boş ad/alıntı, tekrar, PDF sınırı dışındaki sayfa ve aşama değeri kodla denetlenir; sıralama ve kimlikler kararlı hâle getirilir.
-8. **İnsan düzenlemesi:** Yönetici kriterleri kaynak sayfasıyla görür; düzenler, ekler, pasifleştirir veya siler. Güven seviyesi, otomatik pasifleştirme veya "karar bekleyen" kuyruk yoktur; yayım kararı yöneticinindir.
+8. **İnsan düzenlemesi:** Yönetici kriterleri kaynak sayfasıyla görür; düzenler, ekler veya siler. Aktif/pasif anahtarı, güven seviyesi ve "karar bekleyen" kuyruk yoktur — listede kalan her kriter yayımlanır ve değerlendirmede kullanılır. Yayım kararı yöneticinindir ve yayın öncesinde onay kutusu ile ikinci bir kesinleştirme penceresi gösterilir.
 
 ## Rapor değerlendirmesinde aynı aşamalar
 

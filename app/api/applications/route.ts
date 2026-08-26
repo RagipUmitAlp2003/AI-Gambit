@@ -1,6 +1,14 @@
-import { COMPETITIONS } from "../../lib/competitions";
 import { handleError, json, jsonError, requirePermission, ValidationError } from "../../lib/admin-guard";
-import { competitionAcceptsApplications, createApplication, findLatestProfileForCompetition, listApplications, reportBucket } from "../../lib/workflow-db";
+import {
+  competitionAcceptsApplications,
+  createApplication,
+  findCompetitionWorkflow,
+  findLatestProfileForCompetition,
+  listApplications,
+  listOpenCompetitions,
+  reportBucket,
+} from "../../lib/workflow-db";
+import { COMPETITION_STATUS_LABELS } from "../../lib/workflow-types";
 import { recordAudit } from "../../lib/admin-db";
 
 const SYSTEM_UPLOAD_LIMIT = 50 * 1024 * 1024;
@@ -30,7 +38,16 @@ function readTeamMembers(form: FormData): string[] {
 export async function GET(request: Request): Promise<Response> {
   const auth = await requirePermission(request, "read_applications");
   if (!auth.ok) return auth.response;
-  try { return json({ applications: await listApplications(auth.account) }); }
+  try {
+    // `openCompetitions` yarışmacı portalının seçim listesini daraltır; başvuruya
+    // kapalı bir yarışma hiç seçilemez. Yetki kararı değildir — asıl kontrol
+    // POST içindeki `competitionAcceptsApplications` çağrısıdır.
+    const [applications, openCompetitions] = await Promise.all([
+      listApplications(auth.account),
+      listOpenCompetitions(),
+    ]);
+    return json({ applications, openCompetitions });
+  }
   catch (error) { return handleError(error); }
 }
 
@@ -45,9 +62,21 @@ export async function POST(request: Request): Promise<Response> {
     const teamName = requiredFormText(form, "teamName", "Takım adı", 120);
     const teamMembers = readTeamMembers(form);
     const file = form.get("file");
-    if (!COMPETITIONS.some((item) => item.name === competitionName)) return jsonError(400, "Listeden geçerli bir yarışma seçin.");
+    // Yarışma adının YETKİLİ kaynağı yayımlanmış profildir, koddaki sabit havuz
+    // değil: şartnameden çıkarılan ad (ör. bir festival adı) havuzda bulunmayabilir
+    // ve bu kontrol yayımlanmış yarışmayı başvuruya kapatıyordu.
+    if (!competitionName) return jsonError(400, "Başvuruya açık bir yarışma seçin.");
+    if (competitionName.length > 240) return jsonError(400, "Yarışma adı en fazla 240 karakter olabilir.");
     if (!await competitionAcceptsApplications(competitionName)) {
-      return jsonError(409, "Bu yarışma henüz başvuruya açık değil veya yayımlanmış kriter profili bulunmuyor.");
+      // Neyin eksik olduğu ayrı ayrı söylenir: "açık değil VEYA profil yok" ikilemi
+      // yarışmacıya ne yapacağını anlatmıyordu.
+      const workflow = await findCompetitionWorkflow(competitionName);
+      const reason = !workflow
+        ? "bu yarışma için henüz şartname kriterleri yayımlanmadı"
+        : !workflow.currentProfileId
+          ? "bu yarışmanın yayımlanmış kriter profili yok"
+          : `bu yarışmanın durumu “${COMPETITION_STATUS_LABELS[workflow.status] ?? workflow.status}”, başvuruya açık değil`;
+      return jsonError(409, `Başvuru alınamadı: ${reason}. Başvuruya açık yarışmalar seçim listesinde görünür.`);
     }
     if (!(file instanceof File)) return jsonError(400, "Başvuru PDF'i seçilmedi.");
     if (file.size <= 0) return jsonError(400, "Seçilen PDF boş görünüyor.");
@@ -59,7 +88,9 @@ export async function POST(request: Request): Promise<Response> {
     const profile = await findLatestProfileForCompetition(competitionName);
     if (!profile) return jsonError(409, "Bu yarışmanın yayımlanmış kriter profili bulunmuyor.");
     objectKey = `applications/${auth.account.id}/${crypto.randomUUID()}/${safeFileName(file.name)}`;
-    await reportBucket().put(objectKey, file.stream(), {
+    // Blob doğrudan verilir: `ReadableStream` ile R2 içerik uzunluğunu bilemediği
+    // için yükleme sessizce düşebiliyordu. `File` zaten bir `Blob`'tur.
+    await reportBucket().put(objectKey, file, {
       httpMetadata: { contentType: "application/pdf" },
       customMetadata: { participantId: auth.account.id, competition: competitionName.slice(0, 160) },
     });

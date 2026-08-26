@@ -12,6 +12,12 @@ export type UsageSample = {
   durationMs: number;
   cached: boolean;
   error: boolean;
+  /**
+   * Bu işlem için modele GERÇEKTEN gönderilen `generateContent` isteği sayısı.
+   * Önbellek isabetinde 0, normal analizde 1. Sayaç sabit yazılmaz: "tek çağrı"
+   * denip birden çok istek gönderildiği durumun ölçümde görünmesi gerekir.
+   */
+  apiCalls: number;
 };
 
 type UsageTotals = {
@@ -23,6 +29,8 @@ type UsageTotals = {
   outputTokens: number;
   totalTokens: number;
   totalDurationMs: number;
+  /** Modele gönderilen toplam üretim isteği; requestCount'tan farklı olabilir. */
+  generationCalls: number;
 };
 
 const globalState = globalThis as unknown as { __kriterUsageTotals?: UsageTotals };
@@ -38,6 +46,7 @@ function totals(): UsageTotals {
       outputTokens: 0,
       totalTokens: 0,
       totalDurationMs: 0,
+      generationCalls: 0,
     };
   }
   return globalState.__kriterUsageTotals;
@@ -52,6 +61,7 @@ export function recordUsage(sample: UsageSample) {
   current.outputTokens += sample.outputTokens;
   current.totalTokens += sample.totalTokens;
   current.totalDurationMs += sample.durationMs;
+  current.generationCalls += Number.isFinite(sample.apiCalls) ? sample.apiCalls : 0;
   // Yapılandırılmış tek satır: harici log toplama için ayrıştırılabilir.
   console.log(`[usage] ${JSON.stringify(sample)}`);
 }
@@ -64,5 +74,7 @@ export function usageSnapshot() {
     averageDurationMs: current.requestCount ? Math.round(current.totalDurationMs / current.requestCount) : 0,
     averageTokensPerAnalysis: analyzed > 0 ? Math.round(current.totalTokens / analyzed) : 0,
     errorRate: current.requestCount ? Math.round((current.errorCount / current.requestCount) * 1000) / 10 : 0,
+    /** İşlem başına ortalama model çağrısı. Tek çağrı prensibinde 1'i aşmamalıdır. */
+    callsPerAnalysis: analyzed > 0 ? Math.round((current.generationCalls / analyzed) * 100) / 100 : 0,
   };
 }

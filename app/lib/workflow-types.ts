@@ -80,6 +80,17 @@ export type CompetitionWorkflow = {
   currentProfileId: string | null;
   decisionsLocked: boolean;
   resultsPublishedAt: string | null;
+  /**
+   * Değerlendirme Yöneticisi bu yarışmayı ÖNCELİKLİ işaretledi mi?
+   *
+   * Başvuru yığılan veya hakem değerlendirmesi geciken yarışmalar için
+   * kullanılır: hakem panelinde 🔥 rozetiyle görünür ve listenin başında
+   * sıralanır. Karar değil, operasyonel bir sıralama işaretidir.
+   */
+  isPriority: boolean;
+  /** Önceliğin gerekçesi; hakeme rozetin yanında gösterilir. */
+  priorityNote: string;
+  prioritySetAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -205,6 +216,35 @@ export type OperationsSummary = {
   completed: number;
   failed: number;
   completionRate: number;
+};
+
+/**
+ * Değerlendirme Yöneticisinin (04) yarışma bazlı izleme satırı.
+ *
+ * GİZLİLİK: yalnızca sayı ve durum taşır. Katılımcı adı, ekip üyesi, dosya adı
+ * ve rapor içeriği bu tipte HİÇ bulunmaz — bu rol raporları okumaz.
+ */
+export type CompetitionOverview = {
+  competitionId: string;
+  competitionKey: string;
+  competitionName: string;
+  category: string;
+  /** Kriterlerin çıkarıldığı şartname dosyasının adı. */
+  sourceDocumentName: string;
+  criteriaCount: number;
+  status: CompetitionStatus;
+  /** Başvuruya açık mı? Bu rol yalnızca İZLER, değiştiremez. */
+  acceptingApplications: boolean;
+  isPriority: boolean;
+  priorityNote: string;
+  total: number;
+  evaluated: number;
+  accepted: number;
+  rejected: number;
+  revision: number;
+  pending: number;
+  /** Hakem atanamamış başvurular; normalde 0 olmalıdır. */
+  unassigned: number;
 };
 
 export type JudgeWorkload = {

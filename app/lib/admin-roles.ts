@@ -8,7 +8,14 @@ export type RoleDefinition = {
   area: string;
   /** Rolün karar sınırı: bu rolün YAPAMADIĞI şey. Ekranlarda uyarı olarak gösterilir. */
   boundary: string;
-  /** Moderatör bu rolü bir hesaba atayabilir mi? Yarışmacı kendi kaydını açar. */
+  /**
+   * Admin (00) bu rolü bir hesaba atayabilir mi?
+   *
+   * Yalnızca 01, 02 ve 04 atanabilir. Yarışmacı (03) kendi kaydını açar; yeni
+   * Admin (00) hesabı ise arayüzden de API'den de açılamaz — ilk Admin
+   * kurulum ucuyla (POST /api/admin/bootstrap) bir kez oluşturulur ve
+   * "son aktif 00" koruması onu kaldırılmaktan korur.
+   */
   assignable: boolean;
 };
 
@@ -19,7 +26,7 @@ export type RoleDefinition = {
  * kendi içinde sabitlemez. Kodlar (00-04) veri tabanında sabittir.
  *
  * Süreçteki yerleri:
- *   00 yalnızca yönetici ataması yapar: hesap açar, rol atar/kaldırır. Akışa katılmaz.
+ *   00 yalnızca yetkili hesaplarını yönetir: 01/02/04 hesabı açar, rol atar/kaldırır. Akışa katılmaz.
  *   01 değerlendirme altyapısını hazırlar ve yayımlar.
  *   03 başvurur → 04 hakemi atar → 02 AI ön değerlendirmesini başlatır ve nihai kararı verir.
  *   04 hakem atamasını, iş yükünü, hata ve yayın akışını yönetir; teknik karar vermez.
@@ -29,10 +36,10 @@ export const ROLES: RoleDefinition[] = [
     code: "00",
     title: "Genel Yönetici / Admin",
     shortTitle: "Admin",
-    summary: "Yalnızca yönetici ataması yapar: personel hesabı açar, rol atar, rol kaldırır ve atama geçmişini izler.",
+    summary: "Yalnızca yetkili hesaplarını yönetir: 01, 02 ve 04 rollerinde hesap açar, rol değiştirir ve hesabı pasife alır.",
     area: "Yönetici atama paneli",
-    boundary: "Kriter hazırlayamaz, rapor değerlendiremez, hakem atayamaz ve yarışma sürecine müdahale edemez; her atama denetim izine yazılır.",
-    assignable: true,
+    boundary: "Yeni Admin ve Yarışmacı hesabı açamaz; kriter hazırlayamaz, rapor değerlendiremez, hakem atayamaz ve yarışma sürecine müdahale edemez. Her atama denetim izine yazılır.",
+    assignable: false,
   },
   {
     code: "01",
@@ -74,7 +81,13 @@ export const ROLES: RoleDefinition[] = [
 
 export const ROLE_CODES: RoleCode[] = ROLES.map((role) => role.code);
 
-/** Admin'in (00) bir hesaba atayabileceği roller. Yarışmacı kendi kaydını açar. */
+/**
+ * Admin'in (00) bir hesaba atayabileceği roller: yalnızca 01, 02 ve 04.
+ *
+ * Admin ne yeni bir Admin (00) ne de Yarışmacı (03) hesabı açabilir; bu kısıt
+ * arayüzde değil, hesap uçlarının girdi doğrulamasında (admin-guard ·
+ * assertRoleCode) uygulanır ve istemciden gelen bir alanla atlatılamaz.
+ */
 export const ASSIGNABLE_ROLE_CODES: RoleCode[] = ROLES.filter((role) => role.assignable).map((role) => role.code);
 
 /** Yarışmacı rolü; başvuru sahibi kimliğidir, yönetici hesabı değildir. */

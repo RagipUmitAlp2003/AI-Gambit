@@ -8,11 +8,8 @@ import { workflowApi } from "../lib/workflow-client";
 import {
   APPLICATION_STATUS_LABELS,
   COMPETITION_STATUS_LABELS,
-  PROFILE_STATUS_LABELS,
   type CompetitionApplication,
-  type CompetitionProfile,
-  type CompetitionStatus,
-  type CompetitionWorkflow,
+  type CompetitionOverview,
   type JudgeWorkload,
   type OperationsSummary,
   type TimelineEntry,
@@ -21,19 +18,24 @@ import {
 /**
  * Aşama E · Değerlendirme Yöneticisi panosu (Rol 04).
  *
- * Bu rol akışta belgeyi sırayla teslim alan kişi değildir; süreci üstten izler.
- * Kriter veya nihai karar değiştirilemez; ilk hakem ataması, yeniden atama,
- * hatırlatma, hata kuyruğu ve sonuç yayın aşaması yönetilebilir.
- * Yarışmacı PDF'i ve kanıt metinleri bu role hiç gönderilmez (bkz. workflow-db
- * içindeki `redactEvaluation`).
+ * Bu rol yarışmacı raporlarını TEK TEK OKUMAZ; sürecin hızını, tamamlanma
+ * oranlarını ve darboğazları izler. Yarışmacı PDF'i, katılımcı adı ve kanıt
+ * metinleri bu role hiç gönderilmez (bkz. workflow-db · `redactEvaluation` ve
+ * "operations" görünümü).
+ *
+ * YETKİ SINIRI:
+ *   İzler   şartname/kriter özeti, başvuru durumu (Açık/Kapalı), sayaçlar.
+ *   Yapar   ÖNCELİKLİ işareti, hakem yeniden atama, hatırlatma, hata kuyruğu.
+ *   Yapamaz kriter değiştirme, nihai karar, başvuru durumunu açma/kapatma
+ *           (o yetki yarışmanın sahibi Yarışma Yöneticisindedir).
  */
 export default function OperationsPanel({ canInitialAssign = false }: { canInitialAssign?: boolean }) {
   const [applications, setApplications] = useState<CompetitionApplication[]>([]);
-  const [profiles, setProfiles] = useState<CompetitionProfile[]>([]);
+  const [overview, setOverview] = useState<CompetitionOverview[]>([]);
   const [summary, setSummary] = useState<OperationsSummary | null>(null);
   const [recent, setRecent] = useState<TimelineEntry[]>([]);
   const [judges, setJudges] = useState<JudgeWorkload[]>([]);
-  const [competitions, setCompetitions] = useState<CompetitionWorkflow[]>([]);
+  const [priorityNote, setPriorityNote] = useState<Record<string, string>>({});
   const [judgeChoice, setJudgeChoice] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState("");
   const [notice, setNotice] = useState("");
@@ -42,14 +44,13 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
   const [loading, setLoading] = useState(true);
 
   function load() {
-    return Promise.all([workflowApi.applications(), workflowApi.profiles(), workflowApi.operations()])
-      .then(([applicationResult, profileResult, operationsResult]) => {
+    return Promise.all([workflowApi.applications(), workflowApi.operations()])
+      .then(([applicationResult, operationsResult]) => {
         setApplications(applicationResult.applications);
-        setProfiles(profileResult.profiles);
         setSummary(operationsResult.summary);
         setRecent(operationsResult.recent);
         setJudges(operationsResult.judges);
-        setCompetitions(operationsResult.competitions);
+        setOverview(operationsResult.overview ?? []);
         setError("");
       })
       .catch((caught) => setError(caught instanceof Error ? caught.message : "Süreç bilgileri yüklenemedi."))
@@ -78,66 +79,89 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
     finally { setBusyId(""); }
   }
 
-  async function advanceCompetition(competition: CompetitionWorkflow) {
-    const next: Partial<Record<CompetitionStatus, CompetitionStatus>> = {
-      open: "applications_closed",
-      applications_closed: "evaluating",
-      evaluating: "decisions_frozen",
-      decisions_frozen: "results_published",
-      results_published: "archived",
-    };
-    const nextStatus = next[competition.status];
-    if (!nextStatus) return;
-    setBusyId(competition.id);
+  /**
+   * ÖNCELİKLİ işareti — bu rolün tek yarışma seviyesi aksiyonu.
+   *
+   * Yarışmanın süreç durumunu (başvuruya açık/kapalı) DEĞİŞTİRMEZ; o yetki
+   * Yarışma Yöneticisindedir. Buradaki işaret yalnızca hakem panelinde
+   * yarışmayı öne çıkarır ve listenin başına alır.
+   */
+  async function togglePriority(item: CompetitionOverview) {
+    setBusyId(item.competitionId);
     setError("");
+    setNotice("");
     try {
-      await workflowApi.changeCompetitionStage(competition.id, nextStatus, "Operasyon panosundan süreç ilerletildi");
-      setNotice("Yarışma süreci güncellendi.");
+      const next = !item.isPriority;
+      await workflowApi.setCompetitionPriority(item.competitionId, next, priorityNote[item.competitionId] ?? "");
+      setNotice(next
+        ? `“${item.competitionName}” ÖNCELİKLİ işaretlendi; hakem panelinde öne çıkacak.`
+        : `“${item.competitionName}” önceliği kaldırıldı.`);
+      setPriorityNote((current) => ({ ...current, [item.competitionId]: "" }));
       await load();
-    } catch (caught) { setError(caught instanceof Error ? caught.message : "Yarışma süreci güncellenemedi."); }
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "Öncelik güncellenemedi."); }
     finally { setBusyId(""); }
   }
 
   const filtered = useMemo(() => {
     const search = fold(query.trim());
-    if (!search) return applications;
-    return applications.filter((item) => fold(`${item.teamName} ${item.competitionName}`).includes(search));
+    const list = search
+      ? applications.filter((item) => fold(`${item.teamName} ${item.competitionName}`).includes(search))
+      : applications;
+    // Atama bekleyenler en üstte: süreç yalnızca bu adımda tıkanıyor ve
+    // atanmayan başvuru hiçbir hakem panelinde görünmüyor.
+    return [...list].sort((left, right) =>
+      Number(Boolean(left.assignedJudgeId)) - Number(Boolean(right.assignedJudgeId)));
   }, [applications, query]);
 
-  const projectStats = useMemo(() => {
-    const groups = new Map<string, CompetitionApplication[]>();
-    for (const application of applications) groups.set(application.competitionName, [...(groups.get(application.competitionName) ?? []), application]);
-    return [...groups.entries()].map(([competitionName, items]) => ({
-      competitionName,
-      total: items.length,
-      accepted: items.filter((item) => item.outcome === "accepted").length,
-      rejected: items.filter((item) => item.outcome === "rejected").length,
-      revision: items.filter((item) => item.outcome === "revision_required").length,
-    })).sort((left, right) => left.competitionName.localeCompare(right.competitionName, "tr"));
-  }, [applications]);
-
   /** Operasyonel uyarılar: müdahale gerektiren durumlar. */
+  /**
+   * Hiç hakem atanmamış başvurular.
+   *
+   * Sistem başvuru alındığında en az yüklü hakeme otomatik atar; burada bir
+   * kayıt görünüyorsa atama yapılamamıştır (aktif hakem yok ya da hata).
+   * Hakem yalnızca kendisine ATANMIŞ dosyaları görür, bu yüzden atanmamış
+   * başvuru hiçbir panelde görünmez ve süreç sessizce durur.
+   */
+  const unassigned = useMemo(
+    () => applications.filter((item) => !item.assignedJudgeId && item.status !== "completed"),
+    [applications],
+  );
+
   const alerts = useMemo(() => {
     const list: string[] = [];
     const failed = applications.filter((item) => item.status === "analysis_failed").length;
     const stuck = applications.filter((item) => item.status === "analyzing").length;
-
-    // Hakem onaylı profili olmayan yarışmalarda AI ön değerlendirmesi hiç başlatılamaz;
-    // başvuru kuyrukta sessizce bekler. Bu, operasyonun görmesi gereken tıkanmadır.
-    const approvedKeys = new Set(profiles.filter((item) => item.status === "approved").map((item) => item.competitionKey));
-    const blocked = new Map<string, number>();
-    for (const application of applications) {
-      if (application.status !== "submitted" || approvedKeys.has(application.competitionKey)) continue;
-      blocked.set(application.competitionName, (blocked.get(application.competitionName) ?? 0) + 1);
+    const waiting = applications.filter((item) => !item.assignedJudgeId && item.status !== "completed").length;
+    if (waiting) {
+      // Normalde başvuru alındığı anda sistem otomatik atar; burada bir kayıt
+      // görünüyorsa atama YAPILAMAMIŞTIR (aktif hakem yok ya da hata oldu).
+      list.push(
+        `${waiting} başvuruya hakem atanamadı. Sistem başvuru alındığında en az yüklü hakeme otomatik atar; `
+        + "atama yapılamadıysa aktif Hakem (02) hesabı olmayabilir. Bu raporlar hiçbir hakem panelinde görünmez — "
+        + "aşağıdaki tablodan elle hakem seçip atayın.",
+      );
     }
-    for (const [competition, count] of blocked) {
-      list.push(`${competition}: yayımlanmış profil olmadığı için ${count} başvuru başlatılamıyor. Yarışma Yöneticisi kriter profilini yayımlamalı.`);
+
+    // Yayımlanmış kriter profili olmayan yarışmada AI ön değerlendirmesi hiç
+    // başlatılamaz; başvuru kuyrukta sessizce bekler. Operasyonun görmesi
+    // gereken tıkanma budur.
+    for (const item of overview) {
+      if (item.criteriaCount === 0 && item.total > 0) {
+        list.push(`${item.competitionName}: yayımlanmış kriter profili olmadığı için ${item.total} başvuru başlatılamıyor. Yarışma Yöneticisi kriter profilini yayımlamalı.`);
+      }
+    }
+
+    // Yığılma: değerlendirilmeyi bekleyen başvurusu çok olan yarışma önceliğe aday.
+    for (const item of overview) {
+      if (!item.isPriority && item.pending >= 5) {
+        list.push(`${item.competitionName}: ${item.pending} başvuru değerlendirme bekliyor. ÖNCELİKLİ işaretleyerek hakem panelinde öne çıkarabilirsiniz.`);
+      }
     }
 
     if (failed) list.push(`${failed} başvuruda AI analizi başarısız oldu; yeniden analiz kuyruğuna alınabilir.`);
     if (stuck) list.push(`${stuck} başvuru AI ön değerlendirmesinde bekliyor.`);
     return list;
-  }, [applications, profiles]);
+  }, [applications, overview]);
 
   if (loading) return <p className="page-note">Süreç görünümü yükleniyor…</p>;
   return (
@@ -153,6 +177,7 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
       {summary ? (
         <div className="operations-summary">
           <div><strong>{summary.total}</strong><span>toplam başvuru</span></div>
+          <div className={unassigned.length ? "summary-warning" : ""}><strong>{unassigned.length}</strong><span>hakem ataması bekliyor</span></div>
           <div><strong>{summary.aiPending}</strong><span>AI analizi bekliyor</span></div>
           <div><strong>{summary.aiProcessing}</strong><span>AI analizinde</span></div>
           <div><strong>{summary.aiCompleted}</strong><span>AI analizi tamamlandı</span></div>
@@ -169,27 +194,95 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
         {alerts.length ? <ul>{alerts.map((item) => <li key={item}>{item}</li>)}</ul> : <p className="page-note">Bekleyen operasyonel uyarı yok.</p>}
       </section>
 
-      <section className="operations-control-grid" aria-label="Yarışma ve hakem operasyonları">
-        <div className="operations-stage-list">
-          <div><h2>Yarışma aşamaları</h2><p>Başvuruyu kapatma, kararları dondurma ve sonuçları yayımlama sırasını buradan yönetin.</p></div>
-          {competitions.map((competition) => {
-            const nextLabels: Partial<Record<CompetitionStatus, string>> = {
-              open: "Başvuruları kapat",
-              applications_closed: "Değerlendirmeyi başlat",
-              evaluating: "Kararları dondur",
-              decisions_frozen: "Sonuçları yayımla",
-              results_published: "Arşivle",
-            };
-            const action = nextLabels[competition.status];
+      {/*
+        Şartname / kriter özeti — Problem 4 · 1.A.1.
+        Yarışma adı, ayıklanan kriter sayısı ve BAŞVURU DURUMU salt okunur
+        listelenir. Durumu değiştirme yetkisi Yarışma Yöneticisindedir; bu rol
+        yalnızca izler. Tek aksiyon ÖNCELİKLİ işaretidir.
+      */}
+      <section className="competition-overview" aria-labelledby="competition-overview-title">
+        <div>
+          <h2 id="competition-overview-title">Şartname ve kriter özeti</h2>
+          <p>
+            Kriterleri çıkarılmış yarışmalar, ayıklanan kriter sayısı ve başvuru durumu.
+            Başvuru durumunu Yarışma Yöneticisi belirler; burada yalnızca izlenir.
+            Yığılan veya geciken yarışmaya <strong>ÖNCELİKLİ</strong> işareti koyabilirsiniz.
+          </p>
+        </div>
+        <div className="competition-overview-list">
+          {overview.map((item) => {
+            const share = summary?.total ? Math.round((item.total / summary.total) * 100) : 0;
             return (
-              <article key={competition.id}>
-                <div><strong>{competition.competitionName}</strong><small>{COMPETITION_STATUS_LABELS[competition.status]}</small></div>
-                {action ? <button type="button" className="secondary-button" disabled={busyId === competition.id} onClick={() => advanceCompetition(competition)}>{action}</button> : null}
+              <article key={item.competitionId} className={item.isPriority ? "priority" : ""}>
+                <div className="competition-overview-head">
+                  <div>
+                    <strong>
+                      {item.isPriority ? <span className="priority-badge" aria-label="Öncelikli">🔥 ÖNCELİKLİ</span> : null}
+                      {item.competitionName}
+                    </strong>
+                    <small>
+                      {item.sourceDocumentName || "Kaynak şartname bilinmiyor"}
+                      {item.category ? ` · ${item.category}` : ""}
+                    </small>
+                  </div>
+                  <div className="competition-overview-tags">
+                    <span className="status-chip neutral">{item.criteriaCount} kriter ayıklandı</span>
+                    <span className={`status-chip ${item.acceptingApplications ? "success" : "neutral"}`}>
+                      Başvuru: {item.acceptingApplications ? "Açık" : "Kapalı"}
+                    </span>
+                    <span className="status-chip neutral">{COMPETITION_STATUS_LABELS[item.status]}</span>
+                  </div>
+                </div>
+
+                <div className="competition-overview-counts">
+                  <div><strong>{item.total}</strong><span>toplam başvuru</span></div>
+                  <div><strong>{item.evaluated}</strong><span>değerlendirilen</span></div>
+                  <div><strong>{item.accepted}</strong><span>onaylanan</span></div>
+                  <div><strong>{item.rejected}</strong><span>reddedilen</span></div>
+                  <div><strong>{item.pending}</strong><span>bekleyen</span></div>
+                  {item.revision ? <div><strong>{item.revision}</strong><span>düzeltme istendi</span></div> : null}
+                  {item.unassigned ? <div className="summary-warning"><strong>{item.unassigned}</strong><span>hakem atanamadı</span></div> : null}
+                </div>
+
+                {/* Yoğunluk: bu yarışmanın tüm başvurular içindeki payı. */}
+                <div className="competition-density" title={`${item.total} başvuru · tüm başvuruların %${share}'i`}>
+                  <div className="competition-density-bar"><span style={{ width: `${share}%` }} /></div>
+                  <small>Başvuru yoğunluğu: %{share}</small>
+                </div>
+
+                {item.isPriority && item.priorityNote ? (
+                  <p className="priority-note">Öncelik gerekçesi: {item.priorityNote}</p>
+                ) : null}
+
+                <div className="competition-overview-actions">
+                  {!item.isPriority ? (
+                    <input
+                      value={priorityNote[item.competitionId] ?? ""}
+                      maxLength={300}
+                      placeholder="Öncelik gerekçesi (isteğe bağlı)"
+                      aria-label={`${item.competitionName} öncelik gerekçesi`}
+                      onChange={(event) => setPriorityNote((current) => ({ ...current, [item.competitionId]: event.target.value }))}
+                    />
+                  ) : null}
+                  <button
+                    type="button"
+                    className={item.isPriority ? "text-button" : "secondary-button"}
+                    disabled={busyId === item.competitionId}
+                    onClick={() => togglePriority(item)}
+                  >
+                    {busyId === item.competitionId
+                      ? "Güncelleniyor…"
+                      : item.isPriority ? "Önceliği kaldır" : "🔥 Öncelikli işaretle"}
+                  </button>
+                </div>
               </article>
             );
           })}
-          {!competitions.length ? <p className="participant-empty">Yayımlanmış yarışma akışı yok.</p> : null}
+          {!overview.length ? <p className="participant-empty">Kriterleri çıkarılmış yarışma yok.</p> : null}
         </div>
+      </section>
+
+      <section className="operations-control-grid" aria-label="Hakem iş yükü">
         <div className="judge-workloads">
           <div><h2>Hakem iş yükü</h2><p>Geciken veya dengesiz kuyrukları görün; mevcut atamaları gerektiğinde başka hakeme aktarın.</p></div>
           {judges.map((judge) => (
@@ -202,14 +295,6 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
         </div>
       </section>
 
-      <section className="operations-projects">
-        <div><h2>Yarışma özeti</h2><p>Her yarışmanın başvuru ve sonuç dağılımı.</p></div>
-        <div>
-          {projectStats.map((item) => <article key={item.competitionName}><strong>{item.competitionName}</strong><span>{item.total} başvuru</span><small>{item.accepted} kabul · {item.rejected} ret · {item.revision} düzeltme</small></article>)}
-          {!projectStats.length ? <p className="participant-empty">Henüz başvuru yok.</p> : null}
-        </div>
-      </section>
-
       <label className="search-box operations-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Takım veya yarışma ara" /></label>
       <div className="operations-table" role="table" aria-label="Başvuru durumu">
         <div className="operations-table-head operations-table-head-actions" role="row"><span>Takım / yarışma</span><span>Durum / sonuç</span><span>Hakem</span><span>Operasyon</span></div>
@@ -217,7 +302,13 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
           const mayAssign = canInitialAssign || Boolean(item.assignedJudgeId);
           return (
             <div key={item.id} className="operations-table-row operations-table-row-actions" role="row">
-              <span><strong>{item.teamName}</strong><small>{item.competitionName} · {formatDateTime(item.updatedAt)}</small></span>
+              <span>
+                <strong>{item.teamName}</strong>
+                <small>{item.competitionName} · {formatDateTime(item.updatedAt)}</small>
+                {!item.assignedJudgeId && item.status !== "completed"
+                  ? <small className="assignment-pending">Hakem atanamadı · hakem panelinde görünmüyor</small>
+                  : null}
+              </span>
               <span><em className={`application-status ${item.status}`}>{APPLICATION_STATUS_LABELS[item.status]}</em><small>{item.outcome === "accepted" ? "Kabul edildi" : item.outcome === "rejected" ? "Reddedildi" : item.outcome === "revision_required" ? "Düzeltme istendi" : "Nihai karar bekliyor"}</small></span>
               <span>
                 <select
@@ -260,19 +351,6 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
         </ol>
       </section>
 
-      <section className="published-profile-list">
-        <div><h2>Değerlendirme profilleri</h2><p>Yarışma Yöneticisi tarafından yayımlanan yürürlükteki kriter profilleri.</p></div>
-        {profiles.map((item) => (
-          <details key={item.id}>
-            <summary>
-              <div><strong>{item.competitionName}</strong><span>{item.sourceDocumentName} · {item.profile.criteria.length} kriter · {PROFILE_STATUS_LABELS[item.status]}</span></div>
-              <small>{formatDateTime(item.updatedAt)}</small>
-            </summary>
-            <ul>{item.profile.criteria.map((criterion) => <li key={criterion.id}><strong>{criterion.name}</strong><span>{criterion.active ? "Etkin" : "Pasif"}</span></li>)}</ul>
-          </details>
-        ))}
-        {!profiles.length ? <p className="participant-empty">Yürürlükte profil yok.</p> : null}
-      </section>
     </section>
   );
 }

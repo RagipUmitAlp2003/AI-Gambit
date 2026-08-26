@@ -256,6 +256,16 @@
 .application-outcome.revision_required { color: var(--amber); background: var(--amber-soft); }
 .participant-outcome-note { margin: 14px 0 0; padding: 12px 14px; border-radius: 12px; background: #f4f8f8; color: var(--ink-soft); font-size: 11px; line-height: 1.6; }
 .application-wait-note { margin-top: 12px; }
+.participant-rejection { margin: 14px 0 0; padding: 14px 16px; border: 1px solid #d6a6a1; border-left-width: 3px; border-radius: 12px; background: var(--danger-soft); }
+.participant-rejection strong { display: block; color: var(--danger); font-size: 12px; }
+.participant-rejection p { margin: 7px 0 0; color: var(--ink); font-size: 11px; line-height: 1.65; white-space: pre-wrap; }
+.participant-rejection small { display: block; margin-top: 9px; color: var(--muted); font-size: 10px; }
+.participant-submit-row { display: grid; gap: 8px; justify-items: start; }
+.participant-submit-hint { display: block; color: var(--danger); font-size: 10.5px; }
+/* Hata formun dibinde de durur: sayfanın tepesindeki şerit uzun formda görünmüyordu. */
+.participant-submit-error { align-items: flex-start; flex-direction: column; gap: 4px; width: 100%; margin: 4px 0 0; padding: 13px 15px; border: 1px solid #d6a6a1; border-left-width: 3px; border-radius: 12px; font-size: 11px; }
+.participant-submit-error strong { font-size: 12px; }
+.participant-submit-error span { color: var(--ink); line-height: 1.6; }
 .participant-empty { margin: 0; padding: 28px 2px; color: var(--muted); }
 .participant-empty strong { color: var(--ink); font-size: 13px; }
 .participant-empty p { margin: 5px 0 0; font-size: 11px; }
@@ -307,7 +317,14 @@
 .history-workspace > header { max-width: 760px; }
 .history-workspace h1 { margin: 8px 0 10px; font-size: clamp(30px,4vw,46px); letter-spacing: -.035em; }
 .history-workspace > header p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+/* Kriter Geçmişi tek ekran; iki liste sekmeyle ayrılır. */
+.history-tabs { display: flex; gap: 6px; margin-top: 26px; border-bottom: 1px solid var(--line); }
+.history-tabs button { display: inline-flex; align-items: center; gap: 7px; padding: 10px 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font: inherit; font-size: 11px; font-weight: 800; }
+.history-tabs button.active { border-bottom-color: var(--teal); color: var(--ink); }
+.history-tabs button span { padding: 2px 7px; border-radius: 999px; background: #eef6f5; color: var(--ink-soft); font-size: 9.5px; }
 .history-search { max-width: 440px; margin: 28px 0 18px; }
+.history-search { margin-top: 18px; }
+.history-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; }
 .history-list { border-top: 1px solid var(--line); }
 .history-list details, .history-list > article { border-bottom: 1px solid var(--line); }
 .history-list summary, .history-list > article { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 18px 2px; }
@@ -652,7 +669,6 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 /* Dört aşamalı kriter modeli: zorunlu / diğer / pasif rozetleri (soluk gösterim yok). */
 .criterion-value.required { color: #7a2e2e; background: #f9e5e5; }
 .criterion-value.other { color: var(--teal-deep); background: #dff2ef; }
-.criterion-value.passive { color: var(--ink-soft); background: #e6edef; border: 1px dashed #aebdc2; }
 .type-mark.stage-1 { background: #4f79a1; }
 .type-mark.stage-2 { background: #7c6599; }
 .type-mark.stage-3 { background: #756c2f; }
@@ -670,8 +686,88 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 .ledger-group-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding-bottom: 10px; }
 .ledger-group-heading h3 { margin: 0; font-size: 15px; letter-spacing: -.01em; }
 .ledger-group-heading span { color: var(--muted); font-size: 11.5px; }
-.ledger-tools.three-col { grid-template-columns: minmax(0,1fr) 220px 170px; }
+.ledger-tools.two-col { grid-template-columns: minmax(0,1fr) 220px; }
 .add-criterion-group { display: flex; flex-wrap: wrap; gap: 10px; }
+/* Açık olan ekleme düğmesi hangi formun görüneceğini belli eder. */
+.add-criterion-button.active { border-color: var(--teal); background: #eef6f5; }
+/* Kriter ekleme formu: tür düğmeyle seçilir, form içinde değiştirilemez. */
+.criterion-draft { display: grid; gap: 14px; margin: 0 0 18px; padding: 18px 20px; border: 1px solid var(--line); border-left-width: 3px; border-radius: var(--radius-md); background: var(--canvas); }
+.criterion-draft.required { border-left-color: var(--danger); }
+.criterion-draft.other { border-left-color: var(--amber); }
+.criterion-draft-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 10px; }
+.criterion-draft-head strong { font-size: 13px; }
+.criterion-draft-head span { color: var(--muted); font-size: 10px; font-weight: 700; }
+.criterion-draft textarea { min-height: 74px; }
+.criterion-draft-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+/* Kaynak sayfa bilgi değil bağlantıdır; metin içinde ayırt edilebilir dursun. */
+.source-page-link { color: var(--teal); text-decoration: underline; text-underline-offset: 2px; }
+.source-page-link:hover { color: var(--ink); }
+/* Atanmamış başvuru: sürecin tek sessiz tıkanma noktası. */
+.assignment-pending { color: var(--danger) !important; font-weight: 700; }
+
+/* --- Değerlendirme Yöneticisi · yarışma izleme ve öncelik --- */
+.competition-overview { margin-top: 26px; }
+.competition-overview > div:first-child h2 { margin: 0 0 4px; font-size: 15px; }
+.competition-overview > div:first-child p { margin: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.competition-overview-list { display: grid; gap: 14px; }
+.competition-overview-list > article { display: grid; gap: 12px; padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); }
+.competition-overview-list > article.priority { border-color: #d6a6a1; border-left-width: 3px; background: linear-gradient(0deg, var(--paper), var(--danger-soft) 320%); }
+.competition-overview-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.competition-overview-head strong { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; }
+.competition-overview-head small { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; }
+.competition-overview-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.competition-overview-counts { display: grid; grid-template-columns: repeat(auto-fit,minmax(96px,1fr)); gap: 10px; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.competition-overview-counts > div { display: grid; gap: 2px; }
+.competition-overview-counts strong { font-size: 17px; }
+.competition-overview-counts span { color: var(--muted); font-size: 10px; }
+.competition-overview-counts .summary-warning strong { color: var(--danger); }
+.competition-density { display: grid; gap: 5px; }
+.competition-density-bar { height: 6px; border-radius: 999px; background: #e6edef; overflow: hidden; }
+.competition-density-bar span { display: block; height: 100%; border-radius: 999px; background: var(--teal); }
+.competition-density small { color: var(--muted); font-size: 10px; }
+.competition-overview-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.competition-overview-actions input { flex: 1 1 220px; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); font: inherit; font-size: 11px; }
+/* 🔥 Öncelik rozeti: hakem listesinde ve yönetici ekranında aynı görünür. */
+.priority-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 999px; background: var(--danger-soft); color: var(--danger); font-size: 9.5px; font-weight: 800; font-style: normal; letter-spacing: .04em; }
+.priority-note, .priority-reason { margin: 0; color: var(--danger); font-size: 10.5px; line-height: 1.5; }
+.eval-competition-list button.priority { border-left: 3px solid var(--danger); background: var(--danger-soft); }
+.eval-competition-list button.priority.active { background: #f7dedb; }
+
+/* --- Yarışma Yöneticisi · başvuru durumu --- */
+.stage-panel { margin-top: 26px; padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); }
+.stage-panel > header h2 { margin: 6px 0 6px; font-size: 15px; }
+.stage-panel > header p { margin: 0 0 14px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.stage-panel-list { display: grid; gap: 10px; }
+.stage-panel-list > article { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 0; border-top: 1px solid var(--line); }
+.stage-panel-list > article > div:first-child { display: grid; gap: 5px; min-width: 0; }
+.stage-panel-list strong { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; }
+.stage-panel-list small { color: var(--muted); font-size: 10.5px; line-height: 1.5; }
+.stage-panel-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* --- Hakem · dört aşamalı kontrol şeridi (yeşil/sarı/kırmızı ikon) --- */
+.eval-stage-head { display: flex; align-items: flex-start; gap: 10px; }
+.eval-stage-head > div { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.eval-stage-order { color: var(--muted); font-size: 9.5px; font-weight: 700; letter-spacing: .04em; }
+.eval-stage-icon { display: inline-grid; place-items: center; width: 22px; height: 22px; flex: none; border-radius: 50%; font-size: 12px; font-weight: 800; }
+.eval-stage-icon.BASARILI { background: var(--success-soft); color: var(--success); }
+.eval-stage-icon.REVIZYON { background: var(--amber-soft); color: var(--amber); }
+.eval-stage-icon.KRITIK_HATA { background: var(--danger-soft); color: var(--danger); }
+.eval-stage-icon.none { background: #e6edef; color: var(--muted); }
+.eval-stage-rows { display: grid; gap: 5px; margin: 10px 0 0; }
+.eval-stage-rows > div { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.eval-stage-rows dt { color: var(--muted); font-size: 10px; }
+.eval-stage-rows dd { margin: 0; overflow-wrap: anywhere; text-align: right; font-size: 10.5px; font-weight: 700; }
+.eval-stage-rows .tone-ok dd { color: var(--success); }
+.eval-stage-rows .tone-warn dd { color: var(--amber); }
+.eval-stage-rows .tone-bad dd { color: var(--danger); }
+
+/* --- Yarışmacı · geri bildirim kartları --- */
+.feedback-card { padding: 14px 16px; border: 1px solid var(--line); border-top-width: 3px; border-radius: var(--radius-md); background: var(--paper); }
+.feedback-card.strengths { border-top-color: var(--success); }
+.feedback-card.improvements { border-top-color: var(--danger); }
+.feedback-card.suggestions { border-top-color: var(--amber); }
+.feedback-card > small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.feedback-empty { margin: 9px 0 0; color: var(--muted); font-size: 10.5px; }
 .analysis-warning-list { margin: 16px 38px 0; padding: 12px 16px 12px 34px; border: 1px solid #d7ad66; border-radius: var(--radius-md); background: var(--amber-soft); color: #5f4610; font-size: 12.5px; line-height: 1.55; }
 .analysis-warning-list li + li { margin-top: 4px; }
 .edit-section > .field { margin-top: 18px; }
@@ -686,12 +782,6 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 .inspector-topline { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--line); }
 .inspector-topline > div { display: flex; align-items: center; gap: 10px; }
 .origin-label { color: var(--muted); font-size: 12px; }
-.active-toggle { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-soft); font-size: 11px; font-weight: 700; cursor: pointer; }
-.active-toggle input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-.active-toggle > span { position: relative; width: 31px; height: 17px; border-radius: 999px; background: #aebdc2; }
-.active-toggle > span::after { content: ""; position: absolute; left: 3px; top: 3px; width: 11px; height: 11px; border-radius: 50%; background: #fff; transition: transform 160ms ease; }
-.active-toggle input:checked + span { background: var(--teal); }
-.active-toggle input:checked + span::after { transform: translateX(14px); }
 .inspector-section { padding: 30px 0; border-bottom: 1px solid var(--line); }
 .inspector-section:last-child { border-bottom: 0; }
 .inspector-section .inspector-label { margin-bottom: 12px; }
@@ -781,12 +871,6 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 .file-badge-lg { width: 62px; height: 76px; }
 
 /* Canlı şablon önizlemesi */
-.template-file-row { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; }
-.template-file-row > div { min-width: 0; }
-.template-file-row .file-badge-sm { width: 30px; height: 38px; }
-.template-file-row strong { display: block; overflow: hidden; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
-.template-file-row small { color: var(--muted); font-size: 9px; }
-.template-file-row.empty { grid-template-columns: 1fr; color: var(--muted); font-size: 10px; }
 .upload-preview { align-self: start; border: 1px solid var(--line); border-radius: var(--radius-md); padding: 24px 22px; }
 
 /* Karar kuralları */
@@ -802,6 +886,15 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 
 /* Belge havuzu penceresi */
 .modal-backdrop { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 24px; background: rgba(16,42,67,.46); backdrop-filter: blur(3px); }
+/* Yayın öncesi ikinci kesinleştirme: onay kutusu yanlışlıkla işaretlenmiş olabilir. */
+.publish-confirm-backdrop { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 24px; background: rgba(16,42,67,.46); backdrop-filter: blur(3px); }
+.publish-confirm { width: min(520px, 100%); padding: 24px 26px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); box-shadow: 0 24px 60px rgba(16,42,67,.24); }
+.publish-confirm h2 { margin: 0 0 10px; font-size: 16px; }
+.publish-confirm p { margin: 0 0 10px; color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
+.publish-confirm-warning { padding: 9px 12px; border-radius: var(--radius-sm); background: var(--amber-soft); color: #5f4610; }
+.publish-confirm-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 18px; }
+/* Geçici model hatasında "Yeniden dene" düğmesi hatanın altında durur. */
+.inline-error.analysis-error { align-items: flex-start; flex-direction: column; gap: 8px; }
 .modal-panel { width: min(920px,100%); max-height: min(86vh,860px); display: flex; flex-direction: column; border-radius: var(--radius-lg); background: var(--paper); box-shadow: var(--shadow); overflow: hidden; }
 .modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 24px 26px 18px; border-bottom: 1px solid var(--line); }
 .modal-head h2 { margin: 6px 0 6px; font-size: 22px; letter-spacing: -.02em; }
@@ -968,7 +1061,7 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
   .manual-evidence-grid { grid-template-columns: 1fr; }
   .review-grid { gap: 30px; padding: 28px 18px 0; }
   .criteria-section-heading { align-items: flex-start; flex-direction: column; }
-  .ledger-tools, .ledger-tools.three-col { grid-template-columns: 1fr; }
+  .ledger-tools, .ledger-tools.two-col { grid-template-columns: 1fr; }
   .analysis-warning-list { margin-left: 18px; margin-right: 18px; }
   .admin-boundary { margin-left: 18px; margin-right: 18px; }
   .criterion-row { grid-template-columns: 4px minmax(0,1fr); }
@@ -1044,15 +1137,6 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 .timeline-list li.page-note { display: block; grid-column: 1 / -1; margin: 0; padding: 14px 2px; }
 
 /* Nihai P4 akışı: isteğe bağlı şablon, sabit ön kontroller ve operasyon araçları. */
-.template-upload-card { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 20px 22px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--canvas); }
-.template-upload-card > div:first-child { max-width: 650px; }
-.template-upload-card h2 { margin: 5px 0 6px; font-size: 15px; }
-.template-upload-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
-.template-file-row { display: grid; grid-template-columns: auto minmax(150px,1fr) auto; align-items: center; gap: 10px; min-width: min(420px,100%); }
-.template-file-row > div { display: grid; gap: 3px; min-width: 0; }
-.template-file-row strong, .template-file-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.template-file-row strong { font-size: 13px; }
-.template-file-row small { color: var(--muted); font-size: 12px; }
 
 .operations-control-grid { display: grid; grid-template-columns: 1.25fr .75fr; gap: 18px; margin-top: 22px; }
 .operations-stage-list, .judge-workloads { padding: 18px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); }
@@ -1076,7 +1160,3 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
   .operations-table-row-actions > span:last-child { display: flex; }
 }
 
-@media (max-width: 640px) {
-  .template-upload-card { align-items: stretch; flex-direction: column; }
-  .template-file-row { min-width: 0; }
-}

@@ -1,11 +1,17 @@
-import { listAccounts, listRecentWorkflowEvents, recordAudit } from "../../lib/admin-db";
-import { handleError, json, jsonError, readJson, requirePermission } from "../../lib/admin-guard";
+import { listAccounts, listRecentWorkflowEvents } from "../../lib/admin-db";
+import { handleError, json, requirePermission } from "../../lib/admin-guard";
 import { WORKFLOW_EVENT_LABELS } from "../../lib/admin-roles";
-import { changeCompetitionStage, listApplications, listCompetitionWorkflows, operationsSummary } from "../../lib/workflow-db";
-import type { CompetitionStatus, JudgeWorkload, TimelineEntry } from "../../lib/workflow-types";
+import { listApplications, listCompetitionWorkflows, listProfiles, operationsSummary } from "../../lib/workflow-db";
+import type { CompetitionOverview, JudgeWorkload, TimelineEntry } from "../../lib/workflow-types";
 
 /**
- * Değerlendirme Yöneticisi (Rol 04) ve Admin için operasyon özeti.
+ * Değerlendirme Yöneticisi (Rol 04) izleme panosu.
+ *
+ * GİZLİLİK: bu rol yarışmacı raporlarını okumaz. Yanıt katılımcı adı, ekip
+ * üyesi, dosya adı ve rapor içeriği taşımaz (bkz. workflow-db · applicationView
+ * "operations" görünümü ve `redactEvaluation`). Yarışma bazlı sayaçlar burada
+ * toplanır; süreç durumu yalnızca İZLENİR, değiştirilemez — başvuruyu açma
+ * kapatma yetkisi Yarışma Yöneticisindedir (bkz. /api/competitions).
  */
 export async function GET(request: Request): Promise<Response> {
   const auth = await requirePermission(request, "operations_dashboard");
@@ -39,31 +45,34 @@ export async function GET(request: Request): Promise<Response> {
         failed: assigned.filter((application) => application.status === "analysis_failed").length,
       };
     });
-    return json({ summary, recent, judges, competitions });
-  } catch (error) { return handleError(error); }
-}
-
-export async function PATCH(request: Request): Promise<Response> {
-  const auth = await requirePermission(request, "manage_competition_stage");
-  if (!auth.ok) return auth.response;
-  try {
-    const body = await readJson(request);
-    const competitionId = typeof body.competitionId === "string" ? body.competitionId.trim() : "";
-    const nextStatus = typeof body.nextStatus === "string" ? body.nextStatus as CompetitionStatus : null;
-    if (!competitionId || !nextStatus) return jsonError(400, "Yarışma ve hedef süreç durumu gerekli.");
-    const result = await changeCompetitionStage(
-      competitionId, nextStatus, auth.account,
-      typeof body.reason === "string" ? body.reason : "",
-      body.force === true,
-    );
-    if (result === "not_found") return jsonError(404, "Yarışma bulunamadı.");
-    if (result === "invalid_transition") return jsonError(409, "Bu yarışma durumu doğrudan seçilen aşamaya geçirilemez.");
-    if (result === "unresolved") return jsonError(409, "Kararlar dondurulmadan önce bütün başvurular sonuçlandırılmalıdır.");
-    await recordAudit({
-      actorId: auth.account.id, actorEmail: auth.account.email, actorRole: auth.account.roleCode,
-      action: "competition_stage_changed", targetType: "competition", targetId: competitionId,
-      detail: `${result.competitionName} · ${result.status}`,
-    }).catch((error) => console.error("[audit] competition stage", error));
-    return json({ competition: result });
+    // Yarışma bazlı özet: kriter sayısı, başvuru durumu ve sayaçlar. Katılımcı
+    // adı ve rapor içeriği bu tabloya HİÇ girmez.
+    const profiles = await listProfiles(auth.account);
+    const overview: CompetitionOverview[] = competitions.map((competition) => {
+      const items = applications.filter((application) => application.competitionKey === competition.competitionKey);
+      const profile = profiles.find((item) => item.id === competition.currentProfileId)
+        ?? profiles.find((item) => item.competitionKey === competition.competitionKey && item.status === "approved");
+      const decided = items.filter((item) => item.status === "completed");
+      return {
+        competitionId: competition.id,
+        competitionKey: competition.competitionKey,
+        competitionName: competition.competitionName,
+        category: profile?.category ?? "",
+        sourceDocumentName: profile?.sourceDocumentName ?? "",
+        criteriaCount: profile?.profile.criteria.length ?? 0,
+        status: competition.status,
+        acceptingApplications: competition.status === "open",
+        isPriority: competition.isPriority,
+        priorityNote: competition.priorityNote,
+        total: items.length,
+        evaluated: decided.length,
+        accepted: decided.filter((item) => item.outcome === "accepted").length,
+        rejected: decided.filter((item) => item.outcome === "rejected").length,
+        revision: decided.filter((item) => item.outcome === "revision_required").length,
+        pending: items.length - decided.length,
+        unassigned: items.filter((item) => !item.assignedJudgeId && item.status !== "completed").length,
+      };
+    });
+    return json({ summary, recent, judges, competitions, overview });
   } catch (error) { return handleError(error); }
 }

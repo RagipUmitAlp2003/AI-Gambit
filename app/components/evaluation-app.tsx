@@ -5,12 +5,13 @@ import Link from "next/link";
 import TopbarSession from "./topbar-session";
 import { formatDateTime } from "../lib/admin-client";
 import { extractPdfText } from "../lib/pdf-reader";
-import { applySimilarity, buildFileGateChecks } from "../lib/report-prechecks";
+import { applySimilarity, buildFileGateChecks, expectedLanguageCode } from "../lib/report-prechecks";
 import { evaluateReport } from "../lib/report-evaluator";
 import { workflowApi } from "../lib/workflow-client";
-import { APPLICATION_STATUS_LABELS, type CompetitionApplication, type CompetitionProfile } from "../lib/workflow-types";
+import { APPLICATION_STATUS_LABELS, type CompetitionApplication, type CompetitionProfile, type CompetitionWorkflow } from "../lib/workflow-types";
 import {
   CHECK_STAGES,
+  PARTICIPANT_FEEDBACK_LABELS,
   RULE_VERDICTS,
   RULE_VERDICT_LABELS,
   checkStageOf,
@@ -221,15 +222,18 @@ function HomeView({ pending, completed, onChoose }: { pending: number; completed
   );
 }
 
-function CompetitionList({ profiles, applications, selectedKey, history, onSelect }: {
+function CompetitionList({ profiles, applications, competitions, selectedKey, history, onSelect }: {
   profiles: CompetitionProfile[];
   applications: CompetitionApplication[];
+  /** Öncelik bayrakları; Değerlendirme Yöneticisi tarafından atanır. */
+  competitions: CompetitionWorkflow[];
   selectedKey: string | null;
   history: boolean;
   onSelect: (key: string) => void;
 }) {
   // Kriteri çıkarılmış (yayımlı) her yarışma listelenir; henüz başvurusu olmayan da görünür.
   const entries = useMemo(() => {
+    const priorityByKey = new Map(competitions.map((item) => [item.competitionKey, item]));
     const byKey = new Map<string, { key: string; name: string; profile: CompetitionProfile | null; items: CompetitionApplication[] }>();
     for (const profile of profiles.filter((item) => item.status === "approved")) {
       byKey.set(profile.competitionKey, { key: profile.competitionKey, name: profile.competitionName, profile, items: [] });
@@ -239,18 +243,33 @@ function CompetitionList({ profiles, applications, selectedKey, history, onSelec
       entry.items.push(application);
       byKey.set(application.competitionKey, entry);
     }
-    return [...byKey.values()].sort((left, right) => left.name.localeCompare(right.name, "tr"));
-  }, [profiles, applications]);
+    // ÖNCELİKLİ yarışmalar her zaman listenin başında; gerisi ada göre sıralı.
+    return [...byKey.values()]
+      .map((entry) => ({ ...entry, competition: priorityByKey.get(entry.key) ?? null }))
+      .sort((left, right) =>
+        Number(Boolean(right.competition?.isPriority)) - Number(Boolean(left.competition?.isPriority))
+        || left.name.localeCompare(right.name, "tr"));
+  }, [profiles, applications, competitions]);
 
   return (
     <nav className="eval-competition-list" aria-label="Kriteri çıkarılmış yarışmalar">
       {entries.map((entry) => {
         const count = entry.items.filter((item) => history ? item.status === "completed" : item.status !== "completed").length;
-        const criteriaCount = entry.profile?.profile.criteria.filter((item) => item.active).length ?? 0;
+        const criteriaCount = entry.profile?.profile.criteria.length ?? 0;
+        const priority = entry.competition?.isPriority ?? false;
         return (
-          <button key={entry.key} type="button" className={entry.key === selectedKey ? "active" : ""} onClick={() => onSelect(entry.key)}>
+          <button
+            key={entry.key}
+            type="button"
+            className={`${entry.key === selectedKey ? "active" : ""} ${priority ? "priority" : ""}`.trim()}
+            onClick={() => onSelect(entry.key)}
+            title={priority && entry.competition?.priorityNote ? `Öncelik gerekçesi: ${entry.competition.priorityNote}` : undefined}
+          >
+            {/* Değerlendirme Yöneticisi bu yarışmayı acil işaretledi. */}
+            {priority ? <em className="priority-badge">🔥 ACİL / ÖNCELİKLİ</em> : null}
             <strong>{entry.name}</strong>
-            <span>{entry.profile ? `${criteriaCount} aktif kriter` : "Kriter profili yok"} · {count} {history ? "tamamlanan" : "bekleyen"} başvuru</span>
+            <span>{entry.profile ? `${criteriaCount} kriter` : "Kriter profili yok"} · {count} {history ? "tamamlanan" : "bekleyen"} başvuru</span>
+            {priority && entry.competition?.priorityNote ? <span className="priority-reason">{entry.competition.priorityNote}</span> : null}
           </button>
         );
       })}
@@ -265,7 +284,20 @@ function ApplicationGrid({ applications, selectedId, analyzingId, onSelect }: {
   analyzingId: string | null;
   onSelect: (id: string) => void;
 }) {
-  if (!applications.length) return <p className="library-empty">Bu yarışmada gösterilecek başvuru yok.</p>;
+  if (!applications.length) {
+    // Hakem yalnızca kendisine ATANMIŞ başvuruları görür; boş liste "başvuru
+    // yok" ya da "hepsi başka hakemde" demektir. Sebebi yazılmazsa sistem
+    // bozuk görünüyordu.
+    return (
+      <div className="library-empty">
+        <p>Bu yarışmada size atanmış başvuru yok.</p>
+        <p>
+          Yarışmacı raporunu gönderdiğinde sistem dosyayı en az yüklü hakeme otomatik atar.
+          Size atanan başvurular anında burada görünür.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="eval-application-grid" role="list">
       {applications.map((application) => {
@@ -300,28 +332,100 @@ function ApplicationGrid({ applications, selectedId, analyzingId, onSelect }: {
   );
 }
 
+/**
+ * Aşama ikonu: BAŞARILI → yeşil ✓, REVİZYON → sarı !, KRİTİK HATA → kırmızı ✕.
+ * Problem 4 kitapçığı dil/şablon ve diğer kontrollerin yeşil/kırmızı ikonla
+ * listelenmesini ister; renk tek başına bilgi taşımasın diye simge de değişir.
+ */
+function StageIcon({ verdict }: { verdict: RuleVerdict | null }) {
+  if (!verdict) return <span className="eval-stage-icon none" aria-label="Sonuç yok" title="Sonuç yok">–</span>;
+  const symbol = verdict === "BASARILI" ? "✓" : verdict === "REVIZYON" ? "!" : "✕";
+  return (
+    <span className={`eval-stage-icon ${verdict}`} aria-label={RULE_VERDICT_LABELS[verdict]} title={RULE_VERDICT_LABELS[verdict]}>
+      {symbol}
+    </span>
+  );
+}
+
 function StageStrip({ stages }: { stages: StageResult[] }) {
   return (
     <div className="eval-stage-strip" aria-label="Dört aşamalı kontrol özeti">
       {CHECK_STAGES.map((definition) => {
         const stage = stages.find((item) => item.stage === definition.id);
-        let meta = "";
-        if (stage && definition.id === "language_template") meta = `Dil: ${stage.detectedLanguage ?? "tespit edilemedi"}${stage.expectedLanguage ? ` (beklenen ${stage.expectedLanguage})` : ""}`;
+        /** Aşamaya özgü, tek bakışta okunan ölçüm satırları. */
+        const rows: Array<{ label: string; value: string; tone?: "ok" | "warn" | "bad" }> = [];
+
+        if (stage && definition.id === "language_template") {
+          const detected = stage.detectedLanguage ?? "tespit edilemedi";
+          const expected = stage.expectedLanguage ?? null;
+          // "Turkish" ile "Türkçe" aynı dildir: ham metin değil dil KODU karşılaştırılır.
+          const detectedCode = expectedLanguageCode(stage.detectedLanguage);
+          const expectedCode = expectedLanguageCode(expected);
+          const matches = !expectedCode || !detectedCode ? null : detectedCode === expectedCode;
+          rows.push({
+            label: "Rapor dili",
+            value: expected ? `${detected} (beklenen: ${expected})` : detected,
+            tone: matches === null ? undefined : matches ? "ok" : "bad",
+          });
+        }
+
         if (stage && definition.id === "headings_content") {
           const headings = stage.headings ?? [];
-          meta = headings.length ? `${headings.filter((item) => item.present && item.contentFilled).length}/${headings.length} başlık dolu` : "Başlık listesi yok";
+          const filled = headings.filter((item) => item.present && item.contentFilled).length;
+          const missing = headings.filter((item) => !item.present);
+          rows.push({
+            label: "Zorunlu başlıklar",
+            value: headings.length ? `${filled}/${headings.length} başlık dolu` : "Başlık listesi yok",
+            tone: !headings.length ? undefined : filled === headings.length ? "ok" : missing.length ? "bad" : "warn",
+          });
+          if (missing.length) {
+            rows.push({ label: "Eksik", value: missing.slice(0, 3).map((item) => item.heading).join(", ") + (missing.length > 3 ? ` +${missing.length - 3}` : ""), tone: "bad" });
+          }
         }
+
         if (stage && definition.id === "category_similarity") {
-          meta = `${stage.categoryScore === null || stage.categoryScore === undefined ? "Kategori skoru yok" : `Kategori %${stage.categoryScore}`}${stage.similarity?.percent !== null && stage.similarity?.percent !== undefined ? ` · benzerlik %${stage.similarity.percent}` : ""}`;
+          const score = stage.categoryScore;
+          rows.push({
+            label: "Kategori uygunluğu",
+            value: score === null || score === undefined ? "Skor yok" : `%${score}`,
+            tone: score === null || score === undefined ? undefined : score >= 70 ? "ok" : score >= 40 ? "warn" : "bad",
+          });
+          // Benzerlik hakeme "Şüpheli / Normal" olarak işaretlenir (Problem 4 · 3).
+          const similarity = stage.similarity;
+          const suspicious = similarity?.status === "flagged" || similarity?.status === "failed";
+          const warning = similarity?.status === "warning";
+          rows.push({
+            label: "Benzerlik taraması",
+            value: !similarity || similarity.status === "skipped"
+              ? "Çalıştırılmadı"
+              : `${suspicious || warning ? "ŞÜPHELİ" : "Normal"}${similarity.percent !== null && similarity.percent !== undefined ? ` · %${similarity.percent}` : ""}${similarity.closestTeam ? ` · en yakın: ${similarity.closestTeam}` : ""}`,
+            tone: !similarity || similarity.status === "skipped" ? undefined : suspicious ? "bad" : warning ? "warn" : "ok",
+          });
         }
+
+        if (stage && definition.id === "criteria_evidence") {
+          rows.push({ label: "Kriter bulguları", value: stage.summary || "Aşağıdaki listede", tone: undefined });
+        }
+
         return (
           <div key={definition.id} className={`eval-stage-chip ${stage?.verdict ?? "none"}`} title={stage?.summary || definition.detail}>
-            <span>{definition.order}</span>
-            <div>
-              <strong>{definition.title}</strong>
-              <small>{meta || stage?.summary || "Sonuç yok"}</small>
+            <div className="eval-stage-head">
+              <StageIcon verdict={stage?.verdict ?? null} />
+              <div>
+                <span className="eval-stage-order">{definition.order}. aşama</span>
+                <strong>{definition.title}</strong>
+              </div>
+              {stage ? <VerdictBadge verdict={stage.verdict} /> : null}
             </div>
-            {stage ? <VerdictBadge verdict={stage.verdict} /> : null}
+            <dl className="eval-stage-rows">
+              {rows.map((row) => (
+                <div key={row.label} className={row.tone ? `tone-${row.tone}` : ""}>
+                  <dt>{row.label}</dt>
+                  <dd>{row.value}</dd>
+                </div>
+              ))}
+              {!rows.length ? <div><dt>Durum</dt><dd>{stage?.summary || "Sonuç yok"}</dd></div> : null}
+            </dl>
           </div>
         );
       })}
@@ -352,7 +456,7 @@ function CriterionResult({ finding, application, decisions }: {
       <div className="eval-result-actions">
         {verdict !== "BASARILI" || evidence ? (
           <a className="secondary-button eval-source-button" href={fileUrl(application, page)} target="_blank" rel="noreferrer">
-            Kaynağa git{page ? ` · s. ${page}` : ""}
+            Kaynak Satıra Git{page ? ` · s. ${page}` : ""}
           </a>
         ) : null}
         {evidence ? <small>{evidenceLocation(evidence)}</small> : null}
@@ -407,7 +511,7 @@ function DecisionTemplate({ application, evaluation, outcome, decisions, note, s
       </label>
 
       <div className="eval-template-section">
-        <h3>Hatalı kriterler ve sebepleri <span>{failed.length}</span></h3>
+        <h3>Gelişime açık yönler · hatalı kriterler <span>{failed.length}</span></h3>
         {failed.length ? (
           <ol className="eval-template-rows">
             {failed.map((finding) => {
@@ -446,7 +550,7 @@ function DecisionTemplate({ application, evaluation, outcome, decisions, note, s
       </div>
 
       <div className="eval-template-section">
-        <h3>Karşılanan kriterler <span>{passed.length}</span></h3>
+        <h3>Güçlü yönler · karşılanan kriterler <span>{passed.length}</span></h3>
         {passed.length ? (
           <ul className="eval-template-passed">
             {passed.map((finding) => (
@@ -465,9 +569,13 @@ function DecisionTemplate({ application, evaluation, outcome, decisions, note, s
         <summary>Yarışmacının göreceği metin önizlemesi</summary>
         <div>
           <p className="eval-template-preview-note">{note}</p>
-          {feedback.strengths.length ? <section><strong>Karşılanan kriterler</strong><ul>{feedback.strengths.map((line) => <li key={line}>{line}</li>)}</ul></section> : null}
-          {feedback.improvements.length ? <section><strong>Hatalı kriterler ve sebepleri</strong><ul>{feedback.improvements.map((line) => <li key={line}>{line}</li>)}</ul></section> : null}
-          {feedback.suggestions.length ? <section><strong>Revizyon önerileri</strong><ul>{feedback.suggestions.map((line) => <li key={line}>{line}</li>)}</ul></section> : null}
+          {/* Yarışmacının göreceği kart başlıklarıyla birebir aynı. */}
+          {(["strengths", "improvements", "suggestions"] as const).map((key) => feedback[key].length ? (
+            <section key={key}>
+              <strong>{PARTICIPANT_FEEDBACK_LABELS[key]}</strong>
+              <ul>{feedback[key].map((line) => <li key={line}>{line}</li>)}</ul>
+            </section>
+          ) : null)}
         </div>
       </details>
 
@@ -583,7 +691,7 @@ function ApplicationDetail({ application, analyzing, progress, onAnalyze, onFina
             </div>
           ) : (
             <button type="button" className="primary-button eval-analyze-button" disabled={!canAnalyze} onClick={() => onAnalyze(application)}>
-              Yapay Zeka Analizi <span aria-hidden="true">→</span>
+              {application.status === "analysis_failed" ? "Yeniden dene" : "Yapay Zeka Analizi"} <span aria-hidden="true">→</span>
             </button>
           )}
           {!canAnalyze && !analyzing ? (
@@ -682,6 +790,8 @@ function ApplicationDetail({ application, analyzing, progress, onAnalyze, onFina
 export default function EvaluationApp() {
   const [mode, setMode] = useState<Mode>("home");
   const [profiles, setProfiles] = useState<CompetitionProfile[]>([]);
+  /** Öncelik bayrakları; ÖNCELİKLİ yarışmalar listenin başında gösterilir. */
+  const [competitions, setCompetitions] = useState<CompetitionWorkflow[]>([]);
   const [applications, setApplications] = useState<CompetitionApplication[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -693,14 +803,17 @@ export default function EvaluationApp() {
 
   useEffect(() => {
     let active = true;
-    Promise.allSettled([workflowApi.profiles(), workflowApi.applications()]).then(([profileResult, applicationResult]) => {
-      if (!active) return;
-      if (profileResult.status === "fulfilled") setProfiles(profileResult.value.profiles);
-      if (applicationResult.status === "fulfilled") setApplications(applicationResult.value.applications);
-      const failure = [profileResult, applicationResult].find((result) => result.status === "rejected");
-      setError(failure && failure.status === "rejected" ? (failure.reason instanceof Error ? failure.reason.message : "Veriler yüklenemedi.") : "");
-      setLoading(false);
-    });
+    Promise.allSettled([workflowApi.profiles(), workflowApi.applications(), workflowApi.competitions()])
+      .then(([profileResult, applicationResult, competitionResult]) => {
+        if (!active) return;
+        if (profileResult.status === "fulfilled") setProfiles(profileResult.value.profiles);
+        if (applicationResult.status === "fulfilled") setApplications(applicationResult.value.applications);
+        // Öncelik bayrağı olmadan da ekran çalışır; yalnızca rozet görünmez.
+        if (competitionResult.status === "fulfilled") setCompetitions(competitionResult.value.competitions);
+        const failure = [profileResult, applicationResult].find((result) => result.status === "rejected");
+        setError(failure && failure.status === "rejected" ? (failure.reason instanceof Error ? failure.reason.message : "Veriler yüklenemedi.") : "");
+        setLoading(false);
+      });
     return () => { active = false; };
   }, []);
 
@@ -743,7 +856,7 @@ export default function EvaluationApp() {
       const profile = profileResult.profile.profile;
       setProgress("Rapor PDF'i okunuyor…");
       const extracted = await extractPdfText(file);
-      setProgress(`${profile.criteria.filter((item) => item.active).length} kriter rapor ile karşılaştırılıyor…`);
+      setProgress(`${profile.criteria.length} kriter rapor ile karşılaştırılıyor…`);
       let evaluation = await evaluateReport({
         profile,
         file,
@@ -766,7 +879,9 @@ export default function EvaluationApp() {
       replaceApplication(saved.application);
       setApplicationId(saved.application.id);
     } catch (caught) {
-      setError(`"${application.teamName}" analiz edilemedi: ${caught instanceof Error ? caught.message : "Bilinmeyen hata."}`);
+      // Sistem kendiliğinden ikinci bir AI çağrısı yapmaz; başvuru
+      // "analiz başarısız" durumuna döner ve hakem düğmeyle yeniden dener.
+      setError(`"${application.teamName}" analiz edilemedi: ${caught instanceof Error ? caught.message : "Bilinmeyen hata."} Sorun geçiciyse “Yapay Zeka Analizi” düğmesiyle yeniden deneyebilirsiniz.`);
       if (started) {
         workflowApi.updateApplication(application.id, "analysis_failed")
           .then((saved) => replaceApplication(saved.application))
@@ -781,7 +896,15 @@ export default function EvaluationApp() {
   async function finalize(application: CompetitionApplication, review: JudgeReview): Promise<boolean> {
     const saved = await workflowApi.updateApplication(application.id, "save_review", { review });
     replaceApplication(saved.application);
-    setNotice(`${application.teamName}: ${OUTCOME_LABELS[review.outcome]} kararı kaydedildi ve şablon yarışmacıya iletildi.`);
+    // Karar her hâlükârda kaydedildi. E-posta gönderilemediyse bu ayrıca bildirilir;
+    // karar geri alınmaz (bkz. api/applications/[id] · notifyOutcome).
+    if (saved.notificationWarning) {
+      setNotice("");
+      setError(`${application.teamName}: ${OUTCOME_LABELS[review.outcome]} kararı KAYDEDİLDİ. Ancak yarışmacıya bildirim gönderilemedi — ${saved.notificationWarning}`);
+    } else {
+      setError("");
+      setNotice(`${application.teamName}: ${OUTCOME_LABELS[review.outcome]} kararı kaydedildi ve şablon yarışmacıya iletildi.`);
+    }
     return true;
   }
 
@@ -827,6 +950,7 @@ export default function EvaluationApp() {
               <CompetitionList
                 profiles={profiles}
                 applications={applications}
+                competitions={competitions}
                 selectedKey={competitionKey}
                 history={history}
                 onSelect={(key) => { setCompetitionKey(key); setApplicationId(null); }}

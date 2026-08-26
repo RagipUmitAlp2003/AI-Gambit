@@ -77,10 +77,6 @@ export async function loadDraftFile(): Promise<File | null> {
   return loadStoredDraftFile(FILE_KEY);
 }
 
-export async function loadDraftTemplateFile(): Promise<File | null> {
-  return loadStoredDraftFile(TEMPLATE_FILE_KEY);
-}
-
 async function loadStoredDraftFile(key: string): Promise<File | null> {
   try {
     const database = await openDraftDatabase();
@@ -100,8 +96,13 @@ export async function saveDraftFile(file: File | null) {
   return saveStoredDraftFile(FILE_KEY, file);
 }
 
-export async function saveDraftTemplateFile(file: File | null) {
-  return saveStoredDraftFile(TEMPLATE_FILE_KEY, file);
+/**
+ * Ayrı rapor şablonu yükleme alanı kaldırıldı (Yarışma Yöneticisi yalnızca
+ * şartname yükler). Eski sürümde saklanmış şablon PDF'i tarayıcıda kalmasın
+ * diye bir kez silinir; kayıt yoksa işlem sessizce geçer.
+ */
+export async function clearLegacyTemplateFile() {
+  return saveStoredDraftFile(TEMPLATE_FILE_KEY, null);
 }
 
 async function saveStoredDraftFile(key: string, file: File | null) {
