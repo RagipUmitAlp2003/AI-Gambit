@@ -1,6 +1,6 @@
 # AI-Gambit — Proje Durumu ve Yapılacaklar
 
-**Tarih:** 26 Ağustos 2026 · **Dal:** `faruk_deneme` · **Temel işleme:** `b39bba8`
+**Tarih:** 26 Ağustos 2026 · **Dal:** `son_merge_deneme_2` · **Temel işleme:** `4228c24`
 
 Bu belge projenin **güncel durumunu** tutar: neyin çalıştığı, neyin eksik olduğu ve
 neyin düzeltilmesi gerektiği. Aşağıdaki her madde bugün kod üzerinde veya gerçek
@@ -15,11 +15,52 @@ neyin düzeltilmesi gerektiği. Aşağıdaki her madde bugün kod üzerinde veya
 | `NIHAI_SISTEM_AKISI.md` | Roller, akış ve veritabanı mimarisi |
 | `docs/*_SOZLESMESI.md` | AI uçlarının veri sözleşmeleri (kod bunlara atıf yapıyor) |
 | `docs/GENEL_BELGE_ANALIZ_MIMARISI.md` | Dört aşamalı analiz mimarisi |
+| `docs/KALICI_ANALIZ_ONBELLEGI.md` | Kalıcı analiz önbelleğinin sözleşmesi ve koruma kuralları |
 | `PROJE_DURUMU.md` (bu belge) | Durum, ölçüm, eksik iş listesi |
 
 ---
 
-## 1. Bugün yapılan iş — Dört aşamalı prensip ve Admin kısıtı
+## 1. Bugün yapılan son iş — Kalıcı analiz önbelleği ve aşama şeridi düzeltmesi
+
+1. **Şartname analizleri kalıcı kayda alındı.** Daha önce analiz edilen belge tekrar
+   analiz edildiğinde model **hiç çağrılmaz**: sonuç D1'deki `criteria_analysis_cache`
+   tablosundan 0 token ve `apiCalls: 0` ile döner; sunucu yeniden başlasa da kayıt durur.
+   Anahtar dosya adı değil **belge içeriğinin SHA-256'sı** + analiz yapılandırmasıdır;
+   model/talimat/ayar değişirse eski kayıt doğal olarak eşleşmez. Arayüz isabette
+   "Bu şartname daha önce analiz edilmişti (ilk analiz: …)" notunu gösterir.
+   Sözleşme ve koruma kuralları: `docs/KALICI_ANALIZ_ONBELLEGI.md`;
+   göç: `migrations/0007_analysis_cache.sql`.
+2. **Değerlendirme Atölyesi dört aşama şeridi düzeltildi.** Kart içi metinler kutuların
+   dışına taşıyordu: `evaluation.css`'teki kurallar eski işaretlemeye göre yazılmıştı ve
+   kartı iki sütuna bölüp içerik sütununu sıfıra sıkıştırıyordu. Kurallar yeni
+   `eval-stage-head` / `eval-stage-rows` yapısına göre yeniden yazıldı, `globals.css`
+   ile özgüllük çakışması giderildi; metinler artık kartın içinde sarılıyor.
+
+### Canlı doğrulama (İDA şartnamesi · 29 sayfa)
+
+| Koşu | Süre | Token | apiCalls | Sonuç |
+|---|---|---|---|---|
+| İlk analiz | 28,4 sn | 14.055 | 1 | 26 kriter |
+| Sunucu yeniden başlatıldıktan sonra | 1,5 sn | 0 | 0 | `cacheStore: "database"` · kriterler birebir aynı |
+| Aynı süreçte ikinci istek | 0,4 sn | 0 | 0 | `cacheStore: "memory"` |
+
+### Bağımsız inceleme sonrası düzeltmeler
+
+Değişiklik 3 mercekli (eşzamanlılık, D1/SQL semantiği, UI sözleşmesi) incelemeden ve her
+bulgu için çürütme doğrulamasından geçirildi; 4 doğrulanmış bulgu düzeltildi:
+
+- Normalizasyondan 0 kriterle çıkan (veya nesne olmayan) model çıktısı **hiçbir önbellek
+  katmanına yazılmaz**; okunan eski kayıt da aynı süzgeçten geçer. Aksi hâlde bozuk bir
+  çıktı belgeyi kalıcı olarak boş sonuca kilitlerdi.
+- Aynı belgeye eşzamanlı ikinci istek ilkinin sonucunu bekler; model iki kez çağrılmaz.
+- Bellekten sunulan isabet D1 `last_used_at` değerini tazeler; 200 satırlık LRU budaması
+  en sık kullanılan kaydı silemez.
+- Önbellek notu yayımlanmış profil düzenlenirken gösterilmez; "yeni profil" sıfırlaması
+  (`restart`) notu da temizler.
+
+---
+
+## 2. Aynı gün, önceki iş — Dört aşamalı prensip ve Admin kısıtı
 
 İki ürün kararı birlikte uygulandı:
 
@@ -111,21 +152,21 @@ O gün alınan puan/kapsam ölçümleri eski prensibe ait olduğu için burada t
 
 ---
 
-## 2. Doğrulanmış güncel durum
+## 3. Doğrulanmış güncel durum
 
 | Kontrol | Komut | Sonuç |
 |---|---|---|
 | Depo güvenliği | `npm run check:repo-safety` | ✅ PASS (bugün ölçüldü) |
 | Tip kontrolü | `npx tsc --noEmit` | ✅ temiz (bugün ölçüldü) |
 | Lint | `npm run lint` | ✅ temiz (bugün ölçüldü) |
-| Birim testleri | `npm run test:unit` | ✅ 26/26 geçti (criteria-extraction 13, profile-loader 8, pdf-integrity 3, workflow-schema 2) |
-| Regresyon testleri | `npm run test:regressions` | ✅ PASS |
-| AI erişimi | `npm run check:gemini` | ölçülmedi (bugün canlı API çağrısı yapılmadı) |
+| Birim testleri | `npm run test:unit` | ✅ 63/63 geçti (bugün ölçüldü) |
+| Regresyon testleri | `npm run test:regressions` | ✅ PASS (bugün ölçüldü) |
+| AI erişimi | `npm run check:gemini` | ✅ canlı üretim çağrısı başarılı — İDA analizi 28,4 sn · 14.055 token · 26 kriter (önbellek doğrulaması sırasında; `check:gemini` komutu ayrıca koşulmadı) |
 | Doğruluk benchmarkı | `node tools/run_celikkubbe_benchmark.mjs http://localhost:3000/api/analyze` | ölçülmedi — referans dosyası yeni biçime çevrildi, canlı koşu gerekiyor (A1) |
 
 ---
 
-## 3. Eksikler ve düzeltilmesi gerekenler
+## 4. Eksikler ve düzeltilmesi gerekenler
 
 Sıra önem derecesine göre. "Dosya" sütunu işe nereden başlanacağını gösterir.
 
@@ -152,7 +193,7 @@ Sıra önem derecesine göre. "Dosya" sütunu işe nereden başlanacağını gö
 |---|---|---|---|
 | **C1** | Belge havuzu cihaza bağlı | Tarayıcı içi IndexedDB. `DocumentRepository` arayüzü hazır, sunucu uygulaması yok | R2 tabanlı sunucu uygulaması; ekip ortak havuzu ancak böyle mümkün. Bugün başka bilgisayardan aynı havuz görülmüyor |
 | **C2** | Yarışma listesi kodda sabit | `COMPETITIONS` dizisi 40 kayıt; seçim `setup.competition` **ad dizgesiyle** taşınıyor | Kalıcı `competitionId`; ad değişirse eski profiller kopuyor. D1'de `competitions` tablosu ve `competitionId` akışı var, kriter tarafı bağlanmamış |
-| **C3** | Cloudflare kaynakları | 5 göç dosyası hazır (`migrations/0001`–`0005`), uygulanmadı | D1 ve R2 kaynaklarının oluşturulması, göçlerin uygulanması, sunucu sırlarının tanımlanması — dağıtım işi |
+| **C3** | Cloudflare kaynakları | 7 göç dosyası hazır (`migrations/0001`–`0007`), uygulanmadı; uygulama şeması tabloları çalışma anında da oluşturur | D1 ve R2 kaynaklarının oluşturulması, göçlerin uygulanması, sunucu sırlarının tanımlanması — dağıtım işi |
 
 ### D · Arayüz
 
@@ -179,7 +220,7 @@ Sıra önem derecesine göre. "Dosya" sütunu işe nereden başlanacağını gö
 
 ---
 
-## 4. Eski raporlardaki, artık geçerli olmayan maddeler
+## 5. Eski raporlardaki, artık geçerli olmayan maddeler
 
 Aşağıdaki işler ya bugün **yapılmış** ya da yeni prensiple **anlamsız** hâle gelmiştir.
 Tekrar yapılmasın:
@@ -207,7 +248,7 @@ Tekrar yapılmasın:
 
 ---
 
-## 5. Silinen belgeler
+## 6. Silinen belgeler
 
 Aşağıdaki 7 dosya daha önce kaldırıldı: hepsi tarihli, tek seferlik oturum raporuydu,
 birbirini ve kalan belgeleri tekrar ediyordu, hiçbirine kod veya belge atıf yapmıyordu.
@@ -215,11 +256,11 @@ birbirini ve kalan belgeleri tekrar ediyordu, hiçbirine kod veya belge atıf ya
 
 | Silinen | Neden | İçeriği nerede |
 |---|---|---|
-| `DEGISIKLIK_RAPORU.md` (29.6 KB) | 24 Ağustos, `Deneme` dalı, "eskiden/şimdi" raporu | Eksik iş listesi → bölüm 3 |
+| `DEGISIKLIK_RAPORU.md` (29.6 KB) | 24 Ağustos, `Deneme` dalı, "eskiden/şimdi" raporu | Eksik iş listesi → bölüm 4 |
 | `SISTEM_OZETI_VE_SON_AI_PLANI.md` (15.6 KB) | Önerdiği A–J algoritması büyük ölçüde uygulandı, sonra dört aşamalı prensiple değiştirildi | Tamamlanma ölçütleri → A1, A3 |
 | `NIHAI_ENTEGRASYON_RAPORU.md` (8.1 KB) | Silinen rapora atıf yapan birleştirme raporu | Dışarıda bırakılanlar → C3, A1 |
 | `CHANGES.md` (7.7 KB) | Tek tarihli değişiklik kaydı; git geçmişiyle çakışıyor | — |
-| `docs/SON_ENTEGRASYON_DUZELTMELERI.md` (4.4 KB) | 24 Ağustos düzeltme + test raporu | Test durumu → bölüm 2 |
+| `docs/SON_ENTEGRASYON_DUZELTMELERI.md` (4.4 KB) | 24 Ağustos düzeltme + test raporu | Test durumu → bölüm 3 |
 | `docs/PDF_MERKEZLI_AKIS_GUNCELLEMESI.md` (3.9 KB) | Ürün kararı `README`/`NIHAI_SISTEM_AKISI`'nda zaten var | — |
 | `PAYLASIM_NOTU.md` (1.0 KB) | Kurulum adımları `GUIDE.md`'de var; ayrıca **yanlış** (Node 20 diyor, `package.json` ≥22.13 istiyor) | `GUIDE.md` |
 
@@ -228,7 +269,7 @@ kaldırılıp bu belgeye yönlendirildi.
 
 ---
 
-## 6. Doğrulama komutları
+## 7. Doğrulama komutları
 
 ```bash
 npm run check:gemini          # anahtar, model adları ve gerçek üretim çağrısı

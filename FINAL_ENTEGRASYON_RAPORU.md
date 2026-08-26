@@ -433,7 +433,41 @@ Uçtan uca gerçek analizle doğrulandı (13 bulgu):
 
 ---
 
-## 10. Kalan gerçek riskler
+## 10. Beşinci tur — Kalıcı analiz önbelleği ve aşama şeridi düzeltmesi
+
+**Sorun 1:** Şartname analizi yalnızca süreç içi bir `Map`'te önbellekleniyordu (12 kayıt);
+sunucu her yeniden başladığında aynı belge için model yeniden çağrılıp token harcanıyordu.
+
+**Sorun 2:** Değerlendirme Atölyesi'ndeki dört aşama kartlarının içi metinleri kutu dışına
+taşıyordu: `evaluation.css` kuralları kartların eski işaretlemesine göre yazılmıştı ve
+kartı iki sütuna bölüp içerik sütununu sıfır genişliğe sıkıştırıyordu.
+
+Yapılanlar:
+
+- **`criteria_analysis_cache` tablosu (D1) eklendi** (`migrations/0007_analysis_cache.sql`).
+  Ham model çıktısı, belge içeriğinin SHA-256'sı + istem sürümü + model + çözünürlük +
+  düşünme kademesi + sayfa sayısından türetilen anahtarla saklanır. İsabette model **hiç
+  çağrılmaz**; cevap `cached: true`, `cacheStore: "memory" | "database"`, `firstAnalyzedAt`,
+  0 token, `apiCalls: 0` taşır. Normalizasyon her okumada yeniden çalışır. Sınır 200 satır
+  (LRU); bellek isabeti D1 tazeliğini günceller.
+- **Koruma kuralları:** 0 kriter üreten çıktı hiçbir katmana yazılmaz (kalıcı boş-sonuç
+  kilidi önlenir); okunan kayıt aynı süzgeçten geçer; aynı belgeye eşzamanlı ikinci istek
+  ilkinin sonucunu bekler; nesne olmayan JSON gövdesi 502 ile reddedilir.
+- **Arayüz notu:** Kriter Atölyesi isabette "Bu şartname daha önce analiz edilmişti
+  (ilk analiz: …). Kayıtlı sonuç gösterildi; yapay zekâ yeniden çalıştırılmadı ve token
+  harcanmadı." notunu gösterir; yayımlanmış profil düzenlenirken gösterilmez.
+- **Aşama şeridi CSS'i** yeni `eval-stage-head` / `eval-stage-rows` işaretlemesine göre
+  yeniden yazıldı; `globals.css` ile özgüllük çakışması giderildi, metinler kart içinde sarılıyor.
+
+Doğrulama: İDA şartnamesi (29 sayfa) ilk analiz 28,4 sn · 14.055 token · 26 kriter;
+sunucu yeniden başlatıldıktan sonra aynı belge 1,5 sn · 0 token · birebir aynı kriterler
+(`cacheStore: "database"`); aynı süreçte ikinci istek 0,4 sn (`cacheStore: "memory"`).
+Değişiklik 3 mercekli bağımsız incelemeden geçirildi; 4 doğrulanmış bulgu düzeltildi.
+Ayrıntı: `docs/KALICI_ANALIZ_ONBELLEGI.md`.
+
+---
+
+## 11. Kalan gerçek riskler
 
 1. **Tek model, yedeksiz.** Yapılandırılan model 503 döndürdüğünde analiz tamamlanmaz; kullanıcı "Yeniden dene" demek zorundadır. Bu bilinçli bir seçimdir (tek çağrı prensibi), ama yoğun saatlerde kullanıcı deneyimini doğrudan etkiler. Kesinti sürerse `GEMINI_MODEL` elle erişilebilir bir modele alınmalıdır.
 

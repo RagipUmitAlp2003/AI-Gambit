@@ -58,7 +58,7 @@ Yerel ortam değişkenleri `.env.example` örneğine göre tanımlanır. Organiz
 
 Analiz tek bir örnek PDF'ye bağlı değildir; belge her yüklemede yeniden okunur ve dört aşamalı şemaya göre çıkarılır. Şema, talimat ve normalizasyon `app/lib/criteria-extraction.ts` içindedir; ayrıntılı mimari `docs/GENEL_BELGE_ANALIZ_MIMARISI.md`, veri sözleşmesi `docs/AI_API_ENTEGRASYON_SOZLESMESI.md` dosyasındadır.
 
-Aynı belge aynı talimat sürümüyle yeniden analiz edilirse sunucu içi önbellek (SHA-256 hash) sayesinde model tekrar çağrılmaz. Analiz ucunda geçici istek ve eşzamanlılık sınırı vardır; üretimde kullanıcı/kurum kotasıyla tamamlanmalıdır. Her analiz için süre ve token kullanımı `diagnostics` alanında döner. Yerel geliştirmede oturum toplamları `GET /api/metrics` ucundan okunabilir; üretimde bu uç varsayılan olarak kapalıdır. Kullanıcı arayüzünde model/sağlayıcı adı gösterilmez.
+Aynı belge aynı talimat sürümüyle yeniden analiz edilirse model tekrar çağrılmaz: sonuç önce süreç belleğinden, yoksa D1'deki kalıcı analiz kaydından (`criteria_analysis_cache`) 0 token ile döner ve sunucu yeniden başlasa bile korunur (bkz. `docs/KALICI_ANALIZ_ONBELLEGI.md`). Analiz ucunda geçici istek ve eşzamanlılık sınırı vardır; üretimde kullanıcı/kurum kotasıyla tamamlanmalıdır. Her analiz için süre ve token kullanımı `diagnostics` alanında döner. Yerel geliştirmede oturum toplamları `GET /api/metrics` ucundan okunabilir; üretimde bu uç varsayılan olarak kapalıdır. Kullanıcı arayüzünde model/sağlayıcı adı gösterilmez.
 
 ## Yerel çalıştırma
 
@@ -101,7 +101,7 @@ Belgelerin tümü uygulamadaki "Hazır test belgeleri" bölümünden seçilebili
 - `app/lib/authorization.ts`: yetki matrisi (tek doğruluk kaynağı)
 - `app/lib/admin-roles.ts`: rol katalogu ve süreç olayı etiketleri
 - `app/lib/workflow-db.ts`: yayımlı profiller, kriterler ve başvurular için D1/R2 veri katmanı
-- `app/api/analyze/route.ts`: güvenli Gemini çağrısı, PDF'den tek çağrıyla profil/kriter çıkarımı, yapılandırılmış çıktı ve önbellek
+- `app/api/analyze/route.ts`: güvenli Gemini çağrısı, PDF'den tek çağrıyla profil/kriter çıkarımı, yapılandırılmış çıktı ve kalıcı analiz önbelleği (`docs/KALICI_ANALIZ_ONBELLEGI.md`)
 - `app/api/evaluate-report/route.ts`: dört aşamalı rapor değerlendirme motoru (sözleşme: `docs/RAPOR_DEGERLENDIRME_SOZLESMESI.md`)
 - `app/api/applications/*`: başvuru, dosya erişimi ve hakem durum güncellemeleri
 - `app/api/profiles/route.ts`: yayımlı kriter profillerini yazma ve okuma

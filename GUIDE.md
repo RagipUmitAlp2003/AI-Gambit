@@ -258,8 +258,10 @@ sıkıştırılmış bir PDF kullanın.
 **Analiz çok uzun sürüyor.**
 Bütün belge tek çağrıda okunur; süre belge uzunluğuna, API kotasına ve yedek modele
 düşülmesine bağlıdır. Arayüzdeki tanı bilgisini (süre, token, kullanılan kademe) kontrol
-edin. Aynı belge aynı talimat sürümüyle tekrar çalıştırılırsa sunucu içi önbellek
-sayesinde model çağrılmaz.
+edin. Daha önce analiz edilmiş bir belge tekrar çalıştırılırsa model hiç çağrılmaz:
+sonuç kalıcı analiz kaydından anında (0 token) döner ve ekranda "Bu şartname daha önce
+analiz edilmişti" notu görünür. Bu kayıt sunucu yeniden başlatılsa da durur
+(bkz. `docs/KALICI_ANALIZ_ONBELLEGI.md`).
 
 **"Tarayıcı deposu güncellenemedi" uyarısı.**
 Uygulamanın açık olduğu başka sekmeler veritabanı yükseltmesini engelliyor. Diğer

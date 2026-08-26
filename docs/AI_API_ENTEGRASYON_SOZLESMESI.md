@@ -111,7 +111,7 @@ Model, `EXTRACTION_SCHEMA` ile sınırlandırılmış tek bir JSON döndürür:
 
 Hata cevabı her zaman `{ "error": string }` + anlamlı HTTP durumu: `400` eksik/bozuk alan, `413` boyut, `415` tür, `502/504` sağlayıcı, `503` anahtar yok, `429` hız sınırı.
 
-Önbellek anahtarı `EXTRACTION_PROMPT_VERSION`, belge karması, şablon karması ve model adından türetilir; aynı belge aynı talimat sürümüyle tekrar analiz edilirse model çağrılmaz. Talimat veya şema değiştiğinde `EXTRACTION_PROMPT_VERSION` artırılır.
+**Önbellek iki katmanlı ve kalıcıdır.** Anahtar `EXTRACTION_PROMPT_VERSION`, belge içeriğinin SHA-256'sı, model adı, görüntü çözünürlüğü, düşünme kademesi ve sayfa sayısından türetilir; dosya adı anahtara girmez. İsabet önce süreç belleğinde, yoksa D1'deki `criteria_analysis_cache` tablosunda aranır; bulunursa model **hiç çağrılmaz** ve cevap `diagnostics` içinde `cached: true`, `cacheStore: "memory" | "database"`, `firstAnalyzedAt` (belgenin ilk analiz zamanı), `promptTokens/outputTokens: 0`, `apiCalls: 0` taşır. Kalıcı kayıt sunucu yeniden başlatıldığında da durur. Normalizasyondan 0 kriterle çıkan çıktı hiçbir katmana yazılmaz; aynı belgeye eşzamanlı ikinci istek ilkinin sonucunu bekler. Talimat veya şema değiştiğinde `EXTRACTION_PROMPT_VERSION` artırılır ve eski kayıtlar doğal olarak eşleşmez. Ayrıntı: `docs/KALICI_ANALIZ_ONBELLEGI.md`.
 
 ## Yapay zekâ için değişmez kurallar
 

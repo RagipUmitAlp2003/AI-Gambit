@@ -159,6 +159,10 @@ export type AnalysisDiagnostics = {
   documentTransfers?: number;
   /** Belge referansla mı gönderildi (Files API) yoksa satır içi mi? */
   documentDelivery?: "file_uri" | "inline";
+  /** Önbellek isabetinin kaynağı: süreç belleği ya da D1'deki kalıcı kayıt. */
+  cacheStore?: "memory" | "database";
+  /** Önbellekten dönen sonucun İLK analiz zamanı; taze analizde bulunmaz. */
+  firstAnalyzedAt?: string;
 };
 
 /**

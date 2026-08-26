@@ -161,6 +161,19 @@ const WORKFLOW_SCHEMA = [
     updated_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_submission_fingerprints_scope ON submission_fingerprints (competition_key, updated_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS criteria_analysis_cache (
+    cache_key TEXT PRIMARY KEY,
+    document_hash TEXT NOT NULL,
+    source_document_name TEXT NOT NULL,
+    model TEXT NOT NULL,
+    page_count INTEGER NOT NULL,
+    raw_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL,
+    use_count INTEGER NOT NULL DEFAULT 1
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_analysis_cache_recency
+   ON criteria_analysis_cache (last_used_at DESC)`,
   `CREATE TABLE IF NOT EXISTS application_assignments (
     id TEXT PRIMARY KEY,
     application_id TEXT NOT NULL,
@@ -1677,6 +1690,96 @@ export async function saveCriteriaExtractionRun(
     .bind(id).first<ExtractionRow>();
   if (!row) throw new Error("Analiz geçmişi kaydedildi ancak geri okunamadı.");
   return toExtractionRun(row);
+}
+
+/**
+ * Kalıcı analiz önbelleğinin satır üst sınırı. Amaç kayıt tutmaktır, arşiv
+ * şişirmek değil: sınır aşıldığında en uzun süredir KULLANILMAYAN kayıtlar
+ * silinir; sık analiz edilen şartnameler kalır.
+ */
+const ANALYSIS_CACHE_ROW_LIMIT = 200;
+
+export type StoredAnalysisEntry = {
+  /** Modelin şemalı ham JSON çıktısı; normalizasyon her okumada yeniden çalışır. */
+  rawJson: string;
+  model: string;
+  pageCount: number;
+  /** Bu belgenin modelle İLK analiz edildiği an. */
+  createdAt: string;
+};
+
+/**
+ * Aynı belge + aynı analiz yapılandırması daha önce işlendiyse kalıcı kaydı
+ * döndürür. İsabet, kayıt tazeliği için `last_used_at` üzerinden işaretlenir;
+ * işaretleme başarısız olsa bile sonuç döner (okuma yolunu kırmaz).
+ */
+export async function findStoredAnalysis(cacheKey: string): Promise<StoredAnalysisEntry | null> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT raw_json, model, page_count, created_at FROM criteria_analysis_cache WHERE cache_key = ?`,
+  ).bind(cacheKey).first<{ raw_json: string; model: string; page_count: number; created_at: string }>();
+  if (!row) return null;
+  await database.prepare(
+    `UPDATE criteria_analysis_cache SET last_used_at = ?, use_count = use_count + 1 WHERE cache_key = ?`,
+  ).bind(new Date().toISOString(), cacheKey).run().catch(() => undefined);
+  return {
+    rawJson: row.raw_json,
+    model: row.model,
+    pageCount: Number(row.page_count) || 0,
+    createdAt: row.created_at,
+  };
+}
+
+/**
+ * Bellek katmanından sunulan isabetlerde kalıcı kaydın tazeliğini işaretler.
+ * Bu olmadan sık kullanılan bir belge hep bellekten servis edildiği için
+ * D1'de "soğuk" görünür ve satır sınırı budaması en sıcak kaydı silebilirdi.
+ */
+export async function touchStoredAnalysis(cacheKey: string): Promise<void> {
+  const database = await workflowDatabase();
+  await database.prepare(
+    `UPDATE criteria_analysis_cache SET last_used_at = ?, use_count = use_count + 1 WHERE cache_key = ?`,
+  ).bind(new Date().toISOString(), cacheKey).run();
+}
+
+/** Taze analiz sonucunu kalıcı önbelleğe yazar ve satır sınırını uygular. */
+export async function saveStoredAnalysis(input: {
+  cacheKey: string;
+  documentHash: string;
+  sourceDocumentName: string;
+  model: string;
+  pageCount: number;
+  rawJson: string;
+}): Promise<void> {
+  const database = await workflowDatabase();
+  const timestamp = new Date().toISOString();
+  await database.prepare(
+    `INSERT INTO criteria_analysis_cache
+      (cache_key, document_hash, source_document_name, model, page_count, raw_json, created_at, last_used_at, use_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+     ON CONFLICT(cache_key) DO UPDATE SET
+       raw_json = excluded.raw_json,
+       source_document_name = excluded.source_document_name,
+       model = excluded.model,
+       page_count = excluded.page_count,
+       last_used_at = excluded.last_used_at`,
+  ).bind(
+    input.cacheKey,
+    input.documentHash,
+    input.sourceDocumentName.slice(0, 240),
+    input.model,
+    input.pageCount,
+    input.rawJson,
+    timestamp,
+    timestamp,
+  ).run();
+  await database.prepare(
+    `DELETE FROM criteria_analysis_cache WHERE cache_key IN (
+       SELECT cache_key FROM criteria_analysis_cache
+       ORDER BY last_used_at DESC
+       LIMIT -1 OFFSET ?
+     )`,
+  ).bind(ANALYSIS_CACHE_ROW_LIMIT).run().catch(() => undefined);
 }
 
 export async function listCriteriaExtractionRuns(account: AdminAccount): Promise<CriteriaExtractionRun[]> {

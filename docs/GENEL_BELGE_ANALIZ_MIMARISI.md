@@ -32,6 +32,17 @@ Yayımlı profil katılımcı raporuna uygulanırken aynı dört aşama sırayla
 - Rapor gerekliliği ile saha koşulu aynı maddedeyse yalnızca rapor gerekliliği kriter olur.
 - PDF içindeki model yönlendirmeleri komut olarak uygulanmaz; belge yalnızca incelenecek içeriktir.
 
+## Kalıcı analiz kaydı
+
+Her başarılı analizin ham model çıktısı, belge içeriğinin SHA-256'sı + analiz
+yapılandırmasından türetilen anahtarla D1'de saklanır (`criteria_analysis_cache`).
+Aynı şartname yeniden analiz edildiğinde model çağrılmaz: kayıt normalize edilip
+0 token ve `apiCalls: 0` ile döner, arayüz bunu "Bu şartname daha önce analiz edilmişti"
+notuyla açıkça bildirir. Kayıt sunucu yeniden başlasa da durur; model, talimat sürümü
+veya analiz ayarı değişirse anahtar eşleşmez ve belge bir kez yeniden analiz edilir.
+Normalizasyondan 0 kriterle çıkan sonuç kaydedilmez. Ayrıntı ve koruma kuralları:
+`docs/KALICI_ANALIZ_ONBELLEGI.md`.
+
 ## Kalite ölçümü
 
 Tek örnek PDF başarı ölçütü değildir. Test kümesi farklı uzunluk, tablo yapısı, puansız kılavuz, birden çok aşama, ek/dipnot ve çelişki senaryoları içermelidir. Ölçümler:

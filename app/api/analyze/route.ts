@@ -13,7 +13,7 @@ import { MEDIA_RESOLUTION, describeGeminiFailure, mediaResolutionPart, runSingle
 import { recordUsage } from "../../lib/usage-metrics";
 import { pdfIntegrityError } from "../../lib/pdf-integrity";
 import { sourcePageLimit } from "../../lib/pdf-page-count";
-import { saveCriteriaExtractionRun } from "../../lib/workflow-db";
+import { findStoredAnalysis, saveCriteriaExtractionRun, saveStoredAnalysis, touchStoredAnalysis } from "../../lib/workflow-db";
 import type { AnalysisDiagnostics, AnalysisResult } from "../../lib/types";
 
 /**
@@ -155,13 +155,21 @@ async function uploadPdfOnce(
 }
 
 /**
- * Aynı belgenin yeniden analizini önleyen sunucu içi önbellek. Model
- * çıktısının ham hali saklanır; normalizasyon her istekte yeniden çalışır.
+ * Aynı belgenin yeniden analizini önleyen İKİ KATLI önbellek.
+ *
+ *   1. Süreç belleği (aşağıdaki Map): en hızlı yol; sunucu yeniden başlayınca silinir.
+ *   2. D1 `criteria_analysis_cache` tablosu: KALICI kayıt. Daha önce analiz
+ *      edilmiş bir şartname, sunucu yeniden başlasa bile modele gitmeden
+ *      (0 token, apiCalls: 0) kayıttaki sonuçla yanıtlanır.
+ *
+ * Model çıktısının ham hali saklanır; normalizasyon her istekte yeniden çalışır.
  */
 type CachedExtraction = {
   raw: RawExtraction;
   model: string;
   pageCount: number;
+  /** Bu çıktının modelle İLK üretildiği an; önbellek isabetinde kullanıcıya gösterilir. */
+  analyzedAt: string;
 };
 
 const cacheHost = globalThis as unknown as { __kriterAnalysisCache?: Map<string, CachedExtraction> };
@@ -169,6 +177,46 @@ const cacheHost = globalThis as unknown as { __kriterAnalysisCache?: Map<string,
 function analysisCache(): Map<string, CachedExtraction> {
   if (!cacheHost.__kriterAnalysisCache) cacheHost.__kriterAnalysisCache = new Map();
   return cacheHost.__kriterAnalysisCache;
+}
+
+function rememberExtraction(cacheKey: string, extraction: CachedExtraction) {
+  const cache = analysisCache();
+  cache.set(cacheKey, extraction);
+  if (cache.size > CACHE_LIMIT) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey) cache.delete(oldestKey);
+  }
+}
+
+/**
+ * Önbelleğe almaya değer mi? Ham çıktı gerçek bir nesne olmalı ve normalizasyon
+ * EN AZ BİR kriter üretmeli. Boş/kullanılamaz bir sonucu kalıcılaştırmak,
+ * belgeyi sonsuza dek "0 kriter"e kilitlerdi: yönetici yeniden denese bile
+ * model bir daha çağrılmazdı (düşünen modeller sıcaklık 0'da bile birebir
+ * deterministik değildir; yeniden deneme gerçekten kurtarabilir). Böyle bir
+ * sonuç yine istemciye döndürülür ama hiçbir önbellek katmanına yazılmaz.
+ */
+function cacheableExtraction(extraction: CachedExtraction): boolean {
+  if (!extraction.raw || typeof extraction.raw !== "object") return false;
+  try {
+    return normalizeExtraction(extraction.raw, extraction.pageCount).criteria.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Uçuş içi analizlerin kaydı: aynı belge için ikinci istek, ilk isteğin
+ * sonucunu bekler ve modele İKİNCİ bir çağrı yapmaz. İlk istek başarısız
+ * biterse söz null ile çözülür ve bekleyen istek kendi analizini başlatır.
+ * Kayıt izolat yereldir; izolatlar arası eşzamanlılıkta koruma D1 katmanının
+ * ON CONFLICT davranışına düşer (veri bozulmaz, yalnızca çift maliyet olur).
+ */
+const inflightHost = globalThis as unknown as { __kriterAnalysisInflight?: Map<string, Promise<CachedExtraction | null>> };
+
+function inflightAnalyses(): Map<string, Promise<CachedExtraction | null>> {
+  if (!inflightHost.__kriterAnalysisInflight) inflightHost.__kriterAnalysisInflight = new Map();
+  return inflightHost.__kriterAnalysisInflight;
 }
 
 async function documentHash(bytes: ArrayBuffer) {
@@ -220,6 +268,11 @@ export async function POST(request: Request) {
   }
   let uploadedGeminiFileName = "";
   let cleanupApiKey = "";
+  // Uçuş içi kaydın her çıkış yolunda (hata dahil) temizlenmesi için dıştaki
+  // finally kullanılır; başarıda söz zaten çözülmüştür, ikinci çözüm işlemsizdir.
+  // Kayıt açılmadıysa işlemsiz fonksiyon çağrılır ve hiçbir etkisi olmaz.
+  let inflightKey = "";
+  let settleInflight: (value: CachedExtraction | null) => void = () => {};
   try {
     if (requestBodyTooLarge(request, MAX_MULTIPART_BYTES)) {
       return Response.json({ error: "Gönderilen analiz isteği izin verilen boyutu aşıyor." }, { status: 413 });
@@ -262,9 +315,10 @@ export async function POST(request: Request) {
 
     // Aynı belge ve aynı talimat daha önce işlendiğinde modeli hiç çağırma.
     // Önbellek isabetinde `apiCalls: 0` yazılır; sayı uydurulmaz.
+    const docHash = await documentHash(pdfBytes);
     const cacheContext = JSON.stringify({
       promptVersion: EXTRACTION_PROMPT_VERSION,
-      document: await documentHash(pdfBytes),
+      document: docHash,
       model: PRIMARY_MODEL,
       // Çözünürlük ve düşünme bütçesi çıktıyı değiştirir; ayar değişince eski
       // önbellek kaydı geçersiz olmalı, aksi hâlde yeni ayar hiç denenmez.
@@ -273,17 +327,68 @@ export async function POST(request: Request) {
       pageCount,
     });
     const cacheKey = await documentHash(new TextEncoder().encode(cacheContext).buffer);
-    const cachedExtraction = analysisCache().get(cacheKey);
-    if (cachedExtraction) {
+
+    /** Önbellek isabeti: modele gidilmez, 0 token; kaynağı tanılamaya yazılır. */
+    const respondFromCache = async (extraction: CachedExtraction, store: "memory" | "database") => {
       const totalMs = Date.now() - startedAt;
-      recordUsage({ model: cachedExtraction.model, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: totalMs, cached: true, error: false, apiCalls: 0 });
-      const cachedResult = buildResult(cachedExtraction, {
+      recordUsage({ model: extraction.model, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: totalMs, cached: true, error: false, apiCalls: 0 });
+      // Bellekten sunulan isabet kalıcı kaydın tazeliğini de işaretler; aksi
+      // hâlde en sık kullanılan belge D1'de "soğuk" görünür ve satır sınırı
+      // budaması tam da onu silerdi. Güncelleme başarısız olsa da yanıt döner.
+      if (store === "memory") await touchStoredAnalysis(cacheKey).catch(() => undefined);
+      const cachedResult = buildResult(extraction, {
         totalMs, modelMs: 0, promptTokens: 0, outputTokens: 0, cached: true, apiCalls: 0, documentTransfers: 0,
+        cacheStore: store, firstAnalyzedAt: extraction.analyzedAt,
       });
       await saveCriteriaExtractionRun(cachedResult, file.name, auth.account)
         .catch((historyError) => console.error("[workflow] analiz geçmişi kaydedilemedi", historyError));
       return Response.json(cachedResult);
+    };
+
+    const cachedExtraction = analysisCache().get(cacheKey);
+    if (cachedExtraction) return await respondFromCache(cachedExtraction, "memory");
+
+    // Süreç belleğinde yoksa kalıcı kayda bakılır: sunucu yeniden başlasa bile
+    // daha önce analiz edilmiş şartname modele gitmeden yanıtlanır. Kayıt
+    // okunamazsa analiz normal yoldan sürer; önbellek hiçbir isteği düşürmez.
+    const storedAnalysis = await findStoredAnalysis(cacheKey).catch((cacheError) => {
+      console.error("[analyze] kalıcı analiz kaydı okunamadı", cacheError);
+      return null;
+    });
+    if (storedAnalysis) {
+      let storedExtraction: CachedExtraction | null = null;
+      try {
+        storedExtraction = {
+          raw: JSON.parse(storedAnalysis.rawJson) as RawExtraction,
+          model: storedAnalysis.model,
+          pageCount: storedAnalysis.pageCount || pageCount,
+          analyzedAt: storedAnalysis.createdAt,
+        };
+      } catch (parseError) {
+        console.error("[analyze] kalıcı analiz kaydı çözümlenemedi; belge yeniden analiz edilecek", parseError);
+      }
+      // Kayıt hem okunabilir hem kullanılabilir olmalı: 0 kriter üreten eski
+      // bir satır isabet sayılmaz, belge yeniden analiz edilip üzerine yazılır.
+      if (storedExtraction && cacheableExtraction(storedExtraction)) {
+        rememberExtraction(cacheKey, storedExtraction);
+        return await respondFromCache(storedExtraction, "database");
+      }
+      if (storedExtraction) {
+        console.warn("[analyze] kalıcı analiz kaydı kullanılamaz (0 kriter); belge yeniden analiz edilecek");
+      }
     }
+
+    // Aynı belge şu anda başka bir istekte analiz ediliyorsa modele ikinci bir
+    // çağrı başlatılmaz; ilk isteğin sonucu beklenir ve önbellek gibi sunulur.
+    // (Bekleyiş analiz iznini tutar: en kötü durumda bir eşzamanlılık yuvası
+    // ilk istek bitene dek dolu kalır; iki tam model çağrısından ucuzdur.)
+    const inflight = inflightAnalyses().get(cacheKey);
+    if (inflight) {
+      const sharedExtraction = await inflight.catch(() => null);
+      if (sharedExtraction) return await respondFromCache(sharedExtraction, "memory");
+    }
+    inflightKey = cacheKey;
+    inflightAnalyses().set(cacheKey, new Promise((resolve) => { settleInflight = resolve; }));
 
     const uploadStartedAt = Date.now();
     const uploadedFile = pdfBytes.byteLength <= INLINE_PDF_FAST_PATH_BYTES
@@ -353,13 +458,30 @@ export async function POST(request: Request) {
     } catch {
       return failWith(502, "Belge analizi şemaya uygun JSON olarak okunamadı.");
     }
+    // JSON.parse "null" gibi nesne olmayan gövdeleri de geçirir; böyle bir
+    // gövde normalizasyonda patlar ve önbelleğe girerse her isteği düşürürdü.
+    if (!raw || typeof raw !== "object") {
+      return failWith(502, "Belge analizi şemaya uygun JSON olarak okunamadı.");
+    }
 
-    const extraction: CachedExtraction = { raw, model: modelUsed, pageCount };
-    const cache = analysisCache();
-    cache.set(cacheKey, extraction);
-    if (cache.size > CACHE_LIMIT) {
-      const oldestKey = cache.keys().next().value;
-      if (oldestKey) cache.delete(oldestKey);
+    const extraction: CachedExtraction = { raw, model: modelUsed, pageCount, analyzedAt: new Date().toISOString() };
+    if (cacheableExtraction(extraction)) {
+      rememberExtraction(cacheKey, extraction);
+      // Taze sonuç kalıcı kayda da yazılır; yazılamazsa analiz sonucu yine döner.
+      await saveStoredAnalysis({
+        cacheKey,
+        documentHash: docHash,
+        sourceDocumentName: file.name,
+        model: modelUsed,
+        pageCount,
+        rawJson: responseText,
+      }).catch((cacheError) => console.error("[analyze] kalıcı analiz kaydı yazılamadı", cacheError));
+      // Bekleyen eş istekler sonucu buradan alır; model ikinci kez çağrılmaz.
+      settleInflight(extraction);
+    } else {
+      // 0 kriter üreten sonuç kalıcılaştırılmaz: kullanıcı "Yeniden dene"
+      // dediğinde model gerçekten yeniden çalışır ve şansı olur.
+      console.warn("[analyze] sonuç önbelleğe alınmadı: normalizasyon hiç kriter üretmedi.");
     }
 
     const totalMs = Date.now() - startedAt;
@@ -395,6 +517,10 @@ export async function POST(request: Request) {
     recordUsage({ model: PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls: 0 });
     return Response.json({ error: "Belge analizi sırasında beklenmeyen bir hata oluştu." }, { status: 500 });
   } finally {
+    // Hata dahil her çıkışta uçuş içi kayıt temizlenir; başarıda söz zaten
+    // çözüldüğü için buradaki null çözümü işlemsizdir.
+    settleInflight(null);
+    if (inflightKey) inflightAnalyses().delete(inflightKey);
     if (cleanupApiKey && uploadedGeminiFileName) {
       await deleteGeminiFile(cleanupApiKey, uploadedGeminiFileName);
     }

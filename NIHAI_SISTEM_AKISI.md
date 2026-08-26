@@ -36,6 +36,8 @@ Yalnızca yarışmanın PDF (rapor) aşaması kontrol edilir. Puanlama sistemler
 6. Yönetici kriter ekleyebilir, düzenleyebilir, pasifleştirebilir veya silebilir. Kriter bölümü dışındaki bölümler (sabit ön kontroller, şablon önizleme, puan yapısı, AI notları) ekranda yoktur.
 7. Yönetici profili yayımladığında yarışma başvuruya açılır. Profil sürümü 2.0'dır; eski 1.0 profiller okunurken yükseltilir. Hakem kriter oluşturma veya yayımlama aşamasına katılmaz.
 
+**Kalıcı analiz kaydı:** her başarılı analizin ham çıktısı, belge içeriği + analiz yapılandırması anahtarıyla D1'e yazılır (`criteria_analysis_cache`). Aynı şartname yeniden analiz edildiğinde model çağrılmaz; kayıtlı sonuç 0 token ile döner ve arayüz bunu açıkça bildirir. Sunucu yeniden başlasa da kayıt durur (bkz. `docs/KALICI_ANALIZ_ONBELLEGI.md`).
+
 ## Başvuru ve Hakem akışı
 
 1. Yarışmacı açık yarışmayı seçer; adı-soyadı, takım adı, ekip üyeleri ve PDF'i gönderir.
@@ -92,6 +94,8 @@ Cloudflare D1 içinde hesaplar, oturumlar, roller, yarışmalar, kriterler, baş
 
 `criteria` tablosunda dört aşamalı model şu şekilde tutulur: `applicability` sütunu kriterin **aşamasını** (`language_template`, `headings_content`, `category_similarity`, `criteria_evidence`), `effect` sütunu zorunluluğu (`required` / `other`) taşır; `max_score` her zaman `NULL` yazılır. Kriterin tam hâli `criterion_json` içindedir. Sütun adları eski şemadan korunmuştur; anlamları yukarıdaki gibidir.
 
+`criteria_analysis_cache` tablosu şartname analizlerinin ham model çıktısını belge içeriği + analiz yapılandırması karmasıyla saklar; aynı belgenin yeniden analizi modele gitmeden bu kayıttan yanıtlanır (`docs/KALICI_ANALIZ_ONBELLEGI.md`).
+
 SQL sırası:
 
 1. `migrations/0001_admin.sql`
@@ -99,6 +103,8 @@ SQL sırası:
 3. `migrations/0003_application_teams_and_history.sql`
 4. `migrations/0004_roles_v2.sql`
 5. `migrations/0005_final_workflow.sql`
+6. `migrations/0006_competition_priority.sql`
+7. `migrations/0007_analysis_cache.sql`
 
 ## Kontrol sonucu
 

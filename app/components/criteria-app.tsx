@@ -321,6 +321,7 @@ function CriteriaReview({
   analysisWarnings,
   documentUrl,
   editingPublished,
+  cacheNotice,
   criteria,
   setCriteria,
   onBack,
@@ -351,6 +352,8 @@ function CriteriaReview({
    *         kimliğiyle veri tabanına yazılır.
    */
   editingPublished: boolean;
+  /** Sonuç kalıcı analiz kaydından geldiyse gösterilen bilgi notu; taze analizde boş. */
+  cacheNotice: string;
   criteria: Criterion[];
   setCriteria: (criteria: Criterion[]) => void;
   onBack: () => void;
@@ -540,6 +543,10 @@ function CriteriaReview({
           mevcut başvurular güncel kriter setine bağlı kalır.
         </p>
       ) : null}
+
+      {/* Not yalnızca taze bir önbellek isabetini anlatır; yayımlanmış profil
+          düzenlenirken bağlam değiştiği için gösterilmez. */}
+      {cacheNotice && !editingPublished ? <p className="page-note" role="status">{cacheNotice}</p> : null}
 
       {analysisWarnings.length ? (
         <ul className="analysis-warning-list" role="status">
@@ -920,6 +927,8 @@ export default function CriteriaApp() {
   const [loadingMessage, setLoadingMessage] = useState("");
   const [error, setError] = useState("");
   const [errorRetryable, setErrorRetryable] = useState(false);
+  /** Sonuç kayıttan geldiyse (önbellek isabeti) inceleme adımında gösterilen bilgi notu. */
+  const [cacheNotice, setCacheNotice] = useState("");
   const [approvalError, setApprovalError] = useState("");
   const [publishing, setPublishing] = useState(false);
   const [draftReady, setDraftReady] = useState(false);
@@ -1022,6 +1031,7 @@ export default function CriteriaApp() {
     setCriteria([]);
     setProfile(null);
     setEditedProfile(null);
+    setCacheNotice("");
   }
 
   async function analyze() {
@@ -1047,6 +1057,22 @@ export default function CriteriaApp() {
       setSetup(analysis.setup);
       setCriteria(analysis.criteria);
       setEditedProfile(null);
+      // Önbellek isabetinde model hiç çağrılmaz; yönetici bunu açıkça görür.
+      if (analysis.diagnostics?.cached) {
+        let firstAnalyzed = "";
+        if (analysis.diagnostics.firstAnalyzedAt) {
+          const parsed = new Date(analysis.diagnostics.firstAnalyzedAt);
+          if (!Number.isNaN(parsed.getTime())) {
+            firstAnalyzed = parsed.toLocaleString("tr-TR", { dateStyle: "long", timeStyle: "short" });
+          }
+        }
+        setCacheNotice(
+          `Bu şartname daha önce analiz edilmişti${firstAnalyzed ? ` (ilk analiz: ${firstAnalyzed})` : ""}. `
+          + "Kayıtlı sonuç gösterildi; yapay zekâ yeniden çalıştırılmadı ve token harcanmadı.",
+        );
+      } else {
+        setCacheNotice("");
+      }
       setStep(2);
     } catch (analysisError) {
       // Geçici model hatasında kullanıcıya "Yeniden dene" sunulur; sistem
@@ -1142,6 +1168,7 @@ export default function CriteriaApp() {
     setEditedProfile(null);
     setError("");
     setErrorRetryable(false);
+    setCacheNotice("");
     setApprovalError("");
     clearDraftSnapshot();
     saveDraftFile(null).catch(() => undefined);
@@ -1201,6 +1228,7 @@ export default function CriteriaApp() {
             analysisWarnings={source.warnings}
             documentUrl={sourceDocumentUrl}
             editingPublished={savedBefore}
+            cacheNotice={cacheNotice}
             criteria={criteria}
             setCriteria={setCriteria}
             onBack={() => setStep(1)}
