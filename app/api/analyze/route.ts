@@ -316,23 +316,26 @@ export async function POST(request: Request) {
     });
 
     let modelUsed = PRIMARY_MODEL;
-    /** Gerçekten yapılan `generateContent` isteği sayısı; tanılamaya bu yazılır. */
-    let apiCalls: 0 | 1 = 0;
+    /** Ücretlendirilen `generateContent` isteği sayısı; tanılamaya bu yazılır. */
+    let apiCalls = 0;
+    /** Gemini'nin bedelsiz 503/500 reddi; faturalanmaz, `apiCalls` ile toplanmaz. */
+    let rejectedAttempts = 0;
 
     const failWith = (status: number, detail: string) => {
-      console.error("AI analiz isteği başarısız:", { status, detail, apiCalls });
+      console.error("AI analiz isteği başarısız:", { status, detail, apiCalls, rejectedAttempts });
       recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls });
-      const failure = describeGeminiFailure(status, detail, "AI belge analizi");
+      const failure = describeGeminiFailure(status, detail, "AI belge analizi", rejectedAttempts);
       // `retryable` istemciye "Yeniden dene" düğmesini göstermesini söyler;
-      // sunucu kendiliğinden ikinci bir çağrı yapmaz.
+      // sunucu kendiliğinden ikinci bir ÜCRETLİ çağrı yapmaz.
       return Response.json(
-        { error: failure.message, retryable: failure.transient, apiCalls },
+        { error: failure.message, retryable: failure.transient, apiCalls, rejectedAttempts },
         { status: failure.httpStatus },
       );
     };
 
     const modelStartedAt = Date.now();
-    // TEK çağrı: yedek model, tarama turu ve gizli yeniden deneme yoktur.
+    // TEK ÜCRETLİ çağrı: yedek model ve tarama turu yoktur. Yalnızca Gemini'nin
+    // bedelsiz 503/500 reddi sınırlı sayıda yeniden denenir (bkz. gemini-generation).
     const outcome = await runSingleGeneration({
       apiKey,
       body,
@@ -342,6 +345,7 @@ export async function POST(request: Request) {
     });
     const modelMs = Date.now() - modelStartedAt;
     apiCalls = outcome.apiCalls;
+    rejectedAttempts = outcome.rejectedAttempts;
     if (!outcome.ok) return failWith(outcome.status, outcome.detail);
     modelUsed = outcome.model;
 
@@ -384,6 +388,7 @@ export async function POST(request: Request) {
       uploadMs: fileUri ? uploadMs : 0,
       // Gerçek istek sayısı; "1 dedik ama 6 gönderdik" durumu yaşanmaz.
       apiCalls,
+      rejectedAttempts,
       documentTransfers: 1,
       documentDelivery: fileUri ? "file_uri" : "inline",
     });

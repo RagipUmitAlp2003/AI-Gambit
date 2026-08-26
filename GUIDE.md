@@ -89,17 +89,30 @@ Birkaç önemli nokta:
 - Anahtar yalnızca sunucu tarafında okunur; tarayıcıya hiçbir zaman gönderilmez.
 - Dosyayı kaydettikten sonra **dev sunucusunu yeniden başlatın** — ortam değişkenleri
   yalnızca açılışta okunur.
-- Şartname analizi ve katılımcı rapor analizi **tek model çağrısıyla** yapılır: bir
-  kullanıcı işlemi için modele tam olarak bir `generateContent` isteği gider. Yedek
-  model kademesi, model tarama turu ve gizli yeniden deneme döngüsü yoktur; bu yüzden
-  `GEMINI_FALLBACK_MODEL`, `GEMINI_THIRD_MODEL`, `GEMINI_MODEL_SWEEPS`,
-  `GEMINI_RETRY_BUDGET_MS` ve `MODEL_COOLDOWN_MS` ayarları kaldırıldı. Geçici bir hatada
-  (429/503/zaman aşımı) ekranda açık bir hata ve **Yeniden dene** düğmesi görürsünüz.
+- Şartname analizi ve katılımcı rapor analizi **tek ücretli model çağrısıyla** yapılır:
+  bir kullanıcı işlemi için modele tam olarak bir `generateContent` isteği gider. Yedek
+  model kademesi ve model tarama turu yoktur; bu yüzden `GEMINI_FALLBACK_MODEL`,
+  `GEMINI_THIRD_MODEL`, `GEMINI_MODEL_SWEEPS` ve `MODEL_COOLDOWN_MS` ayarları kaldırıldı.
+  Kota/hız hatası (429), zaman aşımı ve yapılandırma hataları yeniden **denenmez**;
+  ekranda açık bir hata ve **Yeniden dene** düğmesi görürsünüz.
+- **Tek istisna, Gemini'nin bedelsiz reddi:** model bazen isteği hiç okumadan
+  `503 UNAVAILABLE` ("high demand") ile geri çevirir. Bu redlerde yanıtta `usageMetadata`
+  yoktur, tek bir token bile faturalanmaz — bu yüzden sunucu bunları kendiliğinden,
+  artan beklemeyle en fazla `GEMINI_MAX_ATTEMPTS` (varsayılan 4) kez yeniden dener ve
+  toplam süreyi `GEMINI_TOTAL_BUDGET_MS` (varsayılan 300 000 ms) ile sınırlar. Ücretli
+  çağrı sayısı yine 1'i aşmaz: tanılamada `apiCalls` ücretli isteği, `rejectedAttempts`
+  ise faturalanmayan redleri sayar. Yeniden denemeyi tamamen kapatmak için
+  `GEMINI_MAX_ATTEMPTS=1` yazın.
 - **Aynı belgede sürekli "AI modeli şu anda yoğun" (503) alıyorsanız** sorun geçici
-  yoğunluk değildir: Gemini, çok sayfalı PDF'leri yüksek görüntü çözünürlüğüyle işlemeyi
-  bu kodla reddeder. `.env.local` içindeki `GEMINI_MEDIA_RESOLUTION` değeri `LOW` olmalıdır
-  (varsayılan budur). Ölçüm: 29 sayfalık şartname, `MEDIUM` → 4/4 denemede 503, `LOW` → 3/3
-  denemede başarılı, aynı kriter sayısı ve aynı kaynak sayfa doluluğu.
+  yoğunluk değildir; iki ayar birden bakılmalıdır:
+  1. `GEMINI_MEDIA_RESOLUTION` değeri `LOW` olmalıdır (varsayılan budur). Gemini, çok
+     sayfalı PDF'leri yüksek görüntü çözünürlüğüyle işlemeyi bu kodla reddeder. Ölçüm:
+     29 sayfalık şartname, `MEDIUM` → 4/4 denemede 503, `LOW` → 3/3 denemede başarılı,
+     aynı kriter sayısı ve aynı kaynak sayfa doluluğu.
+  2. `GEMINI_MODEL` değeri kapasitesi dolu bir modeli göstermemelidir. Modeller arasında
+     erişilebilirlik büyük fark gösteriyor: ölçümde `gemini-3.7-flash` düz metin
+     isteğinde bile 5 denemenin 3'ünde 503 döndürürken `gemini-3.5-flash` kararlı
+     çalıştı. Bu yüzden varsayılan `gemini-3.5-flash`'tır.
 - Analiz süresini en çok modelin "düşünme" bütçesi belirler. Sistem bunu belge uzunluğuna
   göre seçer (40 sayfanın altı `LOW`, 40–79 sayfa `MEDIUM`, 80+ sayfa `HIGH`). Daha derin bir kriter
   seti istiyorsanız `.env.local` içine `GEMINI_THINKING_LEVEL=MEDIUM` yazın; daha hızlı yanıt

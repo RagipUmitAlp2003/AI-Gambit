@@ -617,7 +617,9 @@ export async function POST(request: Request) {
     });
 
     const modelStarted = Date.now();
-    // TEK çağrı; model taraması, yedek kademe ve gizli yeniden deneme yoktur.
+    // TEK ÜCRETLİ çağrı; model taraması ve yedek model kademesi yoktur. Yalnızca
+    // Gemini'nin bedelsiz 503/500 reddi sınırlı sayıda yeniden denenir; ayrıntı
+    // ve ölçüm gerekçesi için bkz. lib/gemini-generation.
     const outcome = await runSingleGeneration({
       apiKey,
       body,
@@ -627,14 +629,22 @@ export async function POST(request: Request) {
     });
     const modelMs = Date.now() - modelStarted;
     const modelUsed = outcome.model || PRIMARY_MODEL;
-    /** Gerçekten yapılan üretim isteği sayısı; tanılamaya bu yazılır. */
+    /** Ücretlendirilen üretim isteği sayısı; tanılamaya bu yazılır. */
     const apiCalls = outcome.apiCalls;
+    /** Faturalanmayan, sunucunun kendiliğinden yeniden denediği red sayısı. */
+    const rejectedAttempts = outcome.rejectedAttempts;
     if (!outcome.ok) {
-      console.error("Katılımcı raporu AI analizi başarısız:", { status: outcome.status, detail: outcome.detail, apiCalls });
+      console.error("Katılımcı raporu AI analizi başarısız:", {
+        status: outcome.status,
+        detail: outcome.detail,
+        apiCalls,
+        attempts: outcome.attempts,
+        rejectedAttempts,
+      });
       recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls });
-      const failure = describeGeminiFailure(outcome.status, outcome.detail, "AI rapor analizi");
+      const failure = describeGeminiFailure(outcome.status, outcome.detail, "AI rapor analizi", rejectedAttempts);
       return Response.json(
-        { error: failure.message, retryable: failure.transient, apiCalls },
+        { error: failure.message, retryable: failure.transient, apiCalls, rejectedAttempts },
         { status: failure.httpStatus },
       );
     }
@@ -657,6 +667,7 @@ export async function POST(request: Request) {
       uploadMs: uploaded ? uploadMs : 0,
       // Gerçek istek sayısı; sabit "1" yazılmaz.
       apiCalls,
+      rejectedAttempts,
       documentTransfers: 1,
       documentDelivery: uploaded ? "file_uri" : "inline",
     };

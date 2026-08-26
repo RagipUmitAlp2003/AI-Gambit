@@ -153,8 +153,14 @@ export type AnalysisDiagnostics = {
   cached: boolean;
   /** Belgenin Files API'ye yüklenmesi için geçen süre; satır içi gönderimde 0. */
   uploadMs?: number;
-  /** Bu analizde modele yapılan üretim çağrısı sayısı (yükleme hariç). Yeni prensipte 1. */
+  /** Bu analizde modele yapılan ÜCRETLİ üretim çağrısı sayısı (yükleme hariç). Prensipte 1. */
   apiCalls?: number;
+  /**
+   * Gemini'nin 503 "high demand" ile reddettiği ve sunucunun bedelsiz olarak
+   * yeniden denediği istek sayısı. Faturalanmaz; `apiCalls` ile toplanmaz.
+   * 0'dan büyükse üst akış o an kararsızdı.
+   */
+  rejectedAttempts?: number;
   /** PDF baytlarının ağ üzerinden kaç kez taşındığı. */
   documentTransfers?: number;
   /** Belge referansla mı gönderildi (Files API) yoksa satır içi mi? */

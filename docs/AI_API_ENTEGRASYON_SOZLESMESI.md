@@ -27,7 +27,11 @@ API anahtarı hiçbir zaman `app/components` veya tarayıcıya gönderilen başk
 
 **Tek belge:** Yarışma Yöneticisi yalnızca şartname PDF'sini yükler. Ayrı resmî rapor şablonu yükleme alanı kaldırıldı; `templateFile` ve `templatePageCount` alanları artık kabul edilmez. Zorunlu başlıklar 2. aşama (`headings_content`) kriterlerinden okunur.
 
-**Tek çağrı:** Bir "Belgeyi analiz et" işlemi modele **tam olarak bir** `generateContent` isteği gönderir. Yedek model kademesi, model tarama turu ve gizli yeniden deneme döngüsü yoktur. 429/503/zaman aşımında uç `{ "error": "...", "retryable": true, "apiCalls": 1 }` döndürür ve arayüz kullanıcıya "Yeniden dene" sunar. `diagnostics.apiCalls` gerçekten yapılan istek sayısıdır (önbellek isabetinde 0).
+**Tek ücretli çağrı:** Bir "Belgeyi analiz et" işlemi modele **tam olarak bir ücretli** `generateContent` isteği gönderir. Yedek model kademesi ve model tarama turu yoktur. 429 (kota/hız), zaman aşımı ve yapılandırma hataları yeniden **denenmez**; uç `{ "error": "...", "retryable": true, "apiCalls": 1 }` döndürür ve arayüz kullanıcıya "Yeniden dene" sunar.
+
+**Bedelsiz reddin yeniden denenmesi (tek istisna):** Gemini isteği bazen hiç okumadan `503 UNAVAILABLE` ("high demand") ile geri çevirir; bu yanıtlarda `usageMetadata` yoktur ve tek bir token faturalanmaz. Uç bu redi kullanıcıya taşımadan önce artan bekleme ve `Retry-After` başlığına uyarak en fazla `GEMINI_MAX_ATTEMPTS` (varsayılan 4) kez yeniden dener; toplam süre `GEMINI_TOTAL_BUDGET_MS` (varsayılan 300 000 ms) ile sınırlıdır. Uygulama katmanı bunu `app/lib/gemini-generation.ts` içindedir ve `GEMINI_MAX_ATTEMPTS=1` ile tamamen kapatılabilir.
+
+**Sayaçlar:** `diagnostics.apiCalls` gerçekten **ücretlendirilen** istek sayısıdır (önbellek isabetinde 0, başarılı analizde 1); `diagnostics.rejectedAttempts` ise faturalanmayan 503/500 reddi sayısıdır. İkisi toplanmaz. Bütün denemeler bedelsiz redle bittiğinde uç `apiCalls: 0`, `rejectedAttempts: n` ve `retryable: true` döndürür.
 
 ## Modelden istenen ham cevap
 
