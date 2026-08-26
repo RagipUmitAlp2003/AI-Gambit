@@ -78,7 +78,7 @@ yerine kendi anahtarınızı yazıp **kaydedin**:
 
 ```
 GEMINI_API_KEY=buraya_kendi_anahtariniz
-GEMINI_MODEL=gemini-3-flash-preview
+GEMINI_MODEL=gemini-3.6-flash
 ```
 
 Birkaç önemli nokta:

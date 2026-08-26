@@ -65,15 +65,17 @@ export type GenerationInput = {
 /**
  * Modele tek bir `generateContent` isteği gönderir ve sonucu döndürür.
  *
- * `apiCalls` alanı GERÇEKTEN yapılan üretim isteği sayısıdır: ağ katmanına hiç
- * çıkılamadığında (zaman aşımı/bağlantı hatası) 1, çağrı hiç başlatılmadıysa 0.
- * Tanılama ve kullanım ölçümü bu değeri olduğu gibi yazar.
+ * `apiCalls` alanı GERÇEKTEN yapılan üretim isteği sayısıdır: istek gidip yanıt
+ * gelmediğinde (zaman aşımı) 1; ağ katmanına hiç çıkılamadığında (DNS, TLS,
+ * bağlantı reddi) veya çağrı hiç başlatılmadığında 0. Böylece ölçüm gerçek
+ * faturayla ayrışmaz. Tanılama ve kullanım ölçümü bu değeri olduğu gibi yazar.
  */
 export async function runSingleGeneration(input: GenerationInput): Promise<GenerationOutcome> {
   const { apiKey, body, model, timeoutMs, label } = input;
   if (!model) return { ok: false, status: 502, detail: "Denenecek model tanımlı değil.", model: "", apiCalls: 0 };
 
   let response: Response;
+  const startedAt = Date.now();
   try {
     response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
@@ -84,9 +86,28 @@ export async function runSingleGeneration(input: GenerationInput): Promise<Gener
         signal: AbortSignal.timeout(timeoutMs),
       },
     );
-  } catch {
-    // İstek gitti ama yanıt gelmedi; çağrı sayılır.
-    return { ok: false, status: 504, detail: "AI modeli zaman sınırı içinde yanıt vermedi.", model, apiCalls: 1 };
+  } catch (error) {
+    // Eskiden bu blok `catch {}` idi: zaman aşımı, DNS hatası, TLS/vekil engeli
+    // ve bağlantı kopması AYNI 504 mesajına çıkıyor, sunucuda hiçbir kayıt
+    // bırakmıyordu. Üretimdeki 150 sn'lik başarısızlığın neden olduğunu
+    // anlamak bu yüzden imkânsızdı; artık neden ayırt edilir ve günlüğe yazılır.
+    const elapsedMs = Date.now() - startedAt;
+    const name = error instanceof Error ? error.name : "UnknownError";
+    const cause = (error as { cause?: { code?: string } } | undefined)?.cause?.code ?? "";
+    const timedOut = name === "TimeoutError" || name === "AbortError";
+    console.error(`[gemini:${label}] generateContent yanıtsız kaldı`, { model, elapsedMs, timeoutMs, errorName: name, cause });
+    if (timedOut) {
+      // İstek gerçekten gitti, yanıt gelmedi; çağrı sayılır.
+      return { ok: false, status: 504, detail: `AI modeli ${Math.round(timeoutMs / 1000)} sn içinde yanıt vermedi.`, model, apiCalls: 1 };
+    }
+    // Ağ katmanına hiç çıkılamadı: model bir istek görmedi, faturalanmaz.
+    return {
+      ok: false,
+      status: 502,
+      detail: `AI servisine ağ üzerinden ulaşılamadı (${cause || name}). Bu bir model veya kota hatası değildir.`,
+      model,
+      apiCalls: 0,
+    };
   }
 
   if (response.ok) {
@@ -147,7 +168,13 @@ export function describeGeminiFailure(status: number, detail: string, subject: s
   // yönlendirmesi bu durumda yanlış olduğu için mesaj ayrıştırılır.
   const billingDepleted = /prepayment credits|billing|exceeded your current quota/i.test(detail);
   const message = status === 504
-    ? `${subject} zaman sınırı içinde tamamlanamadı: AI modeli yanıt vermedi. “Yeniden dene” ile aynı belgeyi tekrar gönderebilirsiniz.`
+    // Ölçülen kök neden: bazı model adları bu istek gövdesinde kararsız biçimde
+    // hiç yanıt üretmiyor (bir ölçümde 13 denemenin 8'i yanıtsız kaldı).
+    // Eski mesaj yalnızca "yeniden dene" diyordu; kullanıcı aynı duvara tekrar
+    // tekrar çarpıyordu. Yönlendirme bu yüzden GEMINI_MODEL'i de söyler.
+    ? `${subject} zaman sınırı içinde tamamlanamadı: AI modeli yanıt vermedi. “Yeniden dene” ile aynı belgeyi tekrar gönderebilirsiniz. `
+      + `AYNI belge her denemede zaman aşımına uğruyorsa sorun geçici değildir: yapılandırılan model bu belgeyi işleyemiyor olabilir, `
+      + `.env.local içindeki GEMINI_MODEL değerini çalıştığı doğrulanmış bir modele alın (npm run check:gemini).`
     : billingDepleted
       ? "AI servisi isteği bakiye/kota nedeniyle reddetti: Google AI Studio projesinin ön ödemeli kredisi tükenmiş görünüyor. Anahtar geçerli; ai.dev/projects üzerinden faturalama bakiyesini yenileyin."
     : status === 429

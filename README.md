@@ -52,7 +52,7 @@ Rapor analizi `app/api/evaluate-report/route.ts` üzerinden çalışır; veri s�
 
 ## Gemini yapılandırması
 
-Gerçek sağlayıcı sunucu tarafındaki `app/api/analyze/route.ts` uç noktasıdır. API anahtarı yalnızca `.env.local` içinde tutulur; tarayıcı koduna ve Git'e dahil edilmez. PDF işlemede `gemini-3-flash-preview` birincil, yoğunluk veya zaman aşımında `gemini-3.1-flash-lite` yedek modeldir; isteğe bağlı üçüncü kademe ve yeniden deneme bütçesi `.env.example` içinde açıklanmıştır. Belge **tek üretim çağrısı** ile işlenir; 512 KB üstü PDF'ler bir kez Files API'ye yüklenip URI ile verilir, küçük belgeler satır içi gönderilir (`diagnostics.documentDelivery`).
+Gerçek sağlayıcı sunucu tarafındaki `app/api/analyze/route.ts` uç noktasıdır. API anahtarı yalnızca `.env.local` içinde tutulur; tarayıcı koduna ve Git'e dahil edilmez. PDF işlemede tek model kullanılır: `gemini-3.6-flash` (`GEMINI_MODEL` ile değiştirilebilir). Yedek model kademesi, model tarama turu ve gizli yeniden deneme döngüsü **yoktur**; geçici bir aksaklıkta uç açık bir hata döndürür ve arayüz “Yeniden dene” gösterir. Model seçiminin ölçümü `docs/DEGISIKLIK_RAPORU_2026-08-26.md` içindedir. Belge **tek üretim çağrısı** ile işlenir; 512 KB üstü PDF'ler bir kez Files API'ye yüklenip URI ile verilir, küçük belgeler satır içi gönderilir (`diagnostics.documentDelivery`).
 
 Yerel ortam değişkenleri `.env.example` örneğine göre tanımlanır. Organizatör kaynak PDF'si için teknik analiz sınırı 18 MB, katılımcı raporu için 50 MB'dir. Bu değerler yarışma kuralı değildir; katılımcı teslim sınırı yalnızca organizatör PDF'sinden gelir.
 

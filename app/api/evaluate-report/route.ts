@@ -52,7 +52,7 @@ import { recordUsage } from "../../lib/usage-metrics";
  * hatada (429/503/zaman aşımı) uç `retryable: true` ile açık bir hata döndürür
  * ve hakem düğmeye yeniden basarak karar verir.
  */
-const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
+const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 /** Modele verilen tek isteğin zaman sınırı. */
 const GENERATION_TIMEOUT_MS = 150_000;
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */

@@ -37,7 +37,7 @@ console.log("Anahtar biçimi yerelde doğrulanmaz; geçerliliğe API'nin yanıt�
 
 // Sistem tek model kullanır; yedek kademe kaldırıldı. Tanı aracı da yalnızca
 // yapılandırılmış modeli sınar.
-const models = [env.GEMINI_MODEL || "gemini-3-flash-preview"];
+const models = [env.GEMINI_MODEL || "gemini-3.6-flash"];
 
 const request = async (url, init = {}) => {
   const controller = new AbortController();

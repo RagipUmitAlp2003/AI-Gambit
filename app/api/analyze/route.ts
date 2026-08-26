@@ -34,8 +34,19 @@ import type { AnalysisDiagnostics, AnalysisResult } from "../../lib/types";
  * yöneticide kalır. Puan planı, güven seviyesi ve pasif kriter üretilmez.
  */
 
-/** Analizde kullanılan TEK model. Yedek kademe yoktur. */
-const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
+/**
+ * Analizde kullanılan TEK model. Yedek kademe yoktur.
+ *
+ * NEDEN gemini-3.6-flash: 19 sayfalık şartname PDF'i, aynı istek gövdesi, tek
+ * değişken model adı olacak şekilde ölçüldü —
+ *   gemini-3.6-flash       3/3 başarı · 16,3-21,0 sn · giriş 7 344 token
+ *   gemini-3-flash-preview 1/1 başarı · 77,4 sn      · giriş 12 398 token
+ *   gemini-3.5-flash       13 denemenin 8'i 120 sn'de yanıtsız (kullanılamaz)
+ *   gemini-flash-latest    2/2 503 · gemini-2.5-flash 404 (API "3.6-flash'a geçin" diyor)
+ * Eski varsayılan (3-flash-preview) çalışıyor ama dört kat yavaş ve o modelde
+ * `mediaResolution` uygulanmıyor (giriş tokenı yarıya inmiyor).
+ */
+const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 
 const CACHE_LIMIT = 12;
 const MAX_PDF_BYTES = 18 * 1024 * 1024;
@@ -44,8 +55,24 @@ const MAX_PDF_BYTES = 18 * 1024 * 1024;
 const INLINE_PDF_FAST_PATH_BYTES = 512 * 1024;
 // Multipart sınırına dosya dışında başlıklar için küçük pay eklenir.
 const MAX_MULTIPART_BYTES = MAX_PDF_BYTES + 768 * 1024;
-// Tek çağrı bütün belgeyi kapsadığı için uzun belgelerde geniş zaman tanınır.
-const GENERATION_TIMEOUT_MS = 150_000;
+/**
+ * Üretim isteğinin zaman sınırı — belge uzunluğuna göre kademeli.
+ *
+ * NEDEN SABİT 150 sn DEĞİL: sabit sınır, tıkanan bir modelin bedelini
+ * kullanıcıya tam olarak ödetiyordu. Ölçümde çalışan model 19 sayfalık bir
+ * şartnameyi 16-21 sn'de bitirirken, tıkanan modelin 8 koşusunun HİÇBİRİ
+ * 120 sn'de yanıt vermedi: 150 sn beklemek hiçbir şey kazandırmıyor, üstelik
+ * takılı istek `acquireAnalysisPermit` iznini o süre boyunca elinde tutup
+ * diğer isteklere 429 verdiriyor.
+ *
+ * Sınır `thinkingLevelFor` ile aynı sayfa eşiklerini kullanır: düşünme bütçesi
+ * yükseldikçe modelin hakkı olan süre de yükselir. Kısa belgede ölçülen süreye
+ * üç kat pay bırakılır; uzun belgelerde eski geniş sınır korunur.
+ */
+function generationTimeoutFor(pageCount: number): number {
+  if (pageCount >= 80) return 150_000;
+  return pageCount >= 40 ? 100_000 : 60_000;
+}
 
 /**
  * Çıktı token tavanı. Eskiden 65536'ydı; şema sıkılaştıktan sonra (şablon ve
@@ -228,10 +255,13 @@ export async function POST(request: Request) {
     if (!apiKey) {
       return Response.json({ error: "AI servis anahtarı sunucu ortamında bulunamadı." }, { status: 503 });
     }
-    // Google AI Studio anahtarları "AIza" ile başlar. OAuth/geçici erişim
-    // jetonları bu uçta 401 döndürür; hata yanıltıcı olmasın diye uyarılır.
-    if (!apiKey.startsWith("AIza")) {
-      console.warn("[gemini] GEMINI_API_KEY beklenen 'AIza' ön ekiyle başlamıyor; Gemini API bu kimlik türünü reddedebilir.");
+    // Google AI Studio anahtarları "AIza" ya da "AQ." ön ekiyle gelebilir; her
+    // ikisi de bu uçta doğrulandı (models.list + generateContent 200). Eskiden
+    // yalnızca "AIza" kabul ediliyor ve geçerli bir "AQ." anahtarı HER istekte
+    // "anahtar reddedilebilir" uyarısı basıyordu — asıl sorun modeldeyken
+    // tanıyı anahtara yönlendiren yanlış alarm buydu.
+    if (!/^(AIza|AQ\.)/.test(apiKey)) {
+      console.warn("[gemini] GEMINI_API_KEY beklenen 'AIza' veya 'AQ.' ön ekiyle başlamıyor; Gemini API bu kimlik türünü reddedebilir.");
     }
     cleanupApiKey = apiKey;
 
@@ -337,7 +367,7 @@ export async function POST(request: Request) {
       apiKey,
       body,
       model: PRIMARY_MODEL,
-      timeoutMs: GENERATION_TIMEOUT_MS,
+      timeoutMs: generationTimeoutFor(pageCount),
       label: "analyze",
     });
     const modelMs = Date.now() - modelStartedAt;
