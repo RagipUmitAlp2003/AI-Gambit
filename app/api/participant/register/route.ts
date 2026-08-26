@@ -13,7 +13,9 @@ export async function POST(request: Request): Promise<Response> {
     const password = requiredText(body, "password", "Şifre", 200);
     if (password.length < 8) return jsonError(400, "Şifre en az 8 karakter olmalıdır.");
     if (await findAccountByEmail(email)) return jsonError(409, "Bu e-posta ile kayıtlı bir hesap var.");
-    const account = await insertAccount({ fullName, email, roleCode: PARTICIPANT_ROLE, password: await hashPassword(password), createdBy: "yarışmacı kaydı" });
+    // İsteğe bağlı basit kullanıcı adı (ör. katilimci1); benzersizlik insertAccount'ta denetlenir.
+    const username = typeof body.username === "string" ? body.username : null;
+    const account = await insertAccount({ fullName, email, username, roleCode: PARTICIPANT_ROLE, password: await hashPassword(password), createdBy: "yarışmacı kaydı" });
     const session = await issueSession();
     await createSession({ tokenHash: await hashToken(session.token), accountId: account.id, expiresAt: session.expiresAt, userAgent: (request.headers.get("user-agent") ?? "").slice(0, 200) || null });
     await recordAudit({ actorId: account.id, actorEmail: account.email, actorRole: PARTICIPANT_ROLE, action: "participant_registered", targetType: "account", targetId: account.id });

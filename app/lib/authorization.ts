@@ -36,9 +36,13 @@ export const PERMISSIONS = {
   final_judgement: ["02"],
   /** Operasyon panosu ve kullanım ölçümleri. */
   operations_dashboard: ["04"],
-  /** İlk hakem ataması; iş akışını başlatan Değerlendirme Yöneticisi işlemidir. */
-  assign_judge: ["04"],
-  /** Tıkanıklıkta yeniden atama, hatırlatma ve hata kuyruğu yönetimi. */
+  /*
+   * `assign_judge` yetkisi KALDIRILDI: hakem ataması yalnızca sistem
+   * tarafından otomatik yapılır (workflow-db · autoAssignJudge ve
+   * assignPendingApplications). Değerlendirme Yöneticisi atamaları izler
+   * ama hiçbir atamayı elle yapamaz veya değiştiremez.
+   */
+  /** Tıkanıklıkta hatırlatma ve hata kuyruğu yönetimi (atama İÇERMEZ). */
   coordinate_evaluation: ["04"],
   /**
    * Başvuru kabulünü açma/kapatma, kararları dondurma ve sonuçları yayımlama.

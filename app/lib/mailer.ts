@@ -116,15 +116,15 @@ const OUTCOME_HEADLINE: Record<ApplicationOutcomeMailInput["outcome"], string> =
 export function buildApplicationOutcomeMail(input: ApplicationOutcomeMailInput): MailEnvelope {
   const headline = OUTCOME_HEADLINE[input.outcome];
   const reason = input.reason.trim();
-  const body = ([
+  const render = (reasonText: string) => ([
     `Sayın ${input.fullName},`,
     "",
     `${input.competitionName} yarışmasına "${input.teamName}" takımıyla yaptığınız başvuru hakem tarafından değerlendirildi.`,
     "",
     `Sonuç: ${headline}.`,
-    reason ? "" : null,
-    reason ? (input.outcome === "rejected" ? "Ret gerekçesi:" : "Hakem açıklaması:") : null,
-    reason || null,
+    reasonText ? "" : null,
+    reasonText ? (input.outcome === "rejected" ? "Ret gerekçesi:" : "Hakem açıklaması:") : null,
+    reasonText || null,
     "",
     `Başvurunuzun güncel durumunu sistemden de görebilirsiniz: ${input.portalUrl}`,
     input.outcome === "revision_required"
@@ -139,8 +139,10 @@ export function buildApplicationOutcomeMail(input: ApplicationOutcomeMailInput):
   return {
     to: input.email,
     subject: `${input.competitionName} · ${headline}`,
-    body,
-    storedBody: body,
+    body: render(reason),
+    // Gerekçe, katılımcı PDF'inden alıntı taşıyabilir; giden kutusunu okuyan
+    // yönetici rolleri rapor içeriği görmez — kayıtta maskelenir.
+    storedBody: render(reason ? "[Gerekçe yarışmacıya iletildi; kayıtta rapor içeriği taşımaması için maskelendi.]" : ""),
   };
 }
 

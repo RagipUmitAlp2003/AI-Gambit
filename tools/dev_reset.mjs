@@ -111,6 +111,10 @@ const KEEP_ACCOUNT_SQL = HAS_USERNAME
 
 /** Şema sürümüne göre var olan tablolar; eksik tablo hata değildir. */
 const WORKFLOW_TABLES = [
+  // Benzerlik izleri: test embeddingleri, MinHash izleri, benzerlik sonuçları
+  // ve parça kayıtları da temizlenir (madde 9.13).
+  "similarity_results",
+  "similarity_chunks",
   "submission_fingerprints",
   "evaluation_results",
   "application_assignments",
@@ -125,6 +129,21 @@ const WORKFLOW_TABLES = [
   "competitions",
   "workflow_events",
 ].filter(tableExists);
+
+/**
+ * Test koşusuna ait DENETİM kayıtları: yalnızca yarışma/başvuru akışının
+ * ürettiği eylemler silinir. Hesap yönetimi denetimi (account_created,
+ * account_role_changed, account_revoked, bootstrap_*) KORUNUR; sistemin
+ * normal denetim kayıtlarına zarar verilmez.
+ */
+const WORKFLOW_AUDIT_ACTIONS = [
+  "application_submitted", "application_auto_assigned", "application_archived", "application_restored",
+  "ai_analysis_deleted", "judge_criterion_decisions", "profile_published",
+  "start_analysis", "save_evaluation", "save_review", "analysis_failed", "delete_analysis", "reopen_review",
+  "remind_judge", "requeue_analysis", "request_document", "assign_judge",
+  "competition_archived", "competition_restored", "competition_activation_changed",
+  "participant_registered",
+];
 
 const ACCOUNT_TABLES = ["admin_sessions", "admin_mail_outbox", "admin_accounts"].filter(tableExists);
 
@@ -168,6 +187,13 @@ if (tableExists("competition_applications")) {
 if (tableExists("submission_versions")) {
   orphanKeys.push(...all(`SELECT file_key FROM submission_versions`).map((row) => row.file_key));
 }
+if (tableExists("similarity_chunks")) {
+  // Benzerlik parça metinlerinin özel R2 nesneleri (madde 9.13).
+  orphanKeys.push(...all(
+    `SELECT DISTINCT 'similarity/' || application_id || '/' || submission_version_id || '.json' AS file_key
+     FROM similarity_chunks`,
+  ).map((row) => row.file_key));
+}
 const uniqueOrphans = [...new Set(orphanKeys.filter(Boolean))];
 if (uniqueOrphans.length) {
   console.log(`\n=== Sahipsiz kalacak R2 nesneleri (${uniqueOrphans.length}) ===`);
@@ -193,6 +219,12 @@ db.exec("BEGIN TRANSACTION");
 try {
   for (const table of WORKFLOW_TABLES) db.exec(`DELETE FROM ${table}`);
   if (purgeCache && tableExists("criteria_analysis_cache")) db.exec("DELETE FROM criteria_analysis_cache");
+
+  // Test koşusunun denetim izleri: yalnızca yarışma/başvuru akışı eylemleri.
+  // Hesap yönetimi denetimi korunur (bkz. WORKFLOW_AUDIT_ACTIONS).
+  if (tableExists("admin_audit_log")) {
+    db.exec(`DELETE FROM admin_audit_log WHERE action IN (${WORKFLOW_AUDIT_ACTIONS.map((a) => `'${a}'`).join(", ")})`);
+  }
 
   if (tableExists("admin_accounts")) {
     // Aktif Admin dışındaki bütün hesaplar ve onlara bağlı oturum/posta kayıtları.

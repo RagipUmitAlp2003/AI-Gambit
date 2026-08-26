@@ -198,3 +198,86 @@
 .eval-archive-row { display: flex; justify-content: flex-end; padding: 4px 0; }
 .eval-archive-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; width: 100%; }
 .eval-archive-form .field { flex: 1 1 260px; }
+
+/* ---------------------------------------------------------------------------
+ * Nihai hakem akışı: kriter kartında AI ön değerlendirmesi (değiştirilemez)
+ * ve hakemin bağımsız Onay/Ret kararı. AI sayaç satırı hakem sayaçlarından
+ * görsel olarak da ayrıdır.
+ * ------------------------------------------------------------------------- */
+.eval-ai-counts { margin: -6px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; }
+
+.eval-decision-list { gap: 12px; }
+.eval-decision-card { display: grid; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-left-width: 5px; border-radius: var(--radius-md); background: #fff; }
+.eval-decision-card.judge-pending { border-left-color: var(--line-strong); }
+.eval-decision-card.judge-approved { border-left-color: var(--success); background: #fbfffd; }
+.eval-decision-card.judge-rejected { border-left-color: var(--danger); background: #fffafa; }
+.eval-decision-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+
+.judge-chip { flex: 0 0 auto; padding: 5px 12px; border-radius: 999px; font-size: 10.5px; font-weight: 800; letter-spacing: .03em; }
+.judge-chip.pending { color: var(--ink-soft); background: #e8eef0; }
+.judge-chip.approved { color: var(--success); background: var(--success-soft); }
+.judge-chip.rejected { color: var(--danger); background: var(--danger-soft); }
+
+.eval-ai-block { display: grid; gap: 8px; padding: 11px 13px; border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); background: #f8fbfb; }
+.eval-ai-line { display: flex; align-items: center; gap: 10px; }
+.eval-ai-label { color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+.eval-ai-verdict { padding: 3px 10px; border-radius: 999px; font-size: 10.5px; font-weight: 800; }
+.eval-ai-verdict.UYGUN { color: var(--success); background: var(--success-soft); }
+.eval-ai-verdict.OLUMSUZ { color: var(--danger); background: var(--danger-soft); }
+
+.eval-judge-decision { display: grid; gap: 4px; padding: 10px 13px; border-radius: var(--radius-sm); font-size: 12px; }
+.eval-judge-decision.rejected { background: var(--danger-soft); color: var(--ink); }
+.eval-judge-decision p { margin: 0; line-height: 1.55; }
+.eval-judge-decision small { color: var(--ink-soft); font-size: 10.5px; }
+.eval-judge-decision small a { color: var(--danger); font-weight: 700; }
+
+.eval-judge-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.eval-approve-button.active { border-color: var(--success); color: var(--success); background: var(--success-soft); }
+.eval-reject-button.active { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
+
+.eval-reject-form { display: grid; gap: 12px; width: 100%; padding: 14px 16px; border: 1px solid #e4b9b5; border-radius: var(--radius-md); background: #fff8f7; }
+.eval-reject-mode { display: grid; gap: 6px; }
+.eval-reject-mode label { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; line-height: 1.5; cursor: pointer; }
+.eval-reject-mode input { margin-top: 3px; }
+.eval-reject-grid { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 12px; align-items: start; }
+.eval-reject-grid textarea { min-height: 56px; }
+.eval-reject-note { margin: 0; align-self: center; color: var(--ink-soft); font-size: 11.5px; line-height: 1.55; }
+.eval-reject-actions { display: flex; justify-content: flex-end; gap: 12px; }
+.eval-delete-analysis { color: var(--danger); }
+
+.eval-delete-confirm { display: grid; gap: 10px; width: 100%; padding: 14px 16px; border: 1px solid #e4b9b5; border-radius: var(--radius-md); background: #fff8f7; font-size: 12px; }
+.eval-delete-confirm ul { margin: 0; padding-left: 18px; color: var(--ink-soft); line-height: 1.6; }
+
+.eval-final-panel { display: grid; gap: 14px; padding: 18px 20px; border: 1px solid var(--line); border-left-width: 5px; border-radius: var(--radius-lg); background: #fbfdfd; }
+.eval-final-panel.outcome-accepted { border-left-color: var(--success); }
+.eval-final-panel.outcome-rejected { border-left-color: var(--danger); }
+.eval-final-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.eval-final-head strong { font-size: 15px; }
+
+/* ---------------------------------------------------------------------------
+ * Benzerlik kontrolü notu (madde 9.9–9.10): kriter analizlerinin altında,
+ * sayaçlardan ve karardan bağımsız sade bir not. Ayrıntı yalnızca inceleme /
+ * yüksek seviyede açılabilir ve en fazla üç eşleşme gösterir.
+ * ------------------------------------------------------------------------- */
+.eval-similarity-note { display: grid; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-left-width: 5px; border-radius: var(--radius-md); background: #f8fafb; }
+.eval-similarity-note p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink); }
+.eval-similarity-note.level-normal, .eval-similarity-note.level-none { border-left-color: var(--line-strong); }
+.eval-similarity-note.level-review { border-left-color: var(--amber); background: #fffaf0; }
+.eval-similarity-note.level-high { border-left-color: var(--danger); background: #fff8f7; }
+.eval-similarity-detail summary { color: var(--ink-soft); font-size: 12px; font-weight: 700; cursor: pointer; }
+.eval-similarity-detail ol { display: grid; gap: 12px; margin: 10px 0 0; padding-left: 20px; }
+.eval-similarity-detail li { display: grid; gap: 8px; }
+.eval-similarity-match-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.eval-similarity-match-head strong { font-size: 12.5px; }
+.eval-similarity-match-head span { color: var(--muted); font-size: 10.5px; }
+.eval-similarity-quotes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.eval-similarity-quotes > div { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: #fff; }
+.eval-similarity-quotes small { color: var(--muted); font-size: 10px; font-weight: 700; }
+.eval-similarity-quotes q { font-size: 11.5px; line-height: 1.55; color: var(--ink-soft); quotes: "“" "”"; }
+.eval-similarity-quotes a { color: var(--teal-deep); font-size: 10.5px; font-weight: 700; text-decoration: none; }
+.eval-similarity-noaccess { color: var(--muted); font-size: 10px; }
+
+@media (max-width: 720px) {
+  .eval-reject-grid, .eval-similarity-quotes { grid-template-columns: 1fr; }
+  .eval-final-head { flex-direction: column; align-items: flex-start; }
+}

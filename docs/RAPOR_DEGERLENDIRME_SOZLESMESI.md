@@ -8,6 +8,31 @@ sözleşmeye üretir.
 Tip tanımlarının tek kaynağı: `app/lib/types.ts` (`ReportEvaluation` ve
 bileşenleri). Bu belge ile tipler çelişirse tipler geçerlidir.
 
+## SÜRÜM NOTU — Nihai Hakem Akışı (26 Ağustos 2026, `report-v6`)
+
+Aşağıdaki davranışlar bu sürümle DEĞİŞTİ; belgenin eski bölümleriyle çeliştiği
+yerde bu not ve kod geçerlidir:
+
+1. **PDF dışı kurallar bulgu üretmez.** `HARICI_KANIT_GEREKLI` ve
+   `HAKEM_KONTROLU_GEREKLI` kriterler artık `findings` listesine HİÇ girmez:
+   modele gönderilmez, `DEGERLENDIRILEMEDI` bulgusu üretilmez, sayaçlara
+   katılmaz, hakem ekranında ve katılımcı geri bildiriminde görünmez. Bu
+   kurallar yalnızca Yarışma Yöneticisinin kriter listesinde (zorunlu /
+   zorunlu olmayan) durur. `DEGERLENDIRILEMEDI` değeri ve `summary.disiKanit`
+   yalnızca ESKİ kayıtların okunabilmesi için tipte korunur; okunurken görünür
+   listeye alınmaz (`visibleFindingsOf`, `sanitizeEvaluation`).
+2. **Hakem her kriter için bağımsız karar verir.** AI sonucu kriter kartında
+   yalnızca `Uygun`/`Olumsuz` ön değerlendirmedir ve değiştirilemez. Geçerli
+   kriter sonucunu `JudgeReview.criterionDecisions` içindeki hakem kararı
+   belirler (`judge-review.ts`): Onay → olumlu, Ret → olumsuz. Ret; gerekçe +
+   dayanak (`PDF_KONUMU`: sayfa+alıntı · `RAPORDA_BULUNAMADI`: aranan içerik)
+   ister. Bütün kriterler sonuçlanmadan genel ONAY/RET verilemez; sunucu
+   doğrular (`saveApplicationReview`).
+3. **Benzerlik ayrı bir alandır.** `ReportEvaluation.similarityReport`
+   (isteğe bağlı) hibrit MinHash + embedding sonucunu taşır; kriter
+   sonuçlarını, sayaçları ve genel kararı DEĞİŞTİRMEZ.
+   Ayrıntı: `app/lib/similarity-text.ts`, `app/api/applications/[id]/similarity`.
+
 ## Prensip: dört aşamalı kontrol, puan yok
 
 Şartname analizi (Kriter Atölyesi) ve rapor değerlendirmesi aynı dört aşamayı

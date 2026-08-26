@@ -17,6 +17,7 @@ import {
   readJson,
 } from "../../../../lib/admin-guard";
 import { buildRevokeMail, deliverMail } from "../../../../lib/mailer";
+import { assignPendingApplications } from "../../../../lib/workflow-db";
 import type { MutationResult } from "../../../../lib/admin-db";
 
 /**
@@ -75,6 +76,12 @@ export async function PATCH(request: Request, context: Context): Promise<Respons
     const result =
       current.status === "revoked" ? await restoreAccount(id, roleCode) : await updateAccountRole(id, roleCode);
     if (!result.ok) return mutationFailure(result);
+
+    // Hesap aktif bir Hakeme dönüştüyse bekleyen başvurular otomatik dağıtılır.
+    if (result.account.roleCode === "02" && result.account.status === "active") {
+      await assignPendingApplications().catch((assignError) =>
+        console.error("[workflow] hakem rolü sonrası bekleyen atama", assignError));
+    }
 
     await recordAudit({
       actorId: auth.account.id,

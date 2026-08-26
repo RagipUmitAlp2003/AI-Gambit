@@ -551,3 +551,156 @@ console.log("Language and competition lookup regression tests: PASS");
 }
 
 console.log("Integrity, lifecycle and login regression tests: PASS");
+
+/*
+ * SADE KRİTER GÖRÜNÜMÜ (madde 1)
+ *
+ * Kriter Atölyesi yalnızca iki grup gösterir: Zorunlu / Zorunlu olmayan.
+ * Denetlenebilirlik, güven seviyesi ve "karşılanmaması ... doğurur" ifadeleri
+ * arayüzden tamamen kaldırıldı; alan sistemde gizli olarak korunur ve
+ * otomatik belirlenir.
+ */
+{
+  const { readFileSync } = await import("node:fs");
+  const app = readFileSync("app/components/criteria-app.tsx", "utf8");
+  // Yasak ifadeler ARAYÜZ metinlerinde aranır; kod yorumları (alanın gizli
+  // olarak korunduğunu anlatan açıklamalar) kapsam dışıdır.
+  const visibleSource = app.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert(/Zorunlu olmayan kriterler/.test(visibleSource), "İkinci grup 'Zorunlu olmayan kriterler' olmalıdır.");
+  assert(!/Diğer kriterler/.test(visibleSource), "'Diğer kriterler' başlığı kalmamalıdır.");
+  for (const forbidden of [
+    "Harici kanıt gerekli", "PDF'den denetlenebilir", "Hakem kontrolü gerekli",
+    "Yüksek güven", "Düşük güven", "Emin olunamadı",
+    "Karşılanmaması", "Karşılanmazsa", "verifiabilityBadge", "VERIFIABILITY_LABELS",
+  ]) {
+    assert(!visibleSource.includes(forbidden), `Kriter Atölyesi arayüzünde "${forbidden}" bulunmamalıdır.`);
+  }
+  // Alan gizli olarak korunur ve sistem tarafından otomatik belirlenir.
+  assert(/resolveVerifiability\(undefined,/.test(app), "Denetlenebilirlik kriter metninden otomatik belirlenmelidir.");
+  assert(/danger-button ghost/.test(app) && /Kriteri sil/.test(app), "Tek kriter silme özelliği korunmalıdır.");
+}
+
+/*
+ * PDF DIŞI KRİTERLER HAKEM ANALİZİNDEN TAMAMEN ÇIKTI (madde 2)
+ *
+ * Bulgu listesi yalnızca PDF'den denetlenebilir kriterlerden oluşur; ayrı
+ * "PDF dışı kanıt" bölümü ve DEGERLENDIRILEMEDI üretimi yeni analizlerde yoktur.
+ */
+{
+  const { readFileSync } = await import("node:fs");
+  const route = readFileSync("app/api/evaluate-report/route.ts", "utf8");
+  assert(
+    /profile\.criteria\.filter\(\(item\) => item\.active && !verifiedOutsidePdf\(item\.verifiability\)\)/.test(route),
+    "Bulgular yalnızca PDF'den denetlenebilir aktif kriterlerden üretilmelidir.",
+  );
+  const normalize = route.slice(route.indexOf("function normalizeFinding"), route.indexOf("function normalizeHeadings"));
+  assert(!/DEGERLENDIRILEMEDI/.test(normalize), "normalizeFinding artık DEGERLENDIRILEMEDI üretmemelidir.");
+  const app = readFileSync("app/components/evaluation-app.tsx", "utf8");
+  assert(!/eval-outside-group/.test(app), "Hakem ekranında 'PDF dışı kanıt' bölümü bulunmamalıdır.");
+  assert(/visibleFindingsOf/.test(app), "Eski kayıtların PDF dışı bulguları görünür listeden süzülmelidir.");
+  const application = readFileSync("app/api/applications/[id]/route.ts", "utf8");
+  assert(/sanitizeEvaluation/.test(application), "Kayıt yolu PDF dışı bulguları süzmelidir.");
+}
+
+/*
+ * NİHAİ HAKEM AKIŞI (maddeler 3-4)
+ *
+ * Hakem kararı AI sonucuyla OTOMATİK DOLDURULMAZ; her kriter için bağımsız
+ * Onay/Ret verilir, hepsi bitmeden genel karar açılmaz ve sunucu doğrular.
+ * Arayüzde durum adı olarak "RED" kullanılmaz; RET/Onayla/Reddet kullanılır.
+ */
+{
+  const { readFileSync } = await import("node:fs");
+  const app = readFileSync("app/components/evaluation-app.tsx", "utf8");
+  assert(/restoreCriterionDecisions/.test(app), "Kararlar judge-review katmanından kurulmalıdır.");
+  assert(!/verdict: finalVerdict === finding\.verdict \? "accepted"/.test(app),
+    "AI sonucunu otomatik kabul eden eski taslak mantığı kalmamalıdır.");
+  assert(/rejected: "RET"/.test(app), "Durum adı RET olmalıdır (RED değil).");
+  assert(!/"RED"/.test(app), "Arayüzde durum adı olarak RED kullanılmamalıdır.");
+  assert(/Onayla/.test(app) && /Reddet/.test(app), "Nihai karar düğmeleri Onayla/Reddet olmalıdır.");
+  assert(/disabled=\{!allDecided\}/.test(app), "Bütün kriterler bitmeden genel karar düğmeleri kapalı olmalıdır.");
+  // Arayüz metinlerinde "öneriliyor" telkini bulunmaz; yorumlar kapsam dışı.
+  const appVisible = app.replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, "").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  assert(!/öneriliyor/i.test(appVisible), "Sistem 'öneriliyor' türü otomatik genel karar telkini yapmamalıdır.");
+
+  const db = readFileSync("app/lib/workflow-db.ts", "utf8");
+  const review = db.slice(db.indexOf("export async function saveApplicationReview"));
+  const reviewBody = review.slice(0, review.indexOf("\nexport "));
+  assert(/validateCriterionDecisions\(visibleFindings, review\.criterionDecisions, completed\)/.test(reviewBody),
+    "Sunucu kriter kararlarını saklı analize göre doğrulamalıdır.");
+  assert(/Onay veya Ret kararı verilmelidir/.test(reviewBody),
+    "Kararsız kriter varken genel karar sunucuda reddedilmelidir.");
+  assert(/decidedBy: judge\.id/.test(reviewBody), "Karar damgası sunucuda atılmalıdır.");
+  assert(/judge_criterion_decisions/.test(reviewBody), "Hakem kararları denetim izine yazılmalıdır.");
+  // Karar damgası ve AI sonucu İSTEMCİDEN alınmaz: decidedAt sunucu saatiyle,
+  // aiVerdict kayıtlı bulgudan yeniden türetilir (sapma denetimi bastırılamaz).
+  assert(/decidedAt: timestamp/.test(reviewBody), "decidedAt sunucu saatiyle damgalanmalıdır.");
+  assert(!/decision\.decidedAt \?\? timestamp/.test(reviewBody), "İstemcinin decidedAt değeri saklanmamalıdır.");
+  assert(/aiVerdictOf\(finding\.verdict\)/.test(reviewBody), "aiVerdict kayıtlı bulgudan yeniden türetilmelidir.");
+  // Nihai yazma yarış korumalıdır: koşul WHERE'de tutulur ve değişiklik doğrulanır.
+  assert(/WHERE id = \? AND status IN \('awaiting_judge', 'judge_in_review', 'completed'\)/.test(reviewBody),
+    "Nihai karar yazımı durum koşulunu WHERE içinde tutmalıdır.");
+  assert(/reviewBatch\[0\]\?\.meta\.changes/.test(reviewBody), "Yarış durumunda karar yazımı açık hata vermelidir.");
+
+  // AI sonucu kaydı ve 'analiz başarısız' işareti kesinleşmiş/kilitli kararı BOZAMAZ.
+  const saveEval = db.slice(db.indexOf("export async function saveApplicationEvaluation"));
+  const saveEvalBody = saveEval.slice(0, saveEval.indexOf("\nexport "));
+  assert(/Kararı yeniden aç/.test(saveEvalBody), "Kesin karar varken analiz yazımı reddedilmelidir.");
+  assert(/decisions_locked === 1/.test(saveEvalBody), "Dondurulmuş yarışmada analiz yazılmamalıdır.");
+  assert(/AND status <> 'completed'/.test(saveEvalBody), "Analiz yazımı completed durumunu WHERE ile korumalıdır.");
+
+  // Operasyon rolleri (01/04) ret gerekçesindeki rapor alıntılarını görmez.
+  assert(/participantResultHidden \|\| operations \? "" : \(row\.outcome_note \?\? ""\)/.test(db),
+    "Sonuç açıklaması operasyon görünümünde maskelenmelidir.");
+  // Katılımcıya AI'nin ilk sonucu (criterionDecisions) gönderilmez.
+  assert(/criterionDecisions: \[\], overallNote: ""/.test(db),
+    "Katılımcı görünümünde kriter kararları ve iç not soyulmalıdır.");
+
+  // Kaydedilen analizdeki benzerlik raporu SUNUCUNUN kayıtlı sonucundan yazılır.
+  const application = readFileSync("app/api/applications/[id]/route.ts", "utf8");
+  assert(/findSimilarityResult\(id, expectedHash\)/.test(application),
+    "similarityReport istemciden değil sunucudaki yetkili kayıttan yazılmalıdır.");
+
+  /*
+   * AI BULGUSU DOĞRULAMA ANLAMI: Onayla/Ret kriter sonucunu değil AI
+   * bulgusunun kabulünü ifade eder. Kesin sonuç: onaylandıysa aiVerdict,
+   * reddedildiyse hakemin judgeResult'u. Reddedilen bulgu ASLA kesin sonuç
+   * olarak kullanılamaz.
+   */
+  const judgeReview = readFileSync("app/lib/judge-review.ts", "utf8");
+  assert(/if \(decision\.judgeVerdict === "approved"\) return decision\.aiVerdict;/.test(judgeReview),
+    "Onaylanan bulguda kesin sonuç AI sonucu olmalıdır.");
+  assert(/if \(decision\.judgeVerdict === "rejected"\) return decision\.judgeResult;/.test(judgeReview),
+    "Reddedilen bulguda kesin sonuç hakemin yazdığı sonuç olmalıdır.");
+  assert(/kendi sonucu \(UYGUN veya OLUMSUZ\) zorunludur/.test(judgeReview),
+    "Bulgu reddinde hakemin kendi sonucu zorunlu olmalıdır.");
+  // Sayaçlar yalnızca kesinleşmiş sonuçları sayar.
+  assert(/uygun: number;/.test(judgeReview) && /olumsuz: number;/.test(judgeReview),
+    "Sayaçlar kesinleşmiş uygun/olumsuz sonuçlarını saymalıdır.");
+  // Katılımcı geri bildirimi kesinleşmiş sonuçlardan üretilir.
+  assert(/effectiveVerdictOf\(decision\) === "OLUMSUZ"/.test(judgeReview),
+    "Gelişime açık yönler kesin sonucu olumsuz kriterlerden gelmelidir.");
+  // Benzerlik ayrıntısında başka takımın PDF'ine doğrudan bağlantı YOKTUR.
+  const similarityUi = app.slice(app.indexOf("function SimilarityNote"), app.indexOf("function ApplicationDetail"));
+  assert(!/peerApplicationId\)\}\/file/.test(similarityUi),
+    "Başka takımın PDF'ine doğrudan bağlantı eklenmemelidir.");
+
+  // AI analizini silme ve kararı yeniden açma uçları (madde 5).
+  const route = readFileSync("app/api/applications/[id]/route.ts", "utf8");
+  assert(/body\.action === "delete_analysis"/.test(route), "delete_analysis eylemi bulunmalıdır.");
+  assert(/body\.action === "reopen_review"/.test(route), "reopen_review eylemi bulunmalıdır.");
+  assert(/Kararı yeniden aç/.test(route), "Kesin karar açılmadan analiz silme reddedilmelidir.");
+}
+
+/*
+ * KATILIMCI GERİ BİLDİRİMİ İKİ BÖLÜM (madde 6)
+ */
+{
+  const { readFileSync } = await import("node:fs");
+  const portal = readFileSync("app/components/participant-portal.tsx", "utf8");
+  assert(/\(\["strengths", "improvements"\] as const\)/.test(portal),
+    "Katılımcı yalnızca Güçlü Yönler ve Gelişime Açık Yönler bölümlerini görmelidir.");
+  assert(!/"suggestions"/.test(portal), "Gelişim Önerileri kartı render edilmemelidir.");
+}
+
+console.log("Judge-decision flow regression tests: PASS");

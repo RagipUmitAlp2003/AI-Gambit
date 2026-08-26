@@ -41,6 +41,7 @@ test("bütün göçler sırayla temiz bir veri tabanına uygulanabilir", () => {
     "competitions", "competition_profiles", "competition_applications",
     "criteria", "criteria_profile_versions", "criteria_analysis_cache",
     "submission_versions", "evaluation_results", "application_assignments",
+    "similarity_chunks", "similarity_results",
   ]) {
     assert.ok(tables.has(table), `${table} tablosu göçlerden sonra bulunmalıdır.`);
   }
@@ -176,6 +177,38 @@ test("değerlendirme sonucu kriter sürümüne ve PDF özetine bağlanır", () =
     `SELECT evaluation_criteria_version FROM competition_applications WHERE id = ?`,
   ).get("app-1") as { evaluation_criteria_version: number };
   assert.equal(application.evaluation_criteria_version, 1, "Analiz v1 ile üretilmiş sayılmalıdır.");
+  database.close();
+});
+
+test("benzerlik kayıtları PDF sürümüne, modele ve boru hattına bağlanır (0009)", () => {
+  const database = migratedDatabase();
+  const insertChunk = database.prepare(
+    `INSERT INTO similarity_chunks
+      (id, application_id, submission_version_id, competition_key, pdf_hash, chunk_index,
+       page_start, page_end, word_count, text_hash, min_hash_json,
+       embedding_json, embedding_model, embedding_dim, pipeline_version, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  insertChunk.run("v1:sim-v1:0", "app-1", "v1", "roket--2026--ktr", "pdfhash", 0, 1, 2, 380, "th-0", "[]",
+    "[0.1]", "gemini-embedding-001", 768, "sim-v1", "2026-08-26");
+  // Aynı sürüm + boru hattı + sıra ikinci kez yazılamaz: embedding önbelleği tektir.
+  assert.throws(
+    () => insertChunk.run("v1:sim-v1:0b", "app-1", "v1", "roket--2026--ktr", "pdfhash", 0, 1, 2, 380, "th-0", "[]",
+      null, null, null, "sim-v1", "2026-08-26"),
+    /UNIQUE|constraint/i,
+  );
+
+  database.prepare(
+    `INSERT INTO similarity_results
+      (id, application_id, submission_version_id, pdf_hash, competition_key,
+       embedding_model, embedding_dim, pipeline_version, status, approx_percent,
+       closest_application_id, closest_label, report_json, analyzed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, '{}', ?)`,
+  ).run("r1", "app-1", "v1", "pdfhash", "roket--2026--ktr", "gemini-embedding-001", 768, "sim-v1", 20, "app-2", "Takım 4", "2026-08-26");
+  const row = database.prepare(
+    `SELECT pdf_hash, embedding_model, embedding_dim, approx_percent FROM similarity_results WHERE id = ?`,
+  ).get("r1") as Record<string, unknown>;
+  assert.deepEqual({ ...row }, { pdf_hash: "pdfhash", embedding_model: "gemini-embedding-001", embedding_dim: 768, approx_percent: 20 });
   database.close();
 });
 

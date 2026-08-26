@@ -40,7 +40,13 @@ type ArchiveTrailEntry = {
   nextStatus: string;
 };
 
-export default function OperationsPanel({ canInitialAssign = false }: { canInitialAssign?: boolean }) {
+/**
+ * HAKEM ATAMASI TAMAMEN OTOMATİKTİR: bu panelde hakem seçme kutusu, ilk atama
+ * ve yeniden atama düğmesi YOKTUR. Sistem başvuruyu en az yüklü aktif hakeme
+ * atar; aktif hakem yoksa başvuru "atanamadı" olarak izlenir ve yeni bir aktif
+ * Hakem açıldığında (veya pano yeniden yüklendiğinde) otomatik dağıtılır.
+ */
+export default function OperationsPanel() {
   const [applications, setApplications] = useState<CompetitionApplication[]>([]);
   const [overview, setOverview] = useState<CompetitionOverview[]>([]);
   const [summary, setSummary] = useState<OperationsSummary | null>(null);
@@ -49,7 +55,6 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
   /** Kim neyi ne zaman ve neden arşivledi (madde 11); bu rol yalnızca görüntüler. */
   const [archiveTrail, setArchiveTrail] = useState<ArchiveTrailEntry[]>([]);
   const [priorityNote, setPriorityNote] = useState<Record<string, string>>({});
-  const [judgeChoice, setJudgeChoice] = useState<Record<string, string>>({});
   const [busyId, setBusyId] = useState("");
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
@@ -77,17 +82,12 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
   }, []);
 
   async function applicationAction(application: CompetitionApplication, action: string) {
-    const judgeId = judgeChoice[application.id] || application.assignedJudgeId || "";
-    if (action === "assign_judge" && !judgeId) { setError("Önce bir Hakem seçin."); return; }
     setBusyId(application.id);
     setError("");
     setNotice("");
     try {
-      await workflowApi.updateApplication(application.id, action, {
-        judgeId,
-        note: action === "assign_judge" ? "Operasyon panosundan hakem ataması" : "Operasyon panosu işlemi",
-      });
-      setNotice(action === "assign_judge" ? "Hakem ataması güncellendi." : "Operasyon işlemi tamamlandı.");
+      await workflowApi.updateApplication(application.id, action, { note: "Operasyon panosu işlemi" });
+      setNotice("Operasyon işlemi tamamlandı.");
       await load();
     } catch (caught) { setError(caught instanceof Error ? caught.message : "İşlem tamamlanamadı."); }
     finally { setBusyId(""); }
@@ -171,10 +171,12 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
     if (waiting) {
       // Normalde başvuru alındığı anda sistem otomatik atar; burada bir kayıt
       // görünüyorsa atama YAPILAMAMIŞTIR (aktif hakem yok ya da hata oldu).
+      // Elle atama YOKTUR: Admin yeni bir aktif Hakem (02) hesabı açtığında
+      // veya bu pano yeniden yüklendiğinde sistem bekleyenleri otomatik dağıtır.
       list.push(
-        `${waiting} başvuruya hakem atanamadı. Sistem başvuru alındığında en az yüklü hakeme otomatik atar; `
-        + "atama yapılamadıysa aktif Hakem (02) hesabı olmayabilir. Bu raporlar hiçbir hakem panelinde görünmez — "
-        + "aşağıdaki tablodan elle hakem seçip atayın.",
+        `${waiting} başvuruya hakem atanamadı. Sistem başvuru alındığında en az yüklü aktif hakeme otomatik atar; `
+        + "atama yapılamadıysa aktif Hakem (02) hesabı olmayabilir. Yeni bir aktif Hakem hesabı açıldığında "
+        + "bekleyen başvurular sistem tarafından otomatik olarak en müsait hakemlere dağıtılır; elle atama yapılmaz.",
       );
     }
 
@@ -205,7 +207,7 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
       <header>
         <span className="role-code">Operasyon ve süreç koordinasyonu</span>
         <h1 id="operations-title">Değerlendirme süreci</h1>
-        <p>Hakem yüklerini ve analiz hatalarını izleyin; atamaları, hatırlatmaları ve sonuç yayın sırasını yönetin. Teknik karar yalnızca Hakeme aittir.</p>
+        <p>Hakem yüklerini, atanamayan başvuruları ve analiz hatalarını izleyin; hatırlatma ve hata kuyruğunu yönetin. Hakem ataması sistem tarafından otomatik yapılır; teknik karar yalnızca Hakeme aittir.</p>
       </header>
       {error ? <p className="admin-error">{error}</p> : null}
       {notice ? <p className="success-note" role="status">{notice}</p> : null}
@@ -335,7 +337,7 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
 
       <section className="operations-control-grid" aria-label="Hakem iş yükü">
         <div className="judge-workloads">
-          <div><h2>Hakem iş yükü</h2><p>Geciken veya dengesiz kuyrukları görün; mevcut atamaları gerektiğinde başka hakeme aktarın.</p></div>
+          <div><h2>Hakem iş yükü</h2><p>Açık ve tamamlanan dosya sayılarını izleyin. Dağıtımı sistem yapar: yeni başvuru daima en az yüklü aktif hakeme gider.</p></div>
           {judges.map((judge) => (
             <article key={judge.judgeId}>
               <div><strong>{judge.judgeName}</strong><small>{judge.active} aktif · {judge.completed} tamamlandı</small></div>
@@ -347,41 +349,34 @@ export default function OperationsPanel({ canInitialAssign = false }: { canIniti
       </section>
 
       <label className="search-box operations-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Takım veya yarışma ara" /></label>
+      {/*
+        HAKEM SÜTUNU SALT OKUNURDUR: seçim kutusu ve atama düğmesi yoktur.
+        Atamayı sistem yapar; bu tablo yalnızca kimin atandığını gösterir.
+      */}
       <div className="operations-table" role="table" aria-label="Başvuru durumu">
         <div className="operations-table-head operations-table-head-actions" role="row"><span>Takım / yarışma</span><span>Durum / sonuç</span><span>Hakem</span><span>Operasyon</span></div>
-        {filtered.map((item) => {
-          const mayAssign = canInitialAssign || Boolean(item.assignedJudgeId);
-          return (
-            <div key={item.id} className="operations-table-row operations-table-row-actions" role="row">
-              <span>
-                <strong>{item.teamName}</strong>
-                <small>{item.competitionName} · {formatDateTime(item.updatedAt)}</small>
-                {!item.assignedJudgeId && item.status !== "completed"
-                  ? <small className="assignment-pending">Hakem atanamadı · hakem panelinde görünmüyor</small>
-                  : null}
-              </span>
-              <span><em className={`application-status ${item.status}`}>{APPLICATION_STATUS_LABELS[item.status]}</em><small>{item.outcome === "accepted" ? "Kabul edildi" : item.outcome === "rejected" ? "Reddedildi" : item.outcome === "revision_required" ? "Düzeltme istendi" : "Nihai karar bekliyor"}</small></span>
-              <span>
-                <select
-                  aria-label={`${item.teamName} için hakem`}
-                  value={judgeChoice[item.id] ?? item.assignedJudgeId ?? ""}
-                  disabled={!mayAssign || busyId === item.id}
-                  onChange={(event) => setJudgeChoice((current) => ({ ...current, [item.id]: event.target.value }))}
-                >
-                  <option value="">Hakem seçin</option>
-                  {judges.map((judge) => <option key={judge.judgeId} value={judge.judgeId}>{judge.judgeName} ({judge.active})</option>)}
-                </select>
-                <button type="button" className="text-button" disabled={!mayAssign || busyId === item.id} onClick={() => applicationAction(item, "assign_judge")}>{item.assignedJudgeId ? "Yeniden ata" : "İlk atamayı yap"}</button>
-              </span>
-              <span className="operation-actions">
-                {item.assignedJudgeId ? <button type="button" className="text-button" disabled={busyId === item.id} onClick={() => applicationAction(item, "remind_judge")}>Hatırlat</button> : null}
-                {item.status === "analysis_failed" ? <button type="button" className="text-button" disabled={busyId === item.id} onClick={() => applicationAction(item, "requeue_analysis")}>Analizi yeniden başlat</button> : null}
-                {item.status === "analysis_failed" ? <button type="button" className="text-button" disabled={busyId === item.id} onClick={() => applicationAction(item, "request_document")}>Yeni PDF iste</button> : null}
-                {!item.assignedJudgeId && !canInitialAssign ? <small>İlk atamayı Değerlendirme Yöneticisi yapar.</small> : null}
-              </span>
-            </div>
-          );
-        })}
+        {filtered.map((item) => (
+          <div key={item.id} className="operations-table-row operations-table-row-actions" role="row">
+            <span>
+              <strong>{item.teamName}</strong>
+              <small>{item.competitionName} · {formatDateTime(item.updatedAt)}</small>
+              {!item.assignedJudgeId && item.status !== "completed"
+                ? <small className="assignment-pending">Hakem atanamadı · hakem panelinde görünmüyor</small>
+                : null}
+            </span>
+            <span><em className={`application-status ${item.status}`}>{APPLICATION_STATUS_LABELS[item.status]}</em><small>{item.outcome === "accepted" ? "Kabul edildi" : item.outcome === "rejected" ? "Reddedildi" : item.outcome === "revision_required" ? "Düzeltme istendi" : "Nihai karar bekliyor"}</small></span>
+            <span>
+              {item.assignedJudgeId
+                ? <><strong>{item.assignedJudgeName ?? "Atanmış hakem"}</strong><small>Sistem tarafından otomatik atandı</small></>
+                : <small className="assignment-pending">Sistem, aktif Hakem hesabı açıldığında otomatik atayacak</small>}
+            </span>
+            <span className="operation-actions">
+              {item.assignedJudgeId ? <button type="button" className="text-button" disabled={busyId === item.id} onClick={() => applicationAction(item, "remind_judge")}>Hatırlat</button> : null}
+              {item.status === "analysis_failed" ? <button type="button" className="text-button" disabled={busyId === item.id} onClick={() => applicationAction(item, "requeue_analysis")}>Analizi yeniden başlat</button> : null}
+              {item.status === "analysis_failed" ? <button type="button" className="text-button" disabled={busyId === item.id} onClick={() => applicationAction(item, "request_document")}>Yeni PDF iste</button> : null}
+            </span>
+          </div>
+        ))}
         {!filtered.length ? <p className="participant-empty">Aramanızla eşleşen başvuru bulunamadı.</p> : null}
       </div>
 

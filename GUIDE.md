@@ -16,7 +16,8 @@ Rol notları:
 
 - **00 · Admin** yalnızca yönetici ataması yapar: hesap açar, rol atar/kaldırır, atama
   geçmişini izler. Kriter, değerlendirme, operasyon ve başvuru ekranlarına giremez.
-- **04 · Değerlendirme Yöneticisi** başvuruya ilk hakemi atar ve süreci yönetir; kriter
+- **04 · Değerlendirme Yöneticisi** süreci yönetir ve izler (hakem ataması sistem
+  tarafından otomatik yapılır; elle atama yoktur); kriter
   değiştiremez, rapor değerlendiremez.
 
 ---
@@ -175,7 +176,8 @@ seçilmez; panel hesabın rolüne göre açılır. Şifresiz rol kısayolları k
    **Kaynağa git** (PDF sayfası) düğmesiyle listelenir. **ONAY** veya **RED**'e basın;
    açılan şablonda kriter durumlarını ve hata sebeplerini isterseniz elle değiştirip
    **kesinleştirin**. Şablon yarışmacıya iletilir.
-8. **Yarışmacı görünümü:** Portalda ONAY/RED, açıklama, karşılanan/hatalı kriterler ve
+8. **Yarışmacı görünümü:** Portalda ONAY/RET, açıklama ve iki bölüm (Güçlü Yönler ·
+   Gelişime Açık Yönler) ve
    revizyon önerileri görünür. Hakem tarafında tamamlanan karar **Geçmiş değerlendirmeler**'e düşer.
 
 > Gerçek katılımcı raporu depoda bulunmaz ve uydurulmaz. Deneme yaparken

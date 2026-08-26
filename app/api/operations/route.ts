@@ -2,7 +2,7 @@ import { listAccounts, listAudit, listRecentWorkflowEvents } from "../../lib/adm
 import { handleError, json, requirePermission } from "../../lib/admin-guard";
 import { WORKFLOW_EVENT_LABELS } from "../../lib/admin-roles";
 import { APPLICATION_STATUS_LABELS, COMPETITION_STATUS_LABELS } from "../../lib/workflow-types";
-import { listApplications, listCompetitionWorkflows, listProfiles, operationsSummary } from "../../lib/workflow-db";
+import { assignPendingApplications, listApplications, listCompetitionWorkflows, listProfiles, operationsSummary } from "../../lib/workflow-db";
 import type { CompetitionOverview, JudgeWorkload, TimelineEntry } from "../../lib/workflow-types";
 
 /**
@@ -18,6 +18,12 @@ export async function GET(request: Request): Promise<Response> {
   const auth = await requirePermission(request, "operations_dashboard");
   if (!auth.ok) return auth.response;
   try {
+    // OTOMATİK YENİDEN DENEME: pano her açıldığında bekleyen (hakemsiz)
+    // başvurular sistem tarafından yeniden dağıtılmayı dener. Elle hakem
+    // seçtirme yoktur; aktif hakem yoksa başvurular atanmamış görünmeye
+    // devam eder ve aşağıdaki sayaçlarda izlenir.
+    await assignPendingApplications().catch((assignError) =>
+      console.error("[workflow] pano açılışında bekleyen atama", assignError));
     const [summary, events, applications, accounts, competitions] = await Promise.all([
       operationsSummary(auth.account),
       listRecentWorkflowEvents(40),
@@ -117,11 +123,13 @@ export async function GET(request: Request): Promise<Response> {
       })),
     ].sort((left, right) => right.at.localeCompare(left.at));
 
-    // Denetim izinin arşivleme/atama satırları; içerik değil işlem kaydıdır.
+    // Denetim izinin arşivleme/atama/silme satırları; içerik değil işlem kaydıdır.
+    // Değerlendirme Yöneticisi AI analizi silme olayını buradan ve süreç
+    // hareketlerinden görür; silinen AI içeriği hiçbir kayıtta taşınmaz.
     const auditRows = (await listAudit(60)).filter((entry) => [
       "competition_archived", "competition_restored", "competition_activation_changed",
       "application_archived", "application_restored", "application_auto_assigned",
-      "assign_judge", "profile_published",
+      "ai_analysis_deleted", "judge_criterion_decisions", "profile_published",
     ].includes(entry.action));
 
     return json({ summary, recent, judges, competitions, overview, archiveTrail, audit: auditRows });

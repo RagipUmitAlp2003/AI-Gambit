@@ -2,25 +2,55 @@ import { env } from "cloudflare:workers";
 import { handleError, json, jsonError, readJson, requirePermission } from "../../../lib/admin-guard";
 import {
   archiveApplication,
-  assignApplication,
   coordinateApplication,
+  deleteApplicationEvaluation,
   findApplication,
+  findSimilarityResult,
   markApplicationAnalyzing,
+  reopenApplicationReview,
   reportBucket,
   resolveEvaluationContext,
   saveApplicationEvaluation,
   saveApplicationReview,
 } from "../../../lib/workflow-db";
-import { isRuleVerdict, type JudgeReview, type ReportEvaluation } from "../../../lib/types";
-import { findAccountById, recordAudit, recordMail } from "../../../lib/admin-db";
+import {
+  JUDGE_EVIDENCE_MODES,
+  isRuleVerdict,
+  type JudgeCriterionDecision,
+  type JudgeReview,
+  type ReportEvaluation,
+} from "../../../lib/types";
+import { recordAudit, recordMail } from "../../../lib/admin-db";
 import type { CompetitionApplication } from "../../../lib/workflow-types";
 import { buildApplicationOutcomeMail, deliverMail } from "../../../lib/mailer";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
+/** Kriter kararının biçimsel doğrulaması; içerik kuralları judge-review + workflow-db'de. */
+function validCriterionDecision(decision: JudgeCriterionDecision): boolean {
+  if (!decision || typeof decision !== "object") return false;
+  if (typeof decision.criterionId !== "string" || !decision.criterionId || decision.criterionId.length > 240) return false;
+  if (typeof decision.criterionName !== "string" || decision.criterionName.length > 300) return false;
+  if (!["UYGUN", "OLUMSUZ"].includes(decision.aiVerdict)) return false;
+  if (!["pending", "approved", "rejected"].includes(decision.judgeVerdict)) return false;
+  // Hakem, AI bulgusunu reddettiğinde YERİNE yazdığı kendi sonucu.
+  // Eski istemciler alanı hiç göndermeyebilir (undefined ≈ null): geriye uyum.
+  if (decision.judgeResult != null && !["UYGUN", "OLUMSUZ"].includes(decision.judgeResult)) return false;
+  if (typeof decision.rejectionReason !== "string" || decision.rejectionReason.length > 2_000) return false;
+  if (decision.evidenceMode != null && !(JUDGE_EVIDENCE_MODES as readonly string[]).includes(decision.evidenceMode)) return false;
+  if (decision.evidencePage != null
+    && (!Number.isInteger(decision.evidencePage) || decision.evidencePage < 1 || decision.evidencePage > 10_000)) return false;
+  if (decision.evidenceSection != null && (typeof decision.evidenceSection !== "string" || decision.evidenceSection.length > 300)) return false;
+  if (typeof decision.evidenceQuote !== "string" || decision.evidenceQuote.length > 1_200) return false;
+  if (typeof decision.missingContent !== "string" || decision.missingContent.length > 400) return false;
+  return true;
+}
+
 /**
  * Hakem kararı puan taşımaz: her kriter için nihai kural durumu
  * (BAŞARILI / REVİZYON / KRİTİK_HATA) ya da karar bekliyorken null bulunur.
+ * Yeni akışta `criterionDecisions` her görünür PDF kriteri için hakemin
+ * bağımsız Onay/Ret kararını taşır; içerik kuralları sunucuda ayrıca doğrulanır.
  */
 function validReview(review: JudgeReview): boolean {
   if (!["in_progress", "completed"].includes(review.status) || !Array.isArray(review.decisions)) return false;
@@ -28,12 +58,31 @@ function validReview(review: JudgeReview): boolean {
   if (typeof review.feedbackApproved !== "boolean" || !review.finalFeedback || typeof review.finalFeedback !== "object") return false;
   const feedbackLists = [review.finalFeedback.strengths, review.finalFeedback.improvements, review.finalFeedback.suggestions];
   if (feedbackLists.some((list) => !Array.isArray(list) || list.length > 100 || list.some((item) => typeof item !== "string" || item.length > 1_000))) return false;
+  if (review.criterionDecisions !== undefined) {
+    if (!Array.isArray(review.criterionDecisions) || review.criterionDecisions.length > 500) return false;
+    if (!review.criterionDecisions.every(validCriterionDecision)) return false;
+  }
   return review.decisions.every((decision) => decision && typeof decision.criterionId === "string"
     && decision.criterionId.length > 0 && decision.criterionId.length <= 240
     && ["pending", "accepted", "adjusted"].includes(decision.verdict)
     && (decision.finalVerdict === null || isRuleVerdict(decision.finalVerdict))
     && (decision.verdict === "pending" || decision.finalVerdict !== null)
     && typeof decision.note === "string" && decision.note.length <= 2_000);
+}
+
+/**
+ * Kayıt öncesi süzgeç: eski bir istemci DEGERLENDIRILEMEDI bulgusu gönderse
+ * bile PDF dışı kurallar veri tabanına yazılmaz; sayaçlar yalnızca PDF
+ * kriterlerini sayar (madde 2).
+ */
+function sanitizeEvaluation(evaluation: ReportEvaluation): ReportEvaluation {
+  const findings = evaluation.findings.filter((finding) => finding.verdict !== "DEGERLENDIRILEMEDI");
+  if (findings.length === evaluation.findings.length) return evaluation;
+  return {
+    ...evaluation,
+    findings,
+    summary: { ...evaluation.summary, total: findings.length, disiKanit: 0 },
+  };
 }
 
 /** Sunucuya yazılmadan önce dört aşamalı sözleşmenin asgari şekli doğrulanır. */
@@ -114,22 +163,30 @@ export async function GET(request: Request, context: RouteContext): Promise<Resp
 }
 
 /**
- * Başvuru üzerindeki işlemler üç ayrı yetkiye bölünür (bkz. authorization.ts):
- *   AI ön değerlendirmesi  (start_analysis / save_evaluation / analysis_failed) → run_ai_prescreen (02)
- *   Nihai uzman kararı     (save_review)                                        → final_judgement (02)
- *   Atama ve koordinasyon  (assign_judge / remind / requeue / request_document) → coordinate_evaluation (04)
+ * Başvuru üzerindeki işlemler ayrı yetkilere bölünür (bkz. authorization.ts):
+ *   AI ön değerlendirmesi  (start_analysis / save_evaluation / analysis_failed / delete_analysis) → run_ai_prescreen (02)
+ *   Nihai uzman kararı     (save_review / reopen_review)                          → final_judgement (02)
+ *   Koordinasyon           (remind / requeue / request_document)                  → coordinate_evaluation (04)
  *
+ * `assign_judge` eylemi KALDIRILDI: hakem ataması yalnızca sistem tarafından
+ * otomatik yapılır; istek hangi rolden gelirse gelsin reddedilir.
  * Admin (00) başvuru akışına erişmez; yalnızca yönetici ataması yapar.
  */
 export async function PATCH(request: Request, context: RouteContext): Promise<Response> {
   try {
     const id = (await context.params).id;
     const body = await readJson(request);
-    const permission = body.action === "save_review"
+    if (body.action === "assign_judge") {
+      // Kapatılan uç: hangi rol çağırırsa çağırsın manuel atama yapılamaz.
+      return jsonError(403,
+        "Manuel hakem atama kaldırıldı: atamayı sistem otomatik yapar. Aktif Hakem yoksa "
+        + "yeni bir Hakem hesabı açıldığında bekleyen başvurular otomatik olarak dağıtılır.");
+    }
+    const permission = body.action === "save_review" || body.action === "reopen_review"
       ? "final_judgement"
       : body.action === "archive_application"
         ? "archive_application"
-        : body.action === "assign_judge" || ["remind_judge", "requeue_analysis", "request_document"].includes(String(body.action))
+        : ["remind_judge", "requeue_analysis", "request_document"].includes(String(body.action))
           ? "coordinate_evaluation"
           : "run_ai_prescreen";
     const auth = await requirePermission(request, permission);
@@ -137,16 +194,7 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
     const visibleApplication = await findApplication(id, auth.account);
     if (!visibleApplication) return jsonError(404, "Başvuru bulunamadı.");
     let notification: { delivered: boolean; message: string } = { delivered: false, message: "" };
-    if (body.action === "assign_judge") {
-      const judgeId = typeof body.judgeId === "string" ? body.judgeId.trim() : "";
-      const judge = judgeId ? await findAccountById(judgeId) : null;
-      if (!judge || judge.status !== "active" || judge.roleCode !== "02") return jsonError(400, "Aktif bir Hakem seçin.");
-      const assigned = await assignApplication(id, judge, auth.account, typeof body.note === "string" ? body.note : "");
-      if (assigned === "initial_forbidden") return jsonError(403, "İlk hakem atamasını yalnızca Değerlendirme Yöneticisi yapabilir.");
-      if (assigned === "already_assigned") return jsonError(409, "Bu başvuru zaten seçilen Hakeme atanmış.");
-      if (assigned === "completed") return jsonError(409, "Tamamlanmış başvuru yeniden atanamaz.");
-      if (assigned === "not_found") return jsonError(404, "Başvuru bulunamadı.");
-    } else if (["remind_judge", "requeue_analysis", "request_document"].includes(String(body.action))) {
+    if (["remind_judge", "requeue_analysis", "request_document"].includes(String(body.action))) {
       const coordinated = await coordinateApplication(
         id,
         body.action as "remind_judge" | "requeue_analysis" | "request_document",
@@ -197,12 +245,50 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
           "Analiz sonucu bu başvurunun geçerli PDF sürümüne ait değil; sonuç kaydedilmedi. "
           + "Katılımcı yeni sürüm yüklemiş olabilir — analizi yenileyin.");
       }
-      await saveApplicationEvaluation(id, auth.account, evaluation, false, {
+      /*
+       * BENZERLİK RAPORU SUNUCUDAN YAZILIR (madde 9.12): istemcinin gönderdiği
+       * `similarityReport` kopyasına güvenilmez — hakem istemcisi inceleme
+       * işaretini silemez veya sahteleyemez. Bu PDF sürümüne bağlı yetkili
+       * sonuç `similarity_results` satırından okunur; satır yoksa (benzerlik
+       * çalışmadı ya da "AI analizini sil" kaldırdı) alan null yazılır.
+       */
+      const authoritativeSimilarity = await findSimilarityResult(id, expectedHash);
+      await saveApplicationEvaluation(id, auth.account, {
+        ...sanitizeEvaluation(evaluation),
+        similarityReport: authoritativeSimilarity,
+      }, false, {
         criteriaVersion: context.criteriaVersion.criteriaVersion,
         criteriaHash: context.criteriaVersion.criteriaHash,
         pdfHash: expectedHash,
         submissionVersionId: context.submissionVersionId,
       });
+    } else if (body.action === "delete_analysis") {
+      /*
+       * AI ANALİZİNİ SİL (madde 5): yalnızca AI analizi, tamamlanmamış kriter
+       * kararları ve bu PDF sürümünün benzerlik sonucu kaldırılır. Başvuru,
+       * PDF, takım bilgileri, hakem ataması ve yarışma korunur. Nihai karar
+       * kesinleşmişse önce "Kararı yeniden aç" gerekir — sunucu doğrular.
+       */
+      const deleted = await deleteApplicationEvaluation(id, auth.account);
+      if (deleted === "not_found") return jsonError(404, "Başvuru bulunamadı.");
+      if (deleted === "forbidden") return jsonError(403, "Yalnızca size atanmış başvurunun AI analizini silebilirsiniz.");
+      if (deleted === "completed_locked") {
+        return jsonError(409,
+          "Bu başvurunun nihai kararı kesinleştirildi. AI analizini silmek için önce “Kararı yeniden aç” işlemini yapın.");
+      }
+      if (deleted === "nothing_to_delete") return jsonError(409, "Silinecek bir AI analizi yok.");
+      await recordAudit({
+        actorId: auth.account.id, actorEmail: auth.account.email, actorRole: auth.account.roleCode,
+        action: "ai_analysis_deleted", targetType: "competition_application", targetId: id,
+        // Silinen AI metni denetim kaydına YAZILMAZ; yalnızca işlem künyesi tutulur.
+        detail: `${visibleApplication.competitionName} · ${visibleApplication.teamName}`,
+      }).catch((auditError) => console.error("[audit] ai_analysis_deleted", auditError));
+    } else if (body.action === "reopen_review") {
+      const reopened = await reopenApplicationReview(id, auth.account);
+      if (reopened === "not_found") return jsonError(404, "Başvuru bulunamadı.");
+      if (reopened === "forbidden") return jsonError(403, "Yalnızca size atanmış başvurunun kararını yeniden açabilirsiniz.");
+      if (reopened === "not_completed") return jsonError(409, "Bu başvurunun kesinleşmiş bir nihai kararı yok.");
+      if (reopened === "locked") return jsonError(409, "Bu yarışmanın hakem kararları donduruldu; karar yeniden açılamaz.");
     } else if (body.action === "archive_application") {
       // Arşivleme = soft delete. Kayıt, PDF ve değerlendirme geçmişi silinmez.
       const archived = body.archived !== false;

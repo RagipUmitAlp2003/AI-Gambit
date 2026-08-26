@@ -317,9 +317,17 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
                   ? <p className="participant-outcome-note">{application.outcomeNote}</p>
                   : null}
                 {application.status === "completed" && application.review?.feedbackApproved ? (
-                  /* Problem 4 · "AI 4. Göz": hakem kararı sonrası üç kart. */
+                  /*
+                   * Katılımcı sonucu YALNIZCA iki bölümden oluşur:
+                   * Güçlü Yönler (hakemin Onay verdiği kriterler) ve Gelişime
+                   * Açık Yönler (hakemin Ret verdiği kriterler ve gerekçeleri).
+                   * "Gelişim Önerileri" kartı kaldırıldı; eski kayıtlardaki
+                   * `suggestions` alanı okunabilir ama GÖSTERİLMEZ.
+                   * Katılımcıya AI'ın ilk sonucu değil, hakemin kesinleştirdiği
+                   * kriter sonuçları gösterilir.
+                   */
                   <div className="participant-result">
-                    {(["strengths", "improvements", "suggestions"] as const).map((key) => {
+                    {(["strengths", "improvements"] as const).map((key) => {
                       const items = application.review?.finalFeedback[key] ?? [];
                       return (
                         <section key={key} className={`feedback-card ${key}`}>
@@ -327,7 +335,7 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
                           <small>{PARTICIPANT_FEEDBACK_HINTS[key]}</small>
                           {items.length
                             ? <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul>
-                            : <p className="feedback-empty">{key === "improvements" ? "Karşılanmayan kriter bulunmadı." : key === "suggestions" ? "Ek öneri yazılmadı." : "Bu bölümde kayıt yok."}</p>}
+                            : <p className="feedback-empty">{key === "improvements" ? "Karşılanmayan kriter bulunmadı." : "Bu bölümde kayıt yok."}</p>}
                         </section>
                       );
                     })}

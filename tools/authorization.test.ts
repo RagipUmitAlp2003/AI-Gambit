@@ -63,7 +63,7 @@ test("Admin kriter, değerlendirme ve başvuru uçlarına erişemez", () => {
   for (const permission of [
     "author_criteria", "author_profile", "publish_profile", "read_profiles",
     "submit_application", "read_applications", "read_application_file",
-    "run_ai_prescreen", "final_judgement", "assign_judge", "coordinate_evaluation",
+    "run_ai_prescreen", "final_judgement", "coordinate_evaluation",
     "operations_dashboard", "manage_competition_stage",
   ] as Array<keyof typeof PERMISSIONS>) {
     assert.ok(!can(admin, permission), `Admin ${permission} yetkisine sahip olmamalı.`);
@@ -140,13 +140,22 @@ test("hakem AI analizini başlatarak atanmamış dosyayı üstlenemez", () => {
   );
 });
 
-test("ilk hakem atamasını yetki matrisi belirler (04)", () => {
-  assert.deepEqual([...PERMISSIONS.assign_judge], ["04"]);
+test("manuel hakem atama yetkisi ve ucu tamamen kapatıldı", () => {
+  // Yetki matrisi assign_judge iznini artık TANIMLAMAZ; atama yalnızca sistemdedir.
+  assert.ok(!("assign_judge" in PERMISSIONS), "assign_judge yetkisi kaldırılmalıdır.");
+  assert.ok(!/export async function assignApplication/.test(WORKFLOW_DB), "Elle atama işlevi kaldırılmalıdır.");
+  // API ucu, hangi rol çağırırsa çağırsın manuel atamayı reddeder.
+  const route = readFileSync("app/api/applications/[id]/route.ts", "utf8");
   assert.match(
-    WORKFLOW_DB,
-    /!reassigning && !can\(actor, "assign_judge"\)/,
-    "İlk atama assign_judge yetkisine bağlı olmalıdır.",
+    route,
+    /body\.action === "assign_judge"[\s\S]{0,300}Manuel hakem atama kaldırıldı/,
+    "assign_judge eylemi açık bir retle kapatılmalıdır.",
   );
+  // Bekleyen başvurular sistem tarafından otomatik dağıtılır; hakem seçtirilmez.
+  assert.match(WORKFLOW_DB, /export async function assignPendingApplications/, "Bekleyen atama işlevi bulunmalıdır.");
+  const panel = readFileSync("app/components/operations-panel.tsx", "utf8");
+  assert.ok(!/assign_judge/.test(panel), "Operasyon panelinde atama eylemi kalmamalıdır.");
+  assert.ok(!/Hakem seçin/.test(panel), "Operasyon panelinde hakem seçim kutusu kalmamalıdır.");
 });
 
 /* --------------------------------------------------------------------- *
@@ -180,7 +189,7 @@ test("Değerlendirme Yöneticisi nihai karar veremez ve kriter değiştiremez", 
   assert.ok(!can(coordinator, "author_criteria"), "04 kriter çıkaramaz.");
   assert.ok(!can(coordinator, "publish_profile"), "04 kriter profili yayımlayamaz.");
   assert.ok(!can(coordinator, "read_application_file"), "04 katılımcı raporunun içeriğini görmez.");
-  assert.ok(can(coordinator, "assign_judge") && can(coordinator, "coordinate_evaluation"));
+  assert.ok(can(coordinator, "coordinate_evaluation"));
 });
 
 test("nihai karar ve AI ön değerlendirmesi yalnızca hakemdedir", () => {
@@ -284,16 +293,26 @@ test("başvuru alındığında sistem en az yüklü hakeme atar", () => {
   const body = WORKFLOW_DB.slice(start, WORKFLOW_DB.indexOf("\nexport async function createApplication", start));
   assert.match(body, /role_code = '02' AND j\.status = 'active'/, "Yalnızca aktif Hakem hesapları atanabilir.");
   assert.match(body, /open_files ASC/, "En az yüklü hakem seçilmelidir.");
-  // Mümkünse ilgili yarışmaya daha önce dosya almış hakem tercih edilir.
-  assert.match(body, /\(competition_files > 0\) DESC/, "İlgili yarışmanın hakemi öncelikli olmalıdır.");
+  /*
+   * REGRESYON: "aynı yarışmada görevli hakem" tercihi yük sırasının ÖNÜNE
+   * geçmişti ve aynı yarışmanın ardışık başvuruları tek hakeme yığılıyordu
+   * (Çelikkubbe simülasyonunda 2 başvuru da Hakem 1'e gitti). Birincil ölçüt
+   * EN AZ AÇIK DOSYADIR; yarışma aşinalığı yalnızca eşitlik bozucudur.
+   */
+  assert.match(
+    body,
+    /ORDER BY open_files ASC, \(competition_files > 0\) DESC/,
+    "Yük sırası birincil, yarışma aşinalığı yalnızca eşitlik bozucu olmalıdır.",
+  );
   // Eşitlikte adil ve DETERMİNİSTİK: en eski hesap, sonra kimlik sırası. Kura yok.
   assert.match(body, /j\.created_at ASC, j\.id ASC/, "Eşit yükte sıralama deterministik olmalıdır.");
   // Arşivlenmiş dosyalar yük sayımına girmez.
   assert.match(body, /a\.deleted_at IS NULL\) AS open_files/, "Yük sayımı arşivlenen dosyaları saymamalıdır.");
   // Yarış koşulu: iki eşzamanlı başvuru aynı satırı iki kez atayamamalı.
+  // Yeniden gönderilmiş ama hakemsiz kalmış başvurular da kapsamda; arşivli atanmaz.
   assert.match(
     body,
-    /WHERE id = \? AND assigned_judge_id IS NULL AND status = 'submitted'/,
+    /WHERE id = \? AND assigned_judge_id IS NULL AND status IN \('submitted', 'resubmitted'\)\s*\n?\s*AND deleted_at IS NULL/,
     "Atama koşulu WHERE içinde tutulmalı; var olan atamanın üzerine yazılmamalı.",
   );
 });

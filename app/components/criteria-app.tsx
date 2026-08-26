@@ -17,16 +17,13 @@ import {
   saveDraftFile,
   saveDraftSnapshot,
 } from "../lib/draft-store";
+import { resolveVerifiability } from "../lib/criteria-extraction";
 import {
   CHECK_STAGES,
-  CRITERION_VERIFIABILITIES,
-  VERIFIABILITY_HINTS,
-  VERIFIABILITY_LABELS,
   checkStageOf,
   type AnalysisResult,
   type CheckStage,
   type Criterion,
-  type CriterionVerifiability,
   type ProfileExport,
   type SetupData,
   type Step,
@@ -54,18 +51,26 @@ const STEPS = [
 type StageFilter = "all" | CheckStage;
 
 /**
- * Kriter yalnızca ZORUNLU ya da DİĞER olabilir; üçüncü bir durum yoktur.
- * Bu yüzden "zorunlu ve diğer / yalnızca zorunlu" gibi bir filtre de yoktur:
- * iki bölüm her zaman yan yana listelenir, ekleme iki ayrı düğmeyle yapılır.
+ * Kriter yalnızca ZORUNLU ya da ZORUNLU OLMAYAN olabilir; üçüncü bir durum
+ * yoktur. İki bölüm her zaman yan yana listelenir, ekleme iki ayrı düğmeyle
+ * yapılır. Kriterler arasında görsel bir uygunluk/güven farkı GÖSTERİLMEZ:
+ * şeması geçerli her kriter normal görünür, soluk veya kararsız gösterim yoktur.
  */
 type CriterionKind = "required" | "other";
 
-/** Yeni kriter formunun taslak durumu. */
+/**
+ * Yeni kriter formunun taslak durumu.
+ *
+ * PDF'den denetlenebilirlik alanı KULLANICIYA SORULMAZ: sistem, kriter
+ * metninden (ad + açıklama + alıntı) otomatik belirler (resolveVerifiability).
+ * Video, portal, saha teslimi gibi açık ifadeler arka planda PDF dışı
+ * sınıflandırılır; amaç yalnızca bu kuralların hakem rapor analizine
+ * gönderilmesini engellemektir. Alan arayüzde gösterilmez ve düzenlenemez.
+ */
 type CriterionDraft = {
   kind: CriterionKind;
   name: string;
   stage: CheckStage;
-  verifiability: CriterionVerifiability;
   description: string;
   violationOutcome: string;
   sourcePage: string;
@@ -77,20 +82,11 @@ function emptyDraft(kind: CriterionKind): CriterionDraft {
     kind,
     name: "",
     stage: "criteria_evidence",
-    verifiability: "PDF_DENETLENEBILIR",
     description: "",
     violationOutcome: "Belgede belirtilmemiş",
     sourcePage: "",
     sourceText: "",
   };
-}
-
-function verifiabilityBadge(value: CriterionVerifiability) {
-  return (
-    <span className={`verifiability-badge ${value.toLowerCase()}`} title={VERIFIABILITY_HINTS[value]}>
-      {VERIFIABILITY_LABELS[value]}
-    </span>
-  );
 }
 
 function formatBytes(bytes: number) {
@@ -420,18 +416,19 @@ function CriteriaReview({
     stageOrder(left) - stageOrder(right)
     || (left.sourcePage ?? Number.MAX_SAFE_INTEGER) - (right.sourcePage ?? Number.MAX_SAFE_INTEGER)
   );
-  // İki bölüm her zaman birlikte gösterilir; zorunluluğa göre filtre yoktur.
+  // Yalnızca İKİ grup gösterilir: Zorunlu ve Zorunlu olmayan (madde 1).
+  // İki bölüm her zaman birlikte listelenir; zorunluluğa göre filtre yoktur.
   const groups: Array<{ id: CriterionKind; title: string; hint: string; items: Criterion[] }> = [
     {
       id: "required",
       title: "Zorunlu kriterler",
-      hint: "Karşılanmaması KRİTİK HATA doğurur.",
+      hint: "Değerlendirmede zorunlu tutulur.",
       items: filtered.filter((item) => item.required).sort(byStageThenPage),
     },
     {
       id: "other",
-      title: "Diğer kriterler",
-      hint: "Karşılanmaması REVİZYON önerisi doğurur.",
+      title: "Zorunlu olmayan kriterler",
+      hint: "Değerlendirmede zorunlu tutulmaz.",
       items: filtered.filter((item) => !item.required).sort(byStageThenPage),
     },
   ];
@@ -440,7 +437,20 @@ function CriteriaReview({
 
   function update(patch: Partial<Criterion>) {
     if (!selected) return;
-    setCriteria(criteria.map((item) => item.id === selected.id ? { ...item, ...patch } : item));
+    setCriteria(criteria.map((item) => {
+      if (item.id !== selected.id) return item;
+      const next = { ...item, ...patch };
+      /*
+       * Denetlenebilirlik arayüzden SEÇİLMEZ ve gösterilmez; sistem otomatik
+       * belirler. AI kriterlerinde modelin işaretlediği değer korunur; manuel
+       * kriterde metin değiştikçe yeniden hesaplanır (video/portal/saha
+       * ifadeleri arka planda PDF dışı sınıflandırılır).
+       */
+      if (next.origin === "manager" && (patch.name !== undefined || patch.description !== undefined)) {
+        next.verifiability = resolveVerifiability(undefined, next.name, next.sourceText, next.description);
+      }
+      return next;
+    }));
     setReviewConfirmed(false);
   }
 
@@ -472,7 +482,8 @@ function CriteriaReview({
       violationOutcome: draft.violationOutcome.trim().slice(0, 240) || "Belgede belirtilmemiş",
       sourcePage: page,
       sourceText: draft.sourceText.trim().slice(0, 900),
-      verifiability: draft.verifiability,
+      // Kullanıcıya sorulmaz: kriter metninden otomatik belirlenir (madde 1).
+      verifiability: resolveVerifiability(undefined, name, draft.sourceText.trim(), description),
       active: true,
       origin: "manager",
     };
@@ -537,9 +548,13 @@ function CriteriaReview({
             {item.origin === "manager" ? " · Yönetici ekledi" : ""}
           </small>
         </span>
+        {/*
+          Satırda yalnızca dört bilgi bulunur: kriter adı, analiz aşaması,
+          kaynak sayfa bağlantısı ve zorunlu/zorunlu olmayan durumu. Başka
+          uygulanabilirlik/denetlenebilirlik rozeti GÖSTERİLMEZ (madde 1).
+        */}
         <span className={`criterion-value ${item.required ? "required" : "other"}`}>
-          {item.required ? "Zorunlu" : "Diğer"}
-          {item.verifiability !== "PDF_DENETLENEBILIR" ? verifiabilityBadge(item.verifiability) : null}
+          {item.required ? "Zorunlu" : "Zorunlu olmayan"}
         </span>
       </button>
     );
@@ -558,7 +573,7 @@ function CriteriaReview({
 
       <div className="analysis-summary" aria-label="Kriter özeti">
         <div><strong>{requiredCount}</strong><span>zorunlu</span></div>
-        <div><strong>{otherCount}</strong><span>diğer</span></div>
+        <div><strong>{otherCount}</strong><span>zorunlu olmayan</span></div>
         <div><strong>{active.length}</strong><span>toplam kriter</span></div>
         {stageCounts.map(({ stage, count }) => (
           <div key={stage.id} title={stage.detail}><strong>{count}</strong><span>{stage.order}. {stage.shortTitle}</span></div>
@@ -596,10 +611,9 @@ function CriteriaReview({
           <div className="criteria-section-heading">
             <div><h2>Kriter listesi</h2><p>AI çıkarımlarını düzeltin, gereksizleri silin veya belgedeki eksik bir kriteri kendiniz ekleyin.</p></div>
             {/*
-              Kriter ya ZORUNLU ya DİĞERdir. İki bağımsız düğme, ilgili türde bir
-              giriş formu açar; tür formun içinde değiştirilemez, hangi düğmeye
-              basıldıysa o olur. Zorunluluğa göre filtre kaldırıldı: iki bölüm
-              her zaman birlikte listelenir.
+              Kriter ya ZORUNLU ya ZORUNLU OLMAYANdır. İki bağımsız düğme,
+              ilgili türde bir giriş formu açar; tür formun içinde
+              değiştirilemez, hangi düğmeye basıldıysa o olur.
             */}
             <div className="add-criterion-group">
               <button
@@ -609,7 +623,7 @@ function CriteriaReview({
                 onClick={() => openDraft("required")}
               >
                 <span aria-hidden="true">＋</span>
-                <span><strong>Zorunlu Kriter Ekle</strong><small>İhlali KRİTİK HATA doğurur</small></span>
+                <span><strong>Zorunlu Kriter Ekle</strong><small>Değerlendirmede zorunlu tutulur</small></span>
               </button>
               <button
                 type="button"
@@ -618,7 +632,7 @@ function CriteriaReview({
                 onClick={() => openDraft("other")}
               >
                 <span aria-hidden="true">＋</span>
-                <span><strong>Diğer Kriter Ekle</strong><small>İhlali REVİZYON doğurur</small></span>
+                <span><strong>Zorunlu Olmayan Kriter Ekle</strong><small>Değerlendirmede zorunlu tutulmaz</small></span>
               </button>
             </div>
           </div>
@@ -626,8 +640,8 @@ function CriteriaReview({
           {draft ? (
             <div className={`criterion-draft ${draft.kind}`} id="criterion-draft" role="group" aria-label="Yeni kriter">
               <div className="criterion-draft-head">
-                <strong>{draft.kind === "required" ? "Yeni zorunlu kriter" : "Yeni diğer kriter"}</strong>
-                <span>{draft.kind === "required" ? "Karşılanmazsa KRİTİK HATA" : "Karşılanmazsa REVİZYON"}</span>
+                <strong>{draft.kind === "required" ? "Yeni zorunlu kriter" : "Yeni zorunlu olmayan kriter"}</strong>
+                <span>{draft.kind === "required" ? "Zorunlu" : "Zorunlu olmayan"}</span>
               </div>
               <div className="form-grid two-col">
                 <Field label="Kriter adı">
@@ -651,16 +665,6 @@ function CriteriaReview({
                   placeholder="Örn. Rapor Türkçe yazılmalıdır; başka dilde yazılan rapor değerlendirmeye alınmaz."
                 />
               </Field>
-              <Field label="PDF'den denetlenebilirlik" hint={VERIFIABILITY_HINTS[draft.verifiability]}>
-                <select
-                  value={draft.verifiability}
-                  onChange={(event) => setDraft({ ...draft, verifiability: event.target.value as CriterionVerifiability })}
-                >
-                  {CRITERION_VERIFIABILITIES.map((value) => (
-                    <option key={value} value={value}>{VERIFIABILITY_LABELS[value]}</option>
-                  ))}
-                </select>
-              </Field>
               <div className="form-grid two-col">
                 <Field label="İhlal sonucunda">
                   <input value={draft.violationOutcome} maxLength={240} onChange={(event) => setDraft({ ...draft, violationOutcome: event.target.value })} />
@@ -683,7 +687,7 @@ function CriteriaReview({
               <div className="criterion-draft-actions">
                 <button type="button" className="text-button" onClick={() => { setDraft(null); setDraftError(""); }}>Vazgeç</button>
                 <button type="button" className="primary-button" onClick={saveDraft}>
-                  {draft.kind === "required" ? "Zorunlu kriteri ekle" : "Diğer kriteri ekle"}
+                  {draft.kind === "required" ? "Zorunlu kriteri ekle" : "Zorunlu olmayan kriteri ekle"}
                 </button>
               </div>
             </div>
@@ -722,7 +726,7 @@ function CriteriaReview({
             <div className="inspector-topline">
               <div>
                 {stageBadge(selected.stage)}
-                <span className={`required-chip ${selected.required ? "required" : "other"}`}>{selected.required ? "Zorunlu" : "Diğer"}</span>
+                <span className={`required-chip ${selected.required ? "required" : "other"}`}>{selected.required ? "Zorunlu" : "Zorunlu olmayan"}</span>
                 <span className="origin-label">{selected.origin === "document" ? "AI tarafından belgeden çıkarıldı" : "Yönetici tarafından eklendi"}</span>
               </div>
             </div>
@@ -738,26 +742,18 @@ function CriteriaReview({
                     {CHECK_STAGES.map((stage) => <option key={stage.id} value={stage.id}>{stage.order}. {stage.title}</option>)}
                   </select>
                 </Field>
-                <Field label="Zorunluluk" hint="Zorunlu kuralın ihlali KRİTİK HATA, diğer kuralın ihlali REVİZYON sonucu doğurur.">
+                <Field label="Zorunluluk" hint="Kriter değerlendirmede ya zorunludur ya da zorunlu tutulmaz.">
                   <select value={selected.required ? "required" : "other"} onChange={(event) => update({ required: event.target.value === "required" })}>
                     <option value="required">Zorunlu</option>
-                    <option value="other">Diğer</option>
+                    <option value="other">Zorunlu olmayan</option>
                   </select>
                 </Field>
                 {/*
-                  PDF dışı kanıt gerektiren kurallar rapor analizinde ihlal
-                  sayılmaz; "PDF'de video yok" gibi yanlış bir hata üretilmez.
+                  PDF'den denetlenebilirlik alanı ARAYÜZDE YOKTUR (madde 1):
+                  sistem, kriter metninden otomatik belirler ve yalnızca PDF
+                  dışı kuralların hakem rapor analizine gönderilmesini
+                  engellemek için kullanır. Kullanıcı seçemez ve düzenleyemez.
                 */}
-                <Field label="PDF'den denetlenebilirlik" hint={VERIFIABILITY_HINTS[selected.verifiability]}>
-                  <select
-                    value={selected.verifiability}
-                    onChange={(event) => update({ verifiability: event.target.value as CriterionVerifiability })}
-                  >
-                    {CRITERION_VERIFIABILITIES.map((value) => (
-                      <option key={value} value={value}>{VERIFIABILITY_LABELS[value]}</option>
-                    ))}
-                  </select>
-                </Field>
                 <Field label="İhlal sonucunda">
                   <input value={selected.violationOutcome} onChange={(event) => update({ violationOutcome: event.target.value })} />
                 </Field>
@@ -839,7 +835,7 @@ function CriteriaReview({
               checked={reviewConfirmed}
               onChange={(event) => { setReviewConfirmed(event.target.checked); setConfirmingPublish(false); }}
             />
-            <span>Zorunlu ve diğer kriterleri, aşamalarını ve kaynak sayfalarını inceledim.</span>
+            <span>Zorunlu ve zorunlu olmayan kriterleri, aşamalarını ve kaynak sayfalarını inceledim.</span>
           </label>
           {!canApprove ? (
             <small>
@@ -873,7 +869,7 @@ function CriteriaReview({
               {editingPublished ? "Değişiklikler kaydedilsin mi?" : "Kriter profili yayımlansın mı?"}
             </h2>
             <p>
-              <strong>{setup.competition}</strong> için {active.length} kriter ({requiredCount} zorunlu, {otherCount} diğer)
+              <strong>{setup.competition}</strong> için {active.length} kriter ({requiredCount} zorunlu, {otherCount} zorunlu olmayan)
               {editingPublished
                 ? " veri tabanına yazılacak. Yapay zekâ yeniden çalıştırılmaz; yalnızca formdaki güncel kriterler kaydedilir."
                 : " yayımlanacak. Profil yayımlandığı anda hakem değerlendirme sistemine aktarılır ve yarışma yarışmacı portalında başvuruya açılır."}
@@ -977,7 +973,7 @@ function ProfileReady({
         <div className="profile-metrics">
           <div><strong>{active.length}</strong><span>toplam kriter</span></div>
           <div><strong>{requiredCount}</strong><span>zorunlu</span></div>
-          <div><strong>{active.length - requiredCount}</strong><span>diğer</span></div>
+          <div><strong>{active.length - requiredCount}</strong><span>zorunlu olmayan</span></div>
           <div><strong>{profile.sourceDocument.pages}</strong><span>kaynak sayfa</span></div>
         </div>
         <div className="profile-footer-note">

@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { insertAccount, listAccounts, recordAudit, recordMail } from "../../../lib/admin-db";
+import { assignPendingApplications } from "../../../lib/workflow-db";
 import { ROLES } from "../../../lib/admin-roles";
 import {
   ValidationError,
@@ -61,11 +62,21 @@ export async function POST(request: Request): Promise<Response> {
     const account = await insertAccount({
       fullName,
       email,
+      // İsteğe bağlı basit kullanıcı adı (ör. hakem1, projeyoneticisi2);
+      // normalizasyon ve benzersizlik denetimi insertAccount içindedir.
+      username: optionalText(body, "username", 64) || null,
       roleCode,
       password: passwordRecord,
       // Atamayı yapan, oturumdaki hesaptır; istemciden gelen değere güvenilmez.
       createdBy: auth.account.fullName,
     });
+
+    // Yeni bir aktif Hakem açıldıysa bekleyen (hakemsiz) başvurular sistem
+    // tarafından otomatik dağıtılır; kimseye hakem seçtirilmez.
+    if (account.roleCode === "02") {
+      await assignPendingApplications().catch((assignError) =>
+        console.error("[workflow] yeni hakem sonrası bekleyen atama", assignError));
+    }
 
     const baseUrl = env.APP_BASE_URL || new URL(request.url).origin;
     const envelope = buildAccountMail({

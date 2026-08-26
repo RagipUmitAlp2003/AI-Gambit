@@ -1,6 +1,6 @@
 # AI-Gambit — Proje Durumu ve Yapılacaklar
 
-**Tarih:** 26 Ağustos 2026 · **Dal:** `son_merge_deneme_2` · **Temel işleme:** `d92d8f8`
+**Tarih:** 27 Ağustos 2026 · **Dal:** `son_merge_deneme_2` · **Temel işleme:** `abe1c4d`
 
 Bu belge projenin **güncel durumunu** tutar: neyin çalıştığı, neyin eksik olduğu ve
 neyin düzeltilmesi gerektiği. Aşağıdaki her madde bugün kod üzerinde veya gerçek
@@ -16,11 +16,63 @@ neyin düzeltilmesi gerektiği. Aşağıdaki her madde bugün kod üzerinde veya
 | `docs/*_SOZLESMESI.md` | AI uçlarının veri sözleşmeleri (kod bunlara atıf yapıyor) |
 | `docs/GENEL_BELGE_ANALIZ_MIMARISI.md` | Dört aşamalı analiz mimarisi |
 | `docs/KALICI_ANALIZ_ONBELLEGI.md` | Kalıcı analiz önbelleğinin sözleşmesi ve koruma kuralları |
+| `TESLIM_RAPORU_NIHAI_HAKEM_AKISI.md` | Nihai hakem akışı + benzerlik teslim raporu (26 Ağustos) |
+| `SIMULASYON_RAPORU_CELIKKUBBE.md` | Canlı uçtan uca Çelikkubbe simülasyonu — 13 maddelik nihai rapor (27 Ağustos) |
 | `PROJE_DURUMU.md` (bu belge) | Durum, ölçüm, eksik iş listesi |
 
 ---
 
-## 1. Bugün yapılan son iş — Bütünlük, yaşam döngüsü ve gerçek giriş
+## 0. En son iş — Çelikkubbe uçtan uca simülasyonu ve bulgu-doğrulama modeli (26–27 Ağustos)
+
+Ayrıntılı rapor: `SIMULASYON_RAPORU_CELIKKUBBE.md`. Özet:
+
+| # | İş | Ne değişti / doğrulandı |
+|---|---|---|
+| 1 | **Hakem kararının anlamı değişti** | Onayla/Ret artık **AI bulgusunun kabulünü** ifade eder: Onayla → AI'nin sonucu (UYGUN **veya** OLUMSUZ) kesinleşir; Ret → bulgu kullanılamaz, hakem kendi sonucunu (UYGUN/OLUMSUZ) + kaynak (sayfa/bölüm/alıntı veya "Raporda bulunamadı") girmek **zorundadır**. Kesin sonuç: `approved → aiVerdict`, `rejected → judgeResult` (`effectiveVerdictOf`, `app/lib/judge-review.ts`) |
+| 2 | Atama yığılması düzeltildi | `autoAssignJudge` sıralaması artık önce yük: `ORDER BY open_files ASC, (competition_files > 0) DESC, …` — canlı simülasyonda bulundu, regresyonu `tools/authorization.test.ts` içinde |
+| 3 | Canlı simülasyon (gerçek Gemini, izinli) | 7 aşama + 2 karar alt-aşaması: **87/87**. Şartname 11 kriter (3 PDF-dışı süzüldü), HisarNova 8 bulgu tamamı kanıtlı, benzerlik **%100 hybrid/high** (BENZERLIK_A↔B, 3 MinHash doğrudan eşleşme), GokKalkan %95 ŞÜPHELİ, embedding önbelleği yeniden analizde 0 API çağrısı. Gerçek tarayıcıda UI doğrulandı |
+| 4 | Test bataryası | tsc temiz · lint 0/0 · birim 108/108 · e2e **139/139** (anlık görüntü → dev_reset → e2e → geri yükleme; İDA verisi ve hesaplar korundu) · build başarılı |
+| 5 | Hedefli temizlik | `tools/cleanup_sim_celikkubbe.mjs`: yalnız Çelikkubbe simülasyon verisini siler, idempotent (2. koşu: silinecek veri yok); hesaplar + İDA + analiz önbelleği korunur |
+
+## 1. Bugün yapılan son iş — Nihai hakem akışı, sade kriter görünümü ve hibrit benzerlik
+
+Ayrıntılı teslim raporu: `TESLIM_RAPORU_NIHAI_HAKEM_AKISI.md`. Özet:
+
+| # | İş | Ne değişti |
+|---|---|---|
+| 1 | Sade Kriter Atölyesi | Yalnızca iki grup: **Zorunlu / Zorunlu olmayan kriterler**. Denetlenebilirlik seçimi/rozeti, güven ifadeleri ve "karşılanmaması … doğurur" metinleri arayüzden kaldırıldı. `verifiability` GİZLİ alan olarak korunur ve kriter metninden otomatik belirlenir (`resolveVerifiability`); tek amacı PDF dışı kuralları hakem analizinden uzak tutmaktır |
+| 2 | PDF dışı kriter filtresi | Video/saha/portal kuralları artık **bulgu üretmez**: modele gönderilmez, sayaçlara girmez, hakem ekranında ve katılımcı geri bildiriminde görünmez ("PDF dışı kanıt" bölümü kaldırıldı). Eski kayıtların `DEGERLENDIRILEMEDI` bulguları okunur ama görünür listeye alınmaz; kayıt yolu da süzer (`sanitizeEvaluation`) |
+| 3 | Kriter bazlı hakem kararı | AI ön değerlendirmesi kartta `Uygun/Olumsuz` olarak DEĞİŞTİRİLEMEZ biçimde durur; hakem her kriter için ayrı **Onay/Ret** verir (başlangıç daima "Karar bekliyor" — otomatik doldurma kaldırıldı). Ret: gerekçe + dayanak (`PDF_KONUMU`: sayfa+alıntı · `RAPORDA_BULUNAMADI`: aranan içerik, sahte sayfa istenmez). Geçerli sonuç yalnızca hakem kararıdır; sayaçlar anlıktır ve AI sayacından ayrıdır. Veri: `review_json.criterionDecisions` (+ sunucu doğrulaması + audit `judge_criterion_decisions`). **GÜNCELLENDİ — bkz. bölüm 0/1:** Onay/Ret artık kriter sonucunu değil AI bulgusunun kabulünü ifade eder |
+| 4 | Nihai karar | Bütün kriterler sonuçlanmadan genel karar bölümü açılmaz (sunucu 409). Sistem öneri üretmez; karar yalnızca **ONAY/RET** (butonlar Onayla/Reddet; durum adı "RED" kullanılmaz). RET açıklaması reddedilen kriterlerden deterministik şablonla üretilir |
+| 5 | AI analizini silme | Hakem `AI analizini sil` (onay pencereli): analiz + tamamlanmamış kriter kararları + bu PDF sürümünün benzerlik sonucu kaldırılır; başvuru/PDF/takım/atama/yarışma korunur; başvuru yeniden analiz bekler. Kesin karar önce sunucu taraflı **`reopen_review`** ile açılmalı. Olay audit + süreç geçmişinde (`ai_analysis_deleted`) |
+| 6 | Katılımcı geri bildirimi | Yalnızca iki bölüm: **Güçlü Yönler** (hakem onayları) ve **Gelişime Açık Yönler** (hakem retleri + gerekçe + sayfa/alıntı veya "Raporda bulunamadı"). Gelişim Önerileri kartı kaldırıldı; eski `suggestions` okunur ama gösterilmez/üretilmez |
+| 7 | Tam otomatik hakem ataması | Elle atama yüzeyi tamamen kapandı: panel salt okunur, API `assign_judge` 403, yetki matrisinden silindi. Yeni `assignPendingApplications()` bekleyenleri dağıtır (tetik: yeni/aktifleşen 02 hesabı + operasyon panosu yüklenişi) |
+| 8 | Hibrit benzerlik | MinHash (korundu) + `gemini-embedding-001` (SEMANTIC_SIMILARITY · 768) parça katmanı: 300–500 kelimelik çakışmalı parçalar, şablon/kimlik temizliği, embedding önbelleği (PDF sürümü+hash+model+boru hattı anahtarlı), kapsama tabanlı 0–100 yaklaşık oran (ham cosine gösterilmez), hakem notu + en fazla 3 eşleşmeli ayrıntı, 04'e yalnızca tamamlandı/işaret bilgisi. Kriter analiziyle paralel (`Promise.allSettled`), PDF SHA-256 bağı, kapsam sunucuda (`competition_key`). Göç: `migrations/0009_similarity_v2.sql` |
+| 9 | Basit test kullanıcıları | `tools/seed_demo_users.mjs`: admin + projeyoneticisi1..3 + hakem1..3 + degerlendirmeyoneticisi1 + katilimci1..9 (yalnızca yerel, parola 1234 PBKDF2 ile, idempotent, mevcut Admin'e dokunmaz). Hesap uçları isteğe bağlı `username` kabul eder |
+| 10 | Test ve temizlik | e2e senaryosu **137 kontrole** çıktı (benzerlik, kriter kararları, analiz silme, manuel atama reddi, basit kullanıcı adlarıyla giriş). `dev_reset` benzerlik tablolarını, `similarity/` R2 anahtarlarının raporunu ve yalnızca akış-kaynaklı audit kayıtlarının temizliğini kapsar |
+| 11 | Çekişmeli inceleme | Değişiklikler 5 boyutlu çok-ajanlı incelemeden geçirildi; her bulgu bağımsız çürütücüyle doğrulandı: **25 bulgu → 23 doğrulandı → tamamı düzeltildi veya bilinçli sınırlama olarak raporlandı** (yarış korumaları, kesin karar bypass'ı, decidedAt/aiVerdict damgası, 04/katılımcı redaksiyonları, benzerlik havuzu geriye uyumu, UI kilit/veri kaybı hataları). Ayrıntı: teslim raporu · bölüm 10b |
+
+### Doğrulama (bugün ölçüldü)
+
+| Kontrol | Sonuç |
+|---|---|
+| `npx tsc --noEmit` | ✅ temiz |
+| `npm run lint` | ✅ temiz |
+| `npm run check:repo-safety` | ✅ PASS |
+| `npm run test:unit` | ✅ **106/106** (yeni: `judge-review.test.ts`, `similarity.test.ts`, göç 0009 testleri) |
+| `npm run test:regressions` | ✅ PASS (7 blok; yeni "Judge-decision flow" bloğu) |
+| `npm run build` | ✅ üretim derlemesi tamam |
+| `node tools/e2e_scenario.mjs` | ✅ **137/137** — canlı sunucu; ücretli AI/embedding çağrısı YAPILMADI |
+| `node tools/dev_reset.mjs --apply` | ✅ idempotent (ikinci koşu 0 kayıt) |
+| `node tools/seed_demo_users.mjs --apply` | ✅ 16 sade test hesabı; mevcut Admin korunur |
+
+**Ölçülmedi:** canlı Gemini kriter analizi (report-v6) ve canlı `gemini-embedding-001`
+doğruluğu — ücretli çağrı için açık izin alınmadı; embedding API sözleşmesi mock ile
+doğrulandı (bkz. teslim raporu · bölüm 13).
+
+---
+
+## 1a. Önceki iş — Bütünlük, yaşam döngüsü ve gerçek giriş
 
 Problem 4 teslim listesinin 1–13. maddeleri uygulandı. Çalışan hiçbir özellik
 yeniden yazılmadı; şema değişiklikleri **eklemeli** ve geriye uyumludur
@@ -41,23 +93,14 @@ yeniden yazılmadı; şema değişiklikleri **eklemeli** ve geriye uyumludur
 | 11 | Silme ve denetim | Yarışma arşivleme (01) ve başvuru kaldırma (02) soft delete; 04 panosunda kim/ne zaman/gerekçe/önceki-yeni durum tablosu |
 | 12 | Kaynak kilidi | Kaynak sayfa ve alıntı ilk yayımda kilitlenir; arayüzde salt okunur, sunucu elle değişikliği geri alır ve olayı kaydeder |
 
-### Doğrulama (bugün ölçüldü)
+### Doğrulama (o gün ölçüldü; güncel sayılar için bölüm 1)
 
-| Kontrol | Sonuç |
-|---|---|
-| `npx tsc --noEmit` | ✅ temiz |
-| `npm run lint` | ✅ temiz |
-| `npm run check:repo-safety` | ✅ PASS |
-| `npm run test:unit` | ✅ 76/76 |
-| `npm run test:regressions` | ✅ PASS (6 blok) |
-| `npm run build` | ✅ üretim derlemesi tamam |
-| `node tools/dev_reset.mjs --apply` | ✅ 204 satır silindi, ikinci koşuda 0 (idempotent) |
-| `node tools/e2e_scenario.mjs` | ✅ **96/96** — canlı sunucuya karşı, ücretli AI çağrısı yapılmadan |
-
-Uçtan uca senaryo 1 Admin · 3 Yarışma Yöneticisi · 3 Hakem · 1 Değerlendirme
-Yöneticisi · 9 Katılımcı · 3 yarışma · 9 başvuru (kötü/orta/iyi) kurar ve
-RBAC, R2 yükleme/indirme, otomatik atama, bütünlük kapıları, video kriteri,
-pasif yarışma, onay görünürlüğü, kaynak kilidi ve arşiv denetimini sınar.
+O günkü koşular: tsc/lint/repo-safety temiz · birim 76/76 · regresyon 6 blok ·
+e2e 96/96 · dev_reset idempotent. Uçtan uca senaryo 1 Admin · 3 Yarışma
+Yöneticisi · 3 Hakem · 1 Değerlendirme Yöneticisi · 9 Katılımcı · 3 yarışma ·
+9 başvuru (kötü/orta/iyi) kurar ve RBAC, R2 yükleme/indirme, otomatik atama,
+bütünlük kapıları, video kriteri, pasif yarışma, onay görünürlüğü, kaynak
+kilidi ve arşiv denetimini sınar. Senaryo bugün 137 kontrole genişletildi.
 
 **Ölçülmedi:** canlı Gemini analizi (ücretli çağrı; açık izin alınmadı).
 
@@ -202,10 +245,11 @@ O gün alınan puan/kapsam ölçümleri eski prensibe ait olduğu için burada t
 | Depo güvenliği | `npm run check:repo-safety` | ✅ PASS (bugün ölçüldü) |
 | Tip kontrolü | `npx tsc --noEmit` | ✅ temiz (bugün ölçüldü) |
 | Lint | `npm run lint` | ✅ temiz (bugün ölçüldü) |
-| Birim testleri | `npm run test:unit` | ✅ 76/76 geçti (bugün ölçüldü) |
-| Uçtan uca senaryo | `node tools/e2e_scenario.mjs` | ✅ 96/96 (bugün ölçüldü; ücretli AI çağrısı yapılmadı) |
+| Birim testleri | `npm run test:unit` | ✅ 106/106 geçti (bugün ölçüldü) |
+| Uçtan uca senaryo | `node tools/e2e_scenario.mjs` | ✅ 137/137 (bugün ölçüldü; ücretli AI/embedding çağrısı yapılmadı) |
+| Üretim derlemesi | `npm run build` | ✅ tamam (bugün ölçüldü) |
 | Geliştirme sıfırlaması | `node tools/dev_reset.mjs --apply` | ✅ idempotent (bugün ölçüldü) |
-| Regresyon testleri | `npm run test:regressions` | ✅ PASS (bugün ölçüldü) |
+| Regresyon testleri | `npm run test:regressions` | ✅ PASS · 7 blok (bugün ölçüldü) |
 | AI erişimi | `npm run check:gemini` | ✅ canlı üretim çağrısı başarılı — İDA analizi 28,4 sn · 14.055 token · 26 kriter (önbellek doğrulaması sırasında; `check:gemini` komutu ayrıca koşulmadı) |
 | Doğruluk benchmarkı | `node tools/run_celikkubbe_benchmark.mjs http://localhost:3000/api/analyze` | ölçülmedi — referans dosyası yeni biçime çevrildi, canlı koşu gerekiyor (A1) |
 
@@ -223,6 +267,7 @@ Sıra önem derecesine göre. "Dosya" sütunu işe nereden başlanacağını gö
 | **A2** | Benchmark canlı koşusu | `docs/benchmarks/celikkubbe-expected.json` ve `tools/run_celikkubbe_benchmark.mjs` yeni biçime çevrildi (kural kapsamı + aşama/zorunluluk + yasaklı ifade); eski çıktılar eski biçimde duruyor. **Canlı koşu yapılmadı**, beklenti dosyası model çıktısıyla kalibre edilmedi | Sunucu açıkken `node tools/run_celikkubbe_benchmark.mjs http://localhost:3000/api/analyze` çalıştırılıp eksik/yanlış eşleşen anahtar sözcükler ve aşama beklentileri düzeltilmeli | `docs/benchmarks/celikkubbe-expected.json`, `tools/run_celikkubbe_benchmark.mjs` |
 | **A3** | İDA cevap anahtarı | `docs/benchmarks/ida-ground-truth.json` yalnızca şema + "nasıl doldurulur" notu — **içi boş** | Resmî İDA şartnamesinden yeni biçimde elle doldurulmalı. Tek belgeye aşırı uyum riski ikinci belge olmadan ölçülemez | `docs/benchmarks/ida-ground-truth.json` |
 | **A4** | Eski 1.0 profiller yükseltilerek okunur | `upgradeLegacyCriterion` aşamayı eski `type` alanından tahmin ediyor; PDF aşaması dışı ve bilgi notu maddeleri **pasif** taşınıyor; `required` eski `effect`'ten türetiliyor. D1'deki eski kayıtlar `max_score` taşıyabilir | Yükseltilen profil yayımlanmadan önce yöneticinin gözden geçirmesi zorunlu tutulmalı; eski D1 kriter satırları için tek seferlik göç veya okuma anında yükseltme kararı verilmeli | `app/lib/profile-loader.ts`, `app/lib/workflow-db.ts` |
+| **A5** | Benzerlik eşik kalibrasyonu + canlı embedding | Hibrit benzerlik canlıda hiç koşulmadı: embedding sözleşmesi mock ile doğrulandı, MinHash katmanı e2e'de canlı doğrulandı. Eşikler (0.55/0.30 · 0.90/0.82 · rapor %55/%30) başlangıç değeridir | Açık izinle canlı `gemini-embedding-001` koşusu; kontrollü rapor çiftleriyle (kopya / farklı kelimelerle aynı fikir / yalnız şablon ortak) eşik kalibrasyonu | `app/lib/similarity-text.ts`, `app/api/applications/[id]/similarity/route.ts` |
 
 ### B · Model ve maliyet
 
@@ -319,10 +364,16 @@ kaldırılıp bu belgeye yönlendirildi.
 ## 7. Doğrulama komutları
 
 ```bash
-# Uçtan uca senaryo (ücretli AI çağrısı YAPMAZ)
+# Uçtan uca senaryo (ücretli AI/embedding çağrısı YAPMAZ)
 npm run dev                            # ayrı bir kabuk
 node tools/dev_reset.mjs --apply       # temiz başlangıç (yalnızca yerel D1)
-node tools/e2e_scenario.mjs            # 96 kontrol
+node tools/e2e_scenario.mjs            # 137 kontrol
+#   Bootstrap admini yerine parolası değiştirilmiş gerçek Admin varsa:
+#   E2E_ADMIN_IDENTIFIER=admin E2E_ADMIN_PASSWORD=... node tools/e2e_scenario.mjs
+
+# Basit test kullanıcıları (yalnızca yerel; admin + projeyoneticisiN + hakemN +
+# degerlendirmeyoneticisi1 + katilimciN · parola 1234)
+node tools/seed_demo_users.mjs --apply
 
 npm run check:gemini          # anahtar, model adları ve gerçek üretim çağrısı
 npx tsc --noEmit              # tip kontrolü

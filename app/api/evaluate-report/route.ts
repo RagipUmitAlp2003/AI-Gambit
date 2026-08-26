@@ -71,7 +71,7 @@ const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
 /** Modele verilen tek isteğin zaman sınırı. */
 const GENERATION_TIMEOUT_MS = 150_000;
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
-const PROMPT_VERSION = "report-v5-server-bound-verifiability";
+const PROMPT_VERSION = "report-v6-pdf-only-judge-decisions";
 const MAX_REPORT_BYTES = 50 * 1024 * 1024;
 const MAX_INLINE_REPORT_BYTES = 18 * 1024 * 1024;
 /** İstemcinin deterministik kontroller için gönderdiği sayfa metni üst sınırı. */
@@ -252,25 +252,12 @@ function normalizeFinding(raw: RawFinding | undefined, criterion: Criterion, pag
     verifiability: criterion.verifiability,
   };
   /*
-   * PDF DIŞI KANIT (madde 4)
-   *
-   * Video, saha teslimi, portal yüklemesi veya kurul kararı gerektiren kurallar
-   * rapor PDF'inden doğrulanamaz. Bunlar HİÇBİR koşulda hatalı, reddedilmiş ya
-   * da eksik sayılmaz: sonuç deterministik olarak DEGERLENDIRILEMEDI'dir ve
-   * modelin bu kural hakkında ne söylediğine bakılmaz.
+   * PDF DIŞI KANIT: bu işlev artık yalnızca PDF'den denetlenebilir kriterler
+   * için çağrılır. Video, saha teslimi, portal yüklemesi veya kurul kararı
+   * gerektiren kurallar bulgu listesine HİÇ alınmaz (modele gönderilmez,
+   * sonuç üretilmez, sayaçlara girmez, hakem ekranında görünmez); çağıran
+   * (buildEvaluation) bunları listeden çıkarır.
    */
-  if (verifiedOutsidePdf(criterion.verifiability)) {
-    return {
-      ...base,
-      verdict: "DEGERLENDIRILEMEDI",
-      rationale: criterion.verifiability === "HARICI_KANIT_GEREKLI"
-        ? "PDF üzerinden değerlendirilemez; harici kanıt kontrol edilmeli (video, portal yüklemesi veya fiziksel teslim)."
-        : "PDF üzerinden değerlendirilemez; kural hakem kontrolü gerektiriyor.",
-      evidence: [],
-      // Kanıt zaten raporda aranmaz; "kanıt eksik" uyarısı gösterilmez.
-      evidenceMissing: false,
-    };
-  }
   if (!raw) return { ...base, verdict: "REVIZYON", rationale: MISSING_FINDING_RATIONALE, evidence: [], evidenceMissing: true };
   const evidence = normalizeEvidence(raw.evidence, pageCount);
   let verdict = enumValue<RuleVerdict>(raw.verdict, PDF_RULE_VERDICTS, "REVIZYON");
@@ -485,21 +472,17 @@ function buildEvaluation(input: {
   const warnings = list(raw.analysisWarnings, 8);
   const rawFindings = Array.isArray(raw.findings) ? raw.findings as RawFinding[] : [];
   const byId = new Map(rawFindings.map((item) => [cleanText(item.criterionId, "", 160), item]));
-  const active = profile.criteria.filter((item) => item.active);
+  /*
+   * BULGULAR YALNIZCA PDF'DEN DENETLENEBİLİR KRİTERLER İÇİNDİR (madde 2).
+   * PDF dışı kanıt gerektiren kurallar (video, saha teslimi, portal yüklemesi,
+   * kurul kararı) modele gönderilmez, bulgu üretilmez, uygun/olumsuz/toplam
+   * sayaçlarına katılmaz, hakem ekranında ve katılımcı geri bildiriminde
+   * görünmez. Yarışma Yöneticisinin kriter listesinde durmaya devam ederler.
+   */
+  const active = profile.criteria.filter((item) => item.active && !verifiedOutsidePdf(item.verifiability));
   const findings = active.map((criterion) => normalizeFinding(byId.get(criterion.id), criterion, pageCount));
-  // Eksik bulgu sayımı yalnızca PDF'den denetlenebilir kurallar içindir:
-  // harici kanıt kuralları modele hiç gönderilmez, bulgu döndürmemeleri normaldir.
-  const missingCount = active.filter(
-    (criterion) => !verifiedOutsidePdf(criterion.verifiability) && !byId.has(criterion.id),
-  ).length;
+  const missingCount = active.filter((criterion) => !byId.has(criterion.id)).length;
   if (missingCount) warnings.push(`${missingCount} kriter için model bulgu döndürmedi; bu kurallar REVİZYON olarak hakeme bırakıldı.`);
-  const outsideCount = findings.filter((item) => item.verdict === "DEGERLENDIRILEMEDI").length;
-  if (outsideCount) {
-    warnings.push(
-      `${outsideCount} kural PDF üzerinden değerlendirilemez (video, harici yükleme veya kurul kararı). `
-      + "Bu kurallar hata sayılmadı; hakem kanıtı rapor dışından kontrol etmelidir.",
-    );
-  }
 
   // Deterministik sayfa sınırı: ihlalde bulgu kesin olarak sabitlenir.
   for (const { rule, limit } of pageLimitRules(profile).filter((entry) => !verifiedOutsidePdf(entry.rule.verifiability))) {

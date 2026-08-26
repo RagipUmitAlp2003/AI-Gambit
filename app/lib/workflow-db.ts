@@ -2,9 +2,20 @@ import { env } from "cloudflare:workers";
 import { ConflictError, getDatabase, recordAudit, recordWorkflowEvent, recordWorkflowEvents } from "./admin-db";
 import { COMPETITIONS, fold, type CompetitionEntry } from "./competitions";
 import type { AdminAccount, WorkflowEventInput } from "./admin-types";
-import { can, canUpdateProfile } from "./authorization";
+import { canUpdateProfile } from "./authorization";
 import { validateProfileExport } from "./profile-loader";
-import { RULE_VERDICT_LABELS, type AnalysisResult, type Criterion, type JudgeReview, type ProfileExport, type ReportEvaluation, type RuleVerdict } from "./types";
+import { findingRejectionAuditLine, judgeDecisionCounts, validateCriterionDecisions, visibleFindingsOf } from "./judge-review";
+import {
+  RULE_VERDICT_LABELS,
+  aiVerdictOf,
+  type AnalysisResult,
+  type Criterion,
+  type JudgeReview,
+  type ProfileExport,
+  type ReportEvaluation,
+  type RuleVerdict,
+  type SimilarityReport,
+} from "./types";
 import type { SimilarityFingerprint } from "./similarity-engine";
 import {
   APPLICATION_STATUSES,
@@ -162,6 +173,53 @@ const WORKFLOW_SCHEMA = [
     updated_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_submission_fingerprints_scope ON submission_fingerprints (competition_key, updated_at DESC)`,
+  // Benzerlik parçaları: ham metin D1'e YAZILMAZ; kimlik, konum, özet, MinHash
+  // ve embedding vektörü tutulur. Parça metinleri özel R2 nesnesindedir.
+  // Embedding önbelleği bu tablodur: aynı PDF sürümü + model + boru hattı
+  // sürümü için embedding YALNIZCA BİR KEZ üretilir (madde 9.7).
+  `CREATE TABLE IF NOT EXISTS similarity_chunks (
+    id TEXT PRIMARY KEY,
+    application_id TEXT NOT NULL,
+    submission_version_id TEXT NOT NULL,
+    competition_key TEXT NOT NULL,
+    pdf_hash TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    page_start INTEGER NOT NULL,
+    page_end INTEGER NOT NULL,
+    section TEXT NOT NULL DEFAULT '',
+    word_count INTEGER NOT NULL,
+    text_hash TEXT NOT NULL,
+    min_hash_json TEXT NOT NULL,
+    embedding_json TEXT,
+    embedding_model TEXT,
+    embedding_dim INTEGER,
+    pipeline_version TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (submission_version_id, pipeline_version, chunk_index)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_similarity_chunks_scope
+   ON similarity_chunks (competition_key, application_id, submission_version_id)`,
+  // Rapor düzeyi benzerlik sonucu: PDF sürümüne ve boru hattına bağlanır.
+  // "AI analizini sil" bu satırı kaldırır; embedding önbelleği (chunks) kalır.
+  `CREATE TABLE IF NOT EXISTS similarity_results (
+    id TEXT PRIMARY KEY,
+    application_id TEXT NOT NULL,
+    submission_version_id TEXT,
+    pdf_hash TEXT NOT NULL,
+    competition_key TEXT NOT NULL,
+    minhash_version TEXT NOT NULL DEFAULT 'minhash-v1',
+    embedding_model TEXT,
+    embedding_dim INTEGER,
+    pipeline_version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    approx_percent INTEGER,
+    closest_application_id TEXT,
+    closest_label TEXT,
+    report_json TEXT NOT NULL,
+    analyzed_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_similarity_results_application
+   ON similarity_results (application_id, analyzed_at DESC)`,
   `CREATE TABLE IF NOT EXISTS criteria_analysis_cache (
     cache_key TEXT PRIMARY KEY,
     document_hash TEXT NOT NULL,
@@ -581,6 +639,14 @@ function toApplication(
   const storedReview = parseJson<JudgeReview>(row.review_json);
   const reviewCompleted = storedReview?.status === "completed";
   const participantResultHidden = view === "participant" && !reviewCompleted;
+  /*
+   * KATILIMCI GÖRÜNÜMÜ (madde 6): yarışmacıya yalnızca hakemin kesinleştirdiği
+   * sonuç ve geri bildirim gider. AI'nin İLK sonucunu taşıyan kriter kararları
+   * (aiVerdict), hakemin iç notu ve eski karar listesi katılımcıya AÇILMAZ.
+   */
+  const participantReview: JudgeReview | null = storedReview && !participantResultHidden
+    ? { ...storedReview, decisions: [], criterionDecisions: [], overallNote: "" }
+    : null;
   const storedEvaluation = parseJson<ReportEvaluation>(row.evaluation_json);
   // Eski (puanlı, 1.0) AI sonucu dört aşamalı ekranda incelenemez; başvuru
   // "analiz başarısız" gibi sunulur ki hakem yeniden analiz edebilsin veya
@@ -606,7 +672,9 @@ function toApplication(
     sizeBytes: operations ? null : row.size_bytes,
     status: legacyEvaluation && ["awaiting_judge", "judge_in_review"].includes(storedStatus) ? "analysis_failed" : storedStatus,
     evaluation: view === "full" ? evaluation : operations ? redactEvaluation(evaluation) : null,
-    review: operations || participantResultHidden ? null : storedReview,
+    review: operations || participantResultHidden
+      ? null
+      : view === "participant" ? participantReview : storedReview,
     judgeId: row.judge_id,
     judgeName: row.judge_name,
     assignedJudgeId: row.assigned_judge_id,
@@ -614,7 +682,9 @@ function toApplication(
     currentVersionId: row.current_version_id,
     currentVersionNumber: Number(row.current_version_number) || 1,
     outcome: participantResultHidden ? "pending" : normalizeOutcome(row.outcome),
-    outcomeNote: participantResultHidden ? "" : (row.outcome_note ?? ""),
+    // Sonuç açıklaması ret gerekçelerini ve katılımcı PDF'inden alıntıları
+    // taşıyabilir; operasyon rolleri (01/04) rapor içeriği GÖRMEZ (madde 9.10).
+    outcomeNote: participantResultHidden || operations ? "" : (row.outcome_note ?? ""),
     decidedAt: participantResultHidden ? null : row.decided_at,
     evaluationCriteriaVersion: row.evaluation_criteria_version ?? null,
     evaluationPdfHash: view === "full" ? (row.evaluation_pdf_hash ?? null) : null,
@@ -1502,11 +1572,14 @@ async function autoAssignJudge(
   const database = await workflowDatabase();
   /*
    * Seçim ölçütü, sırayla:
-   *   1. Bu YARIŞMADA daha önce dosya almış aktif hakemler (varsa) tercih edilir;
-   *      aynı yarışmanın kriterlerine hâkim hakem işi daha hızlı bitirir.
-   *   2. AÇIK dosya sayısı en az olan hakem (tamamlanmamış ve arşivlenmemiş).
-   *   3. Eşitlikte en eski hesap, sonra kimlik sırası — deterministik ve adil:
-   *      aynı yük altında sıra her zaman aynı hakeme gider, kura atılmaz.
+   *   1. AÇIK dosya sayısı EN AZ olan aktif hakem (tamamlanmamış ve
+   *      arşivlenmemiş). Bu, birincil ölçüttür: aynı yarışmanın ardışık
+   *      başvuruları tek hakeme YIĞILMAZ, en müsait hakeme dağıtılır.
+   *   2. Eşit yükte, bu yarışmada daha önce dosya almış hakem tercih edilir
+   *      (kriterlere hâkim hakem işi daha hızlı bitirir) — yalnızca EŞİTLİK
+   *      BOZUCUDUR, yük sırasının önüne geçemez.
+   *   3. Kalan eşitlikte en eski hesap, sonra kimlik sırası — deterministik ve
+   *      adil: aynı yük altında sıra her zaman aynı hakeme gider, kura atılmaz.
    */
   const candidate = await database.prepare(
     `SELECT j.id, j.full_name,
@@ -1516,17 +1589,20 @@ async function autoAssignJudge(
               WHERE a.assigned_judge_id = j.id AND a.competition_key = ?) AS competition_files
      FROM admin_accounts j
      WHERE j.role_code = '02' AND j.status = 'active'
-     ORDER BY (competition_files > 0) DESC, open_files ASC, j.created_at ASC, j.id ASC
+     ORDER BY open_files ASC, (competition_files > 0) DESC, j.created_at ASC, j.id ASC
      LIMIT 1`,
   ).bind(competitionKey).first<{ id: string; full_name: string; open_files: number; competition_files: number }>();
   if (!candidate) return null;
   const row = candidate;
 
-  // Koşul WHERE'de tutulur: başka bir işlem bu arada atama yaptıysa üzerine yazılmaz.
+  // Koşul WHERE'de tutulur: başka bir işlem bu arada atama yaptıysa üzerine
+  // yazılmaz. Yeniden gönderilmiş ama hâlâ hakemsiz kalmış başvurular da
+  // otomatik dağıtım kapsamındadır; arşivlenmiş başvuru atanmaz.
   const updated = await database.prepare(
     `UPDATE competition_applications
      SET assigned_judge_id = ?, assigned_judge_name = ?, status = 'assigned', updated_at = ?
-     WHERE id = ? AND assigned_judge_id IS NULL AND status = 'submitted'`,
+     WHERE id = ? AND assigned_judge_id IS NULL AND status IN ('submitted', 'resubmitted')
+       AND deleted_at IS NULL`,
   ).bind(row.id, row.full_name, timestamp, applicationId).run();
   if (!updated.meta.changes) return null;
 
@@ -1552,6 +1628,50 @@ async function autoAssignJudge(
     openFiles: Number(row.open_files) || 0,
     scoped: Number(candidate.competition_files) > 0,
   };
+}
+
+/**
+ * Bekleyen (hakemsiz) başvuruları otomatik dağıtır (madde: otomatik yeniden deneme).
+ *
+ * Aktif hakem bulunmadığında başvuru atanmamış kalır ve Değerlendirme
+ * Yöneticisi panosunda görünür; elle hakem SEÇİLEMEZ. Yeni bir aktif Hakem
+ * hesabı açıldığında veya sistem yeniden denediğinde (operasyon panosu her
+ * yüklendiğinde) bu işlev bekleyenleri en az yüklü hakemlere dağıtır.
+ * Kullanıcıdan hakem seçmesi İSTENMEZ; işlem tamamen sistem içindedir.
+ */
+export async function assignPendingApplications(): Promise<number> {
+  const database = await workflowDatabase();
+  // Pasif veya arşivlenmiş yarışmanın başvuruları yeni değerlendirme kuyruğu
+  // ÜRETMEZ (madde 8): dağıtım yalnızca aktif yarışmalar için yapılır.
+  const pending = await database.prepare(
+    `SELECT a.id, a.competition_key FROM competition_applications a
+     INNER JOIN competitions c ON c.competition_key = a.competition_key
+     WHERE a.assigned_judge_id IS NULL AND a.status IN ('submitted', 'resubmitted') AND a.deleted_at IS NULL
+       AND c.deleted_at IS NULL AND c.is_active = 1
+     ORDER BY a.submitted_at ASC LIMIT 100`,
+  ).all<{ id: string; competition_key: string }>();
+  let assignedCount = 0;
+  for (const row of pending.results ?? []) {
+    try {
+      const timestamp = new Date().toISOString();
+      const assignment = await autoAssignJudge(row.id, row.competition_key, timestamp);
+      if (!assignment) continue;
+      assignedCount += 1;
+      const detail = `${assignment.name} · bekleyen başvuru sistem tarafından otomatik dağıtıldı`
+        + ` · açık dosya: ${assignment.openFiles}${assignment.scoped ? " · bu yarışmada görevli" : ""}`;
+      await recordWorkflowEvent({
+        subjectType: "application", subjectId: row.id, event: "application_assigned", actor: null, detail,
+      }).catch((eventError) => console.error("[workflow] bekleyen atama olayı kaydedilemedi", eventError));
+      await recordAudit({
+        actorId: null, actorEmail: null, actorRole: null,
+        action: "application_auto_assigned", targetType: "competition_application", targetId: row.id, detail,
+      }).catch((auditError) => console.error("[audit] bekleyen otomatik atama", auditError));
+    } catch (assignError) {
+      // Tek başvurunun ataması düşerse kalanlar denenmeye devam eder.
+      console.error("[workflow] bekleyen başvuru ataması yapılamadı", assignError);
+    }
+  }
+  return assignedCount;
 }
 
 export async function createApplication(input: {
@@ -1714,10 +1834,30 @@ function redactEvaluation(evaluation: ReportEvaluation | null): ReportEvaluation
       summary: "",
       evidence: [],
       headings: [],
-      similarity: stage.similarity ? { ...stage.similarity, detail: "", closestTeam: null } : stage.similarity ?? null,
+      // 04 yalnızca benzerlik kontrolünün DURUMUNU görür; yüzde, en yakın
+      // takım ve ayrıntı metni bu role gitmez (madde 9.10).
+      similarity: stage.similarity
+        ? { ...stage.similarity, detail: "", closestTeam: null, percent: null }
+        : stage.similarity ?? null,
     })),
     findings: (evaluation.findings ?? []).map((finding) => ({ ...finding, rationale: "", evidence: [] })),
     feedbackDraft: { strengths: [], improvements: [], suggestions: [] },
+    /*
+     * Değerlendirme Yöneticisi yalnızca benzerlik kontrolünün TAMAMLANIP
+     * tamamlanmadığını ve inceleme işareti bulunup bulunmadığını görür;
+     * başka takımın adı, alıntısı veya oranı bu role hiç gönderilmez (madde 9.10).
+     */
+    similarityReport: evaluation.similarityReport
+      ? {
+        ...evaluation.similarityReport,
+        approxPercent: null,
+        closestLabel: null,
+        note: evaluation.similarityReport.level === "none"
+          ? "Benzerlik kontrolü: karşılaştırılacak başka güncel başvuru yoktu."
+          : `Benzerlik kontrolü tamamlandı${["review", "high"].includes(evaluation.similarityReport.level) ? "; inceleme işareti var" : "; inceleme işareti yok"}.`,
+        matches: [],
+      }
+      : evaluation.similarityReport ?? null,
     analysisWarnings: [],
   };
 }
@@ -1790,47 +1930,15 @@ export async function applicationFileKey(id: string, account: AdminAccount): Pro
   return row?.file_key ?? null;
 }
 
-export type AssignmentResult = CompetitionApplication | "not_found" | "already_assigned" | "initial_forbidden" | "completed";
-
-export async function assignApplication(
-  id: string,
-  judge: AdminAccount,
-  actor: AdminAccount,
-  reason: string,
-): Promise<AssignmentResult> {
-  const database = await workflowDatabase();
-  const current = await database.prepare(
-    `SELECT assigned_judge_id, status FROM competition_applications WHERE id = ?`,
-  ).bind(id).first<{ assigned_judge_id: string | null; status: string }>();
-  if (!current) return "not_found";
-  if (current.status === "completed") return "completed";
-  const reassigning = Boolean(current.assigned_judge_id);
-  // İlk atama yetki matrisinden okunur (assign_judge); yeniden atama koordinasyon yetkisidir.
-  if (!reassigning && !can(actor, "assign_judge")) return "initial_forbidden";
-  if (current.assigned_judge_id === judge.id) return "already_assigned";
-  const timestamp = new Date().toISOString();
-  const nextStatus = ["submitted", "resubmitted", "analysis_failed", "document_reupload_requested"].includes(current.status)
-    ? "assigned"
-    : current.status;
-  await database.batch([
-    database.prepare(`UPDATE application_assignments SET active = 0 WHERE application_id = ? AND active = 1`).bind(id),
-    database.prepare(
-      `INSERT INTO application_assignments
-        (id, application_id, judge_id, judge_name, assigned_by, assigned_by_name, reason, active, assigned_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
-    ).bind(crypto.randomUUID(), id, judge.id, judge.fullName, actor.id, actor.fullName, reason.trim().slice(0, 500), timestamp),
-    database.prepare(
-      `UPDATE competition_applications
-       SET assigned_judge_id = ?, assigned_judge_name = ?, status = ?, updated_at = ? WHERE id = ?`,
-    ).bind(judge.id, judge.fullName, nextStatus, timestamp, id),
-  ]);
-  await recordWorkflowEvent({
-    subjectType: "application", subjectId: id,
-    event: reassigning ? "application_reassigned" : "application_assigned", actor,
-    detail: `${judge.fullName}${reason.trim() ? ` · ${reason.trim().slice(0, 400)}` : ""}`,
-  });
-  return await findApplication(id, actor) ?? "not_found";
-}
+/*
+ * MANUEL HAKEM ATAMA KALDIRILDI.
+ *
+ * `assignApplication` (elle ilk atama / yeniden atama) bilinçli olarak
+ * silindi: hakem ataması YALNIZCA sistem tarafından yapılır
+ * (`autoAssignJudge` + `assignPendingApplications`). Değerlendirme Yöneticisi
+ * hakem seçemez; API'deki `assign_judge` eylemi kapatıldı ve yetki matrisi
+ * bu izni artık tanımlamaz.
+ */
 
 export type CoordinationAction = "remind_judge" | "requeue_analysis" | "request_document";
 
@@ -2138,16 +2246,38 @@ export async function saveApplicationEvaluation(
 ): Promise<void> {
   const database = await workflowDatabase();
   const current = await database.prepare(
-    `SELECT profile_id, current_version_id FROM competition_applications WHERE id = ?`,
-  ).bind(id).first<{ profile_id: string | null; current_version_id: string | null }>();
+    `SELECT a.profile_id, a.current_version_id, a.status, c.decisions_locked
+     FROM competition_applications a
+     LEFT JOIN competitions c ON c.competition_key = a.competition_key
+     WHERE a.id = ?`,
+  ).bind(id).first<{
+    profile_id: string | null; current_version_id: string | null;
+    status: string; decisions_locked: number | null;
+  }>();
+  if (!current) throw new ConflictError("Başvuru bulunamadı.");
+  /*
+   * KESİNLEŞMİŞ KARAR KORUMASI: nihai karar verilmiş (completed) veya kararları
+   * dondurulmuş bir başvurunun durumu, AI sonucu kaydı ya da "analiz başarısız"
+   * işaretiyle BOZULAMAZ. Analiz ancak "Kararı yeniden aç"tan sonra yazılabilir;
+   * bu kural deleteApplicationEvaluation/reopenApplicationReview ile tutarlıdır.
+   */
+  if (current.status === "completed") {
+    throw new ConflictError("Bu başvurunun nihai kararı kesinleştirildi; analiz sonucu yazmak için önce “Kararı yeniden aç” işlemini yapın.");
+  }
+  if (current.decisions_locked === 1) {
+    throw new ConflictError("Bu yarışmanın hakem kararları donduruldu; analiz sonucu kaydedilemez.");
+  }
   const timestamp = new Date().toISOString();
   const versionId = binding?.submissionVersionId ?? current?.current_version_id ?? null;
-  await database.batch([database.prepare(
+  const resultRowId = crypto.randomUUID();
+  const batchResults = await database.batch([database.prepare(
+    // Koşul WHERE'de de tutulur: yukarıdaki okuma ile yazma arasında karar
+    // kesinleşirse (yarış durumu) bu satır completed durumunu EZEMEZ.
     `UPDATE competition_applications
      SET status = ?, evaluation_json = ?, judge_id = ?, judge_name = ?,
          evaluation_criteria_version = ?, evaluation_criteria_hash = ?,
          evaluation_pdf_hash = ?, evaluation_version_id = ?, updated_at = ?
-     WHERE id = ?`,
+     WHERE id = ? AND status <> 'completed'`,
   ).bind(
     failed ? "analysis_failed" : "awaiting_judge",
     evaluation ? JSON.stringify(evaluation) : null,
@@ -2167,12 +2297,19 @@ export async function saveApplicationEvaluation(
        criteria_version, criteria_hash, pdf_hash, created_at, completed_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
-    crypto.randomUUID(), id, versionId, current?.profile_id ?? null,
+    resultRowId, id, versionId, current?.profile_id ?? null,
     failed ? "failed" : "completed", evaluation ? JSON.stringify(evaluation) : null,
     evaluation?.model ?? null,
     binding?.criteriaVersion ?? null, binding?.criteriaHash ?? null, binding?.pdfHash ?? null,
     timestamp, failed ? null : timestamp,
   )]);
+  if (!batchResults[0]?.meta.changes) {
+    // Yarış durumu: okuma ile yazma arasında karar kesinleşti. Durum bozulmadı;
+    // bu denemeye ait geçmiş satırı da geri alınır ve çağıran açık hata görür.
+    await database.prepare(`DELETE FROM evaluation_results WHERE id = ?`).bind(resultRowId).run()
+      .catch(() => undefined);
+    throw new ConflictError("Başvurunun durumu bu sırada değişti (nihai karar kesinleşti); analiz sonucu yazılmadı.");
+  }
   await recordWorkflowEvent({
     subjectType: "application",
     subjectId: id,
@@ -2213,6 +2350,28 @@ function verdictAdjustmentEvents(
       actor: judge,
       detail: `${name} · AI kararı: ${label(before)} → Hakem nihai kararı: ${label(decision.finalVerdict)}`
         + (reason ? ` · Değişiklik gerekçesi: ${reason.slice(0, 400)}` : " · Gerekçe girilmedi"),
+    });
+  }
+  return events;
+}
+
+/**
+ * Yeni akış: hakemin REDDETTİĞİ AI bulguları denetim izine düşer. Reddedilen
+ * bulgu kesin sonuç olarak KULLANILMAZ; yerine hakemin yazdığı sonuç geçer ve
+ * bu değişim (AI bulgusu → hakem sonucu) olay kaydında görünür. Bulgunun
+ * onaylanması sapma değildir: AI'nin sonucu (UYGUN da OLUMSUZ da olsa)
+ * hakemce doğru bulunmuştur.
+ */
+function criterionDecisionEvents(id: string, judge: AdminAccount, review: JudgeReview): WorkflowEventInput[] {
+  const events: WorkflowEventInput[] = [];
+  for (const decision of review.criterionDecisions ?? []) {
+    if (decision.judgeVerdict !== "rejected") continue;
+    events.push({
+      subjectType: "application",
+      subjectId: id,
+      event: "judge_score_adjusted",
+      actor: judge,
+      detail: findingRejectionAuditLine(decision),
     });
   }
   return events;
@@ -2264,12 +2423,66 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
     }
   }
   const evaluation = parseJson<ReportEvaluation>(before?.evaluation_json ?? null);
-  await database.batch([database.prepare(
+  /*
+   * HAKEM KRİTER KARARLARI (nihai hakem akışı)
+   *
+   * Sunucu istemciden gelen karar listesine güvenmez:
+   *   - Her karar, başvurunun KAYITLI son AI analizindeki görünür (PDF)
+   *     kriterlerden birine ait olmalıdır; başka başvurunun veya eski kriter
+   *     sürümünün kararı kabul edilmez (tazelik yukarıda ayrıca doğrulanır).
+   *   - Ret; gerekçe + dayanak türü (+ sayfa/alıntı ya da aranan içerik) ister.
+   *   - Genel karar, bütün kriterler sonuçlanmadan verilemez.
+   *   - Karar damgası (decidedBy/decidedAt) sunucuda atılır.
+   */
+  const visibleFindings = evaluation ? visibleFindingsOf(evaluation) : [];
+  if (review.criterionDecisions?.length && !evaluation) {
+    throw new ConflictError("Kriter kararları için başvurunun kayıtlı AI analizi bulunamadı; önce analizi çalıştırın.");
+  }
+  if (review.criterionDecisions) {
+    const decisionError = validateCriterionDecisions(visibleFindings, review.criterionDecisions, completed);
+    if (decisionError) throw new ConflictError(decisionError);
+    /*
+     * SUNUCU DAMGASI: decidedBy/decidedAt İSTEMCİDEN ALINMAZ (sahtelenebilirdi);
+     * karar anı sunucu saatiyle yazılır. AI ön değerlendirmesi de istemcinin
+     * gönderdiği değerden değil, KAYITLI bulgudan yeniden türetilir — aksi
+     * hâlde "AI Olumsuz → Hakem Onay" sapması denetim izinden gizlenebilirdi.
+     */
+    const findingById = new Map(visibleFindings.map((finding) => [finding.criterionId, finding]));
+    review = {
+      ...review,
+      criterionDecisions: review.criterionDecisions.map((decision) => {
+        const finding = findingById.get(decision.criterionId);
+        const aiVerdict = finding ? aiVerdictOf(finding.verdict) : decision.aiVerdict;
+        return decision.judgeVerdict === "pending"
+          ? { ...decision, aiVerdict, judgeResult: null, decidedBy: null, decidedAt: null }
+          : decision.judgeVerdict === "approved"
+            // Onayda kesin sonuç AI'nindir; hakem sonucu alanı taşınmaz.
+            ? { ...decision, aiVerdict, judgeResult: null, decidedBy: judge.id, decidedAt: timestamp }
+            : { ...decision, aiVerdict, decidedBy: judge.id, decidedAt: timestamp };
+      }),
+    };
+  } else if (completed && visibleFindings.length) {
+    // Yeni akışta AI sonucu otomatik kabul edilmez: genel karar ancak her
+    // kriter için ayrı hakem kararı verildikten sonra kesinleşebilir.
+    throw new ConflictError("Genel karar için önce her görünür kriter için Onay veya Ret kararı verilmelidir.");
+  }
+  if (completed && review.criterionDecisions?.length && !["accepted", "rejected"].includes(review.outcome)) {
+    throw new ConflictError("Nihai karar yalnızca ONAY veya RET olabilir.");
+  }
+  /*
+   * YARIŞ KORUMASI: bütün doğrulamalar yukarıdaki okuma anına aittir. Nihai
+   * yazma bu yüzden koşulsuz `WHERE id = ?` OLAMAZ — araya giren bir işlem
+   * (yeni belge talebi, yeniden gönderim, analiz silme) durumu değiştirdiyse
+   * karar o durumu ezmemelidir. Koşul WHERE'de tutulur; ikinci ifade yalnızca
+   * ilk güncelleme başarılıysa etkili olur (yeni durum üzerinden koşullanır).
+   */
+  const nextStatus = completed ? "completed" : "judge_in_review";
+  const reviewBatch = await database.batch([database.prepare(
     `UPDATE competition_applications
      SET status = ?, review_json = ?, judge_id = ?, judge_name = ?, updated_at = ?, completed_at = ?
-     WHERE id = ?`,
+     WHERE id = ? AND status IN ('awaiting_judge', 'judge_in_review', 'completed')`,
   ).bind(
-    completed ? "completed" : "judge_in_review",
+    nextStatus,
     JSON.stringify(review),
     judge.id,
     judge.fullName,
@@ -2280,7 +2493,7 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
     `INSERT INTO application_submission_details
       (application_id, applicant_full_name, team_name, outcome, outcome_note, decided_at)
      SELECT id, participant_name, participant_name, ?, ?, ?
-     FROM competition_applications WHERE id = ?
+     FROM competition_applications WHERE id = ? AND status = ?
      ON CONFLICT(application_id) DO UPDATE SET
        outcome = excluded.outcome,
        outcome_note = excluded.outcome_note,
@@ -2290,7 +2503,13 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
     completed ? review.outcomeNote.trim().slice(0, 1_000) : "",
     completed ? timestamp : null,
     id,
+    nextStatus,
   )]);
+  if (!reviewBatch[0]?.meta.changes) {
+    throw new ConflictError(
+      "Başvurunun durumu bu sırada değişti (örn. yeni belge istendi veya analiz silindi); karar yazılmadı. Sayfayı yenileyip yeniden deneyin.",
+    );
+  }
 
   const events: WorkflowEventInput[] = [];
   if (before?.status === "awaiting_judge") {
@@ -2298,6 +2517,7 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
   }
   events.push(...verdictAdjustmentEvents(id, judge, evaluation, review));
   if (completed) {
+    events.push(...criterionDecisionEvents(id, judge, review));
     const outcomeLabel = review.outcome === "accepted" ? "Kabul edildi"
       : review.outcome === "rejected" ? "Reddedildi"
       : review.outcome === "revision_required" ? "Hatalar düzeltilmeli" : "Sonuç bekliyor";
@@ -2310,6 +2530,421 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
     });
   }
   await recordWorkflowEvents(events);
+  // Kriter kararları denetim izine de yazılır (madde 3): kim, ne zaman, kaç
+  // onay/ret. Karar gerekçeleri review_json içinde saklanır; audit özet taşır.
+  if (completed && review.criterionDecisions?.length) {
+    const counts = judgeDecisionCounts(review.criterionDecisions);
+    const rejectedNames = review.criterionDecisions
+      .filter((decision) => decision.judgeVerdict === "rejected")
+      .map((decision) => decision.criterionName);
+    await recordAudit({
+      actorId: judge.id,
+      actorEmail: judge.email,
+      actorRole: judge.roleCode,
+      action: "judge_criterion_decisions",
+      targetType: "competition_application",
+      targetId: id,
+      detail: `Kesinleşen: ${counts.uygun} uygun · ${counts.olumsuz} olumsuz · toplam ${counts.total} PDF kriteri`
+        + ` · AI bulgusu: ${counts.findingsApproved} onaylandı, ${counts.findingsRejected} reddedildi`
+        + (rejectedNames.length ? ` · bulgusu reddedilen: ${rejectedNames.slice(0, 5).join(", ")}` : ""),
+    }).catch((auditError) => console.error("[audit] hakem kriter kararları", auditError));
+  }
+}
+
+export type DeleteAnalysisResult = "deleted" | "not_found" | "forbidden" | "completed_locked" | "nothing_to_delete";
+
+/**
+ * Hakemin "AI analizini sil" işlemi (madde 5).
+ *
+ * YALNIZCA AI analizi ve tamamlanmamış kriter kararları kaldırılır:
+ *   - Katılımcı başvurusu, PDF'i, takım bilgileri, hakem ataması ve yarışma
+ *     kaydı SİLİNMEZ.
+ *   - Bu PDF sürümüne bağlı benzerlik SONUCU kaldırılır; embedding önbelleği
+ *     (similarity_chunks) geçerli kalır ve yeniden analizde tekrar üretilmez.
+ *   - Başvuru yeniden "AI analizi bekliyor" durumuna döner; "Yapay Zekâ
+ *     Analizi Yap" düğmesi tekrar kullanılabilir.
+ *   - Nihai karar kesinleşmişse önce "Kararı yeniden aç" gerekir; bu kural
+ *     burada, SUNUCUDA doğrulanır.
+ *
+ * Denetim izi yalnızca işlemi yapanı, tarihi, başvuruyu ve işlem türünü tutar;
+ * silinen AI metni denetim kaydına YAZILMAZ ve sonuç olarak yeniden kullanılamaz.
+ */
+export async function deleteApplicationEvaluation(id: string, actor: AdminAccount): Promise<DeleteAnalysisResult> {
+  const database = await workflowDatabase();
+  const current = await database.prepare(
+    `SELECT status, assigned_judge_id, evaluation_json, review_json, current_version_id
+     FROM competition_applications WHERE id = ?`,
+  ).bind(id).first<{
+    status: string; assigned_judge_id: string | null; evaluation_json: string | null;
+    review_json: string | null; current_version_id: string | null;
+  }>();
+  if (!current) return "not_found";
+  // Yalnızca atanmış hakem kendi başvurusunun analizini silebilir.
+  if (actor.roleCode === "02" && current.assigned_judge_id !== actor.id) return "forbidden";
+  if (current.status === "completed") return "completed_locked";
+  // "analyzing" da silinebilir: tarayıcı çökmesiyle takılan analiz bu yolla
+  // kurtarılır ve başvuru yeniden "AI analizi bekliyor" durumuna döner.
+  if (!current.evaluation_json && !current.review_json
+    && !["analysis_failed", "analyzing"].includes(current.status)) {
+    return "nothing_to_delete";
+  }
+  const timestamp = new Date().toISOString();
+  const nextStatus = current.assigned_judge_id ? "assigned" : "submitted";
+  const updated = await database.prepare(
+    `UPDATE competition_applications
+     SET status = ?, evaluation_json = NULL, review_json = NULL,
+         judge_id = NULL, judge_name = NULL,
+         evaluation_criteria_version = NULL, evaluation_criteria_hash = NULL,
+         evaluation_pdf_hash = NULL, evaluation_version_id = NULL,
+         completed_at = NULL, updated_at = ?
+     WHERE id = ? AND status <> 'completed'`,
+  ).bind(nextStatus, timestamp, id).run();
+  // Yarış durumu: okuma ile yazma arasında karar kesinleştiyse hiçbir şey
+  // silinmez; benzerlik sonucu ve denetim kaydı da yazılmaz.
+  if (!updated.meta.changes) return "completed_locked";
+  // Bu başvurunun benzerlik sonucu kaldırılır (madde 9.7); parça/embedding
+  // önbelleği korunur, eski benzerlik sonucu yeni analiz sonucu gibi kullanılamaz.
+  await database.prepare(`DELETE FROM similarity_results WHERE application_id = ?`).bind(id).run();
+  await recordWorkflowEvent({
+    subjectType: "application",
+    subjectId: id,
+    event: "ai_analysis_deleted",
+    actor,
+    detail: "AI analizi ve tamamlanmamış kriter kararları hakem tarafından kaldırıldı; başvuru yeniden analiz bekliyor.",
+  }).catch((eventError) => console.error("[workflow] analiz silme olayı kaydedilemedi", eventError));
+  return "deleted";
+}
+
+export type ReopenReviewResult = "reopened" | "not_found" | "forbidden" | "not_completed" | "locked";
+
+/**
+ * Kesinleşmiş nihai kararı yeniden açar (madde 5).
+ *
+ * Karar "açık" duruma döner: başvuru `judge_in_review`, sonuç `pending` olur ve
+ * yarışmacıya görünen karar kapanır. AI analizi ve kriter kararları korunur;
+ * hakem isterse analiz silmeye ancak bu adımdan sonra geçebilir.
+ */
+export async function reopenApplicationReview(id: string, judge: AdminAccount): Promise<ReopenReviewResult> {
+  const database = await workflowDatabase();
+  const current = await database.prepare(
+    `SELECT a.status, a.assigned_judge_id, a.review_json, c.decisions_locked
+     FROM competition_applications a
+     LEFT JOIN competitions c ON c.competition_key = a.competition_key
+     WHERE a.id = ?`,
+  ).bind(id).first<{
+    status: string; assigned_judge_id: string | null; review_json: string | null; decisions_locked: number | null;
+  }>();
+  if (!current) return "not_found";
+  if (judge.roleCode === "02" && current.assigned_judge_id !== judge.id) return "forbidden";
+  if (current.status !== "completed") return "not_completed";
+  if (current.decisions_locked === 1) return "locked";
+  const stored = parseJson<JudgeReview>(current.review_json);
+  const reopened: JudgeReview | null = stored
+    ? { ...stored, status: "in_progress", outcome: "pending", completedAt: null }
+    : null;
+  const timestamp = new Date().toISOString();
+  await database.batch([
+    database.prepare(
+      `UPDATE competition_applications
+       SET status = 'judge_in_review', review_json = ?, completed_at = NULL, updated_at = ?
+       WHERE id = ? AND status = 'completed'`,
+    ).bind(reopened ? JSON.stringify(reopened) : null, timestamp, id),
+    database.prepare(
+      `UPDATE application_submission_details
+       SET outcome = 'pending', outcome_note = '', decided_at = NULL WHERE application_id = ?`,
+    ).bind(id),
+  ]);
+  await recordWorkflowEvent({
+    subjectType: "application",
+    subjectId: id,
+    event: "judge_review_reopened",
+    actor: judge,
+    detail: "Nihai karar hakem tarafından yeniden açıldı; sonuç yarışmacıya kapatıldı.",
+  }).catch((eventError) => console.error("[workflow] karar yeniden açma olayı kaydedilemedi", eventError));
+  return "reopened";
+}
+
+/* ------------------------------------------------------------------------- *
+ * Benzerlik kayıtları (madde 9)
+ *
+ * Zincir daima sunucuda kurulur:
+ *   applicationId → competitionKey → currentSubmissionVersion → currentPdfHash
+ *   → similarity chunks/fingerprint/embedding → similarity result
+ *
+ * Ham rapor metni D1'e yazılmaz; parça metinleri özel R2 nesnesinde durur.
+ * ------------------------------------------------------------------------- */
+
+export type SimilarityContext = {
+  applicationId: string;
+  competitionKey: string;
+  submissionVersionId: string | null;
+  fileKey: string;
+  participantLabel: string;
+  /** Şablon temizliğinde silinecek adlar: takım + başvuru sahibi + ekip üyeleri. */
+  participantNames: string[];
+  competitionName: string;
+  assignedJudgeId: string | null;
+};
+
+/** Benzerlik işlemi için başvuru bağlamını yalnızca sunucu kaynaklarından kurar. */
+export async function resolveSimilarityContext(
+  applicationId: string,
+  actor: AdminAccount,
+): Promise<SimilarityContext | "not_found" | "forbidden"> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT a.id, a.competition_key, a.competition_name, a.assigned_judge_id, a.current_version_id,
+            COALESCE(v.file_key, a.file_key) AS file_key,
+            COALESCE(d.team_name, a.participant_name) AS participant_label,
+            COALESCE(d.applicant_full_name, a.participant_name) AS applicant_full_name
+     FROM competition_applications a
+     LEFT JOIN application_submission_details d ON d.application_id = a.id
+     LEFT JOIN submission_versions v ON v.id = a.current_version_id
+     WHERE a.id = ?`,
+  ).bind(applicationId).first<{
+    id: string; competition_key: string; competition_name: string; assigned_judge_id: string | null;
+    current_version_id: string | null; file_key: string; participant_label: string; applicant_full_name: string;
+  }>();
+  if (!row) return "not_found";
+  if (actor.roleCode === "02" && row.assigned_judge_id !== actor.id) return "forbidden";
+  const members = await database.prepare(
+    `SELECT full_name FROM application_team_members WHERE application_id = ? ORDER BY member_order`,
+  ).bind(applicationId).all<{ full_name: string }>();
+  return {
+    applicationId: row.id,
+    competitionKey: row.competition_key,
+    submissionVersionId: row.current_version_id,
+    fileKey: row.file_key,
+    participantLabel: row.participant_label,
+    participantNames: [
+      row.participant_label,
+      row.applicant_full_name,
+      ...(members.results ?? []).map((member) => member.full_name),
+    ].filter(Boolean),
+    competitionName: row.competition_name,
+    assignedJudgeId: row.assigned_judge_id,
+  };
+}
+
+export type StoredSimilarityChunk = {
+  chunkIndex: number;
+  pageStart: number;
+  pageEnd: number;
+  wordCount: number;
+  textHash: string;
+  minHash: number[];
+  embedding: number[] | null;
+};
+
+/**
+ * Embedding önbelleği okuması: aynı PDF sürümü + özet + model + boru hattı
+ * sürümü için kayıtlı parçalar varsa embedding API'si YENİDEN ÇAĞRILMAZ.
+ */
+export async function findStoredSimilarityChunks(input: {
+  submissionVersionId: string;
+  pdfHash: string;
+  embeddingModel: string;
+  pipelineVersion: string;
+}): Promise<StoredSimilarityChunk[] | null> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(
+    `SELECT chunk_index, page_start, page_end, word_count, text_hash, min_hash_json,
+            embedding_json, embedding_model
+     FROM similarity_chunks
+     WHERE submission_version_id = ? AND pdf_hash = ? AND pipeline_version = ?
+     ORDER BY chunk_index ASC`,
+  ).bind(input.submissionVersionId, input.pdfHash, input.pipelineVersion).all<{
+    chunk_index: number; page_start: number; page_end: number; word_count: number;
+    text_hash: string; min_hash_json: string; embedding_json: string | null; embedding_model: string | null;
+  }>();
+  const rows = result.results ?? [];
+  if (!rows.length) return null;
+  return rows.map((row) => ({
+    chunkIndex: Number(row.chunk_index) || 0,
+    pageStart: Number(row.page_start) || 1,
+    pageEnd: Number(row.page_end) || 1,
+    wordCount: Number(row.word_count) || 0,
+    textHash: row.text_hash,
+    minHash: parseJson<number[]>(row.min_hash_json) ?? [],
+    // Farklı embedding modellerinin vektörleri birbiriyle karşılaştırılmaz.
+    embedding: row.embedding_model === input.embeddingModel
+      ? parseJson<number[]>(row.embedding_json) : null,
+  }));
+}
+
+/** Parça kayıtlarını (embedding önbelleği) bu PDF sürümü için yazar; eski sürüm satırları temizlenir. */
+export async function saveSimilarityChunks(input: {
+  applicationId: string;
+  submissionVersionId: string;
+  competitionKey: string;
+  pdfHash: string;
+  pipelineVersion: string;
+  embeddingModel: string | null;
+  embeddingDim: number | null;
+  chunks: StoredSimilarityChunk[];
+}): Promise<void> {
+  const database = await workflowDatabase();
+  const timestamp = new Date().toISOString();
+  // Eski embedding yeni PDF için KULLANILMAZ: başvurunun önceki sürüm satırları
+  // silinir; yalnızca geçerli sürümün parçaları havuzda kalır.
+  await database.prepare(`DELETE FROM similarity_chunks WHERE application_id = ?`).bind(input.applicationId).run();
+  if (!input.chunks.length) return;
+  const statements = input.chunks.map((chunk) => database.prepare(
+    `INSERT INTO similarity_chunks
+      (id, application_id, submission_version_id, competition_key, pdf_hash, chunk_index,
+       page_start, page_end, section, word_count, text_hash, min_hash_json,
+       embedding_json, embedding_model, embedding_dim, pipeline_version, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    `${input.submissionVersionId}:${input.pipelineVersion}:${chunk.chunkIndex}`,
+    input.applicationId,
+    input.submissionVersionId,
+    input.competitionKey,
+    input.pdfHash,
+    chunk.chunkIndex,
+    chunk.pageStart,
+    chunk.pageEnd,
+    chunk.wordCount,
+    chunk.textHash,
+    JSON.stringify(chunk.minHash),
+    chunk.embedding ? JSON.stringify(chunk.embedding) : null,
+    chunk.embedding ? input.embeddingModel : null,
+    chunk.embedding ? input.embeddingDim : null,
+    input.pipelineVersion,
+    timestamp,
+  ));
+  // D1 tek batch'te sınırlı ifade kabul eder; parçalar dilimlenerek yazılır.
+  for (let start = 0; start < statements.length; start += 20) {
+    await database.batch(statements.slice(start, start + 20));
+  }
+}
+
+export type SimilarityPeerChunks = {
+  applicationId: string;
+  participantLabel: string;
+  submissionVersionId: string;
+  assignedJudgeId: string | null;
+  chunks: StoredSimilarityChunk[];
+};
+
+/**
+ * Karşılaştırma havuzu (madde 9.2): yalnızca AYNI yarışma anahtarındaki
+ * (ad + yıl + aşama) diğer başvuruların GEÇERLİ PDF sürümlerine ait parçalar.
+ *
+ *   - Başvuru kendisiyle karşılaştırılmaz.
+ *   - Eski PDF sürümleri havuza girmez (yalnızca current_version_id eşleşir).
+ *   - Arşivlenmiş başvurular ve arşivlenmiş yarışmalar havuza girmez.
+ */
+export async function listPeerSimilarityChunks(
+  competitionKey: string,
+  excludeApplicationId: string,
+  pipelineVersion: string,
+): Promise<SimilarityPeerChunks[]> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(
+    `SELECT s.application_id, s.submission_version_id, s.chunk_index, s.page_start, s.page_end,
+            s.word_count, s.text_hash, s.min_hash_json, s.embedding_json, s.embedding_model,
+            a.assigned_judge_id,
+            COALESCE(d.team_name, a.participant_name) AS participant_label
+     FROM similarity_chunks s
+     INNER JOIN competition_applications a
+       ON a.id = s.application_id AND a.current_version_id = s.submission_version_id
+     LEFT JOIN application_submission_details d ON d.application_id = a.id
+     WHERE s.competition_key = ? AND s.application_id <> ? AND s.pipeline_version = ?
+       AND a.deleted_at IS NULL
+     ORDER BY s.application_id, s.chunk_index ASC`,
+  ).bind(competitionKey, excludeApplicationId, pipelineVersion).all<{
+    application_id: string; submission_version_id: string; chunk_index: number;
+    page_start: number; page_end: number; word_count: number; text_hash: string;
+    min_hash_json: string; embedding_json: string | null; embedding_model: string | null;
+    assigned_judge_id: string | null; participant_label: string;
+  }>();
+  const byApplication = new Map<string, SimilarityPeerChunks>();
+  for (const row of result.results ?? []) {
+    const entry = byApplication.get(row.application_id) ?? {
+      applicationId: row.application_id,
+      participantLabel: row.participant_label,
+      submissionVersionId: row.submission_version_id,
+      assignedJudgeId: row.assigned_judge_id,
+      chunks: [],
+    };
+    entry.chunks.push({
+      chunkIndex: Number(row.chunk_index) || 0,
+      pageStart: Number(row.page_start) || 1,
+      pageEnd: Number(row.page_end) || 1,
+      wordCount: Number(row.word_count) || 0,
+      textHash: row.text_hash,
+      minHash: parseJson<number[]>(row.min_hash_json) ?? [],
+      embedding: parseJson<number[]>(row.embedding_json),
+    });
+    byApplication.set(row.application_id, entry);
+  }
+  return [...byApplication.values()];
+}
+
+/**
+ * Bu başvurunun, verilen PDF özetine bağlı YETKİLİ benzerlik sonucu.
+ *
+ * Kaydedilen AI değerlendirmesindeki `similarityReport` alanı istemciden
+ * gelen kopya DEĞİL, bu satırdan yazılır: hakem istemcisi benzerlik notunu
+ * silemez, yumuşatamaz veya sahteleyemez. "AI analizini sil" satırı kaldırdığı
+ * için silinmiş sonuç da yeniden kullanılamaz.
+ */
+export async function findSimilarityResult(
+  applicationId: string,
+  pdfHash: string,
+): Promise<SimilarityReport | null> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT report_json FROM similarity_results
+     WHERE application_id = ? AND pdf_hash = ?
+     ORDER BY analyzed_at DESC LIMIT 1`,
+  ).bind(applicationId, pdfHash).first<{ report_json: string }>();
+  return row ? parseJson<SimilarityReport>(row.report_json) : null;
+}
+
+/** Rapor düzeyi benzerlik sonucunu bu PDF sürümüne bağlı olarak kaydeder. */
+export async function saveSimilarityResult(input: {
+  applicationId: string;
+  submissionVersionId: string | null;
+  pdfHash: string;
+  competitionKey: string;
+  embeddingModel: string | null;
+  embeddingDim: number | null;
+  pipelineVersion: string;
+  status: "completed" | "partial" | "skipped";
+  approxPercent: number | null;
+  closestApplicationId: string | null;
+  closestLabel: string | null;
+  reportJson: string;
+}): Promise<void> {
+  const database = await workflowDatabase();
+  // Aynı başvurunun önceki sonucu geçersizdir; yeni sonuç tek satır olarak durur.
+  await database.batch([
+    database.prepare(`DELETE FROM similarity_results WHERE application_id = ?`).bind(input.applicationId),
+    database.prepare(
+      `INSERT INTO similarity_results
+        (id, application_id, submission_version_id, pdf_hash, competition_key, minhash_version,
+         embedding_model, embedding_dim, pipeline_version, status, approx_percent,
+         closest_application_id, closest_label, report_json, analyzed_at)
+       VALUES (?, ?, ?, ?, ?, 'minhash-v1', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      crypto.randomUUID(),
+      input.applicationId,
+      input.submissionVersionId,
+      input.pdfHash,
+      input.competitionKey,
+      input.embeddingModel,
+      input.embeddingDim,
+      input.pipelineVersion,
+      input.status,
+      input.approxPercent,
+      input.closestApplicationId,
+      input.closestLabel,
+      input.reportJson,
+      new Date().toISOString(),
+    ),
+  ]);
 }
 
 export async function saveCriteriaExtractionRun(

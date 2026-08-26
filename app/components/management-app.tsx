@@ -53,7 +53,7 @@ const ROLE_WORKSPACES: Record<RoleCode, { title: string; intro: string }> = {
   },
   "04": {
     title: "Değerlendirme operasyonları",
-    intro: "Başvurulara ilk hakemi atayın; hakem yüklerini, analiz hatalarını ve tamamlanma oranını izleyin; tıkanıklıkları giderip sonuç yayın akışını yönetin.",
+    intro: "Hakem yüklerini, atanamayan başvuruları, analiz hatalarını ve tamamlanma oranını izleyin; tıkanıklıkları giderin. Hakem ataması sistem tarafından otomatik yapılır.",
   },
 };
 
@@ -142,7 +142,6 @@ export default function ManagementApp() {
   const canJudge = can(session, "final_judgement");
   const canOpenEvaluation = can(session, "run_ai_prescreen");
   const canOperate = can(session, "operations_dashboard");
-  const canInitialAssign = can(session, "assign_judge");
   const canManageStage = can(session, "manage_competition_stage");
 
   // Bölümler yetki matrisinden türetilir; hiçbir rol adı burada sabitlenmez.
@@ -222,7 +221,7 @@ export default function ManagementApp() {
             ) : null}
 
             {canJudge ? <JudgeQueuePanel /> : null}
-            {canOperate ? <OperationsPanel canInitialAssign={canInitialAssign} /> : null}
+            {canOperate ? <OperationsPanel /> : null}
             {/* Başvurunun açık/kapalı olması yarışmanın sahibinin kararıdır. */}
             {canManageStage ? <CompetitionStagePanel /> : null}
             {canAuthorProfile ? <ManagerProfileHistory compact /> : null}

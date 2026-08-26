@@ -10,7 +10,7 @@ Sistemde hiç Admin yokken, üretim DIŞI ortamda giriş ekranında **“Kurulum
 
 - **00 · Genel Yönetici / Admin:** yalnızca yönetici ataması yapar. Personel hesabı açar, rol atar/kaldırır ve atama geçmişini izler. Kriter, değerlendirme, operasyon ve başvuru uçlarına erişmez; hakem atayamaz.
 - **01 · Yarışma Yöneticisi:** `/kriter-atolyesi` üzerinden şartname PDF'sini analiz eder, kriterleri düzenler ve değerlendirme profilini yayımlar.
-- **02 · Hakem:** `/degerlendirme` üzerinden kriteri çıkarılmış yarışmayı ve kendisine atanmış başvuruyu seçer, **Yapay Zeka Analizi** ile kriterleri PDF'e karşı kontrol ettirir, ONAY / RED kararını verir; RED'de hata analizi şablon olarak yarışmacıya iletilir.
+- **02 · Hakem:** `/degerlendirme` üzerinden kriteri çıkarılmış yarışmayı ve kendisine atanmış başvuruyu seçer, **Yapay Zekâ Analizi Yap** ile kriterleri PDF'e karşı kontrol ettirir (benzerlik karşılaştırması aynı akışta paralel çalışır), her kriter için ayrı **Onay/Ret** kararı verir ve bütün kriterler bitince nihai **ONAY / RET** kararını kesinleştirir; RET açıklaması reddedilen kriterlerden deterministik şablonla üretilip yarışmacıya iletilir.
 - **03 · Yarışmacı:** hesap oluşturur, yarışmayı seçer, PDF raporunu gönderir ve yalnızca hakem onaylı sonucunu görür.
 - **04 · Değerlendirme Yöneticisi:** hakem yüklerini ve hata kuyruğunu izler; yeniden atama, hatırlatma, analizi yeniden sıraya alma, yarışmayı aktif/pasif yapma ve sonuç yayın akışını yönetir. Arşivleme kayıtlarını (kim, ne zaman, neden) yalnızca **görüntüler**. Kriter değiştiremez, rapor değerlendiremez, nihai karar veremez.
 
@@ -49,8 +49,8 @@ Yayımlı profil, ikinci modülde katılımcı raporlarına aynı dört aşamayl
 1. **Giriş:** Hakem ilk girişte **Değerlendirme Atölyesi** ya da **Geçmiş değerlendirmeler** seçer.
 2. **Yarışma → başvuru:** Atölyede kriteri çıkarılmış (yayımlı profili olan) bütün yarışmalar listelenir; seçilen yarışmanın hakeme atanmış başvuruları kutucuk hâlinde görünür. Başvuru D1'de, değiştirilmeyen PDF özel R2 deposundadır; yükleme analiz başlatmaz, ilk atamayı Değerlendirme Yöneticisi (04) yapar.
 3. **Yapay Zeka Analizi:** Başvuru açılınca tek düğme vardır. Analiz, yayımlı kriterlerin her birinin rapor PDF'i ile karşılaştırılmasıdır: uygun kriter ✓, hatalı kriter için hata sebebi, rapordan alıntı ve **Kaynağa git** düğmesi (PDF'nin ilgili sayfası). Dört aşama (dil/şablon, başlık/içerik, kategori/benzerlik, teknik kural) tek şerit hâlinde özetlenir; puan yoktur. Benzerlik yalnızca işarettir.
-4. **ONAY / RED:** Karar düğmesine basınca yarışmacıya iletilecek şablon açılır; hakem kriter durumlarını ve hata sebeplerini elle değiştirebilir, ardından kesinleştirir. RED'de AI'nin adım adım hata analizi (hatalı kriterler ve sebepleri, kaynak sayfa, revizyon önerileri) şablon olarak yarışmacıya iletilir; ekstra analiz yapılmaz. Tamamlanan kararlar **Geçmiş değerlendirmeler**'de durur ve gerekirse yeniden açılır.
-5. **Yarışmacı sonucu:** Portalda ONAY/RED, hakem açıklaması, karşılanan kriterler, hatalı kriterler ve sebepleri, revizyon önerileri görünür.
+4. **Kriter kararları + nihai ONAY / RET:** Her kriter kartında AI'nin değiştirilemez ön değerlendirmesi (Uygun/Olumsuz) görünür; hakem her kriter için ayrı **Onay** veya **Ret** verir (Ret; gerekçe + PDF konumu ya da "Raporda bulunamadı" dayanağı ister). Bütün kriterler sonuçlanmadan genel karar bölümü açılmaz; sistem öneri üretmez. Nihai **RET** açıklaması reddedilen kriterlerden deterministik şablonla üretilir; ekstra analiz yapılmaz. Tamamlanan kararlar **Geçmiş değerlendirmeler**'de durur ve gerekirse sunucu taraflı "Kararı yeniden aç" ile açılır; hakem isterse **AI analizini sil** ile analizi kaldırıp yeniden çalıştırabilir.
+5. **Yarışmacı sonucu:** Portalda ONAY/RET, hakem açıklaması ve iki bölüm görünür: **Güçlü Yönler** (hakemin onayladığı kriterler) ve **Gelişime Açık Yönler** (hakemin reddettiği kriterler; gerekçe + varsa sayfa/alıntı).
 
 Rapor analizi `app/api/evaluate-report/route.ts` üzerinden çalışır; veri sözleşmesi `docs/RAPOR_DEGERLENDIRME_SOZLESMESI.md` dosyasındadır. API anahtarı kullanılamazsa sistem deterministik kontrollerle (dosya kapısı, benzerlik) çevrimdışı sonuca düşer; kural kararı uydurmaz.
 
@@ -93,7 +93,7 @@ Belgelerin tümü uygulamadaki "Hazır test belgeleri" bölümünden seçilebili
 - `app/components/management-app.tsx`: rol bazlı giriş ve yönetim paneli kabuğu
 - `app/components/admin-accounts-panel.tsx`: 00 için hesap açma, rol atama/kaldırma ve atama geçmişi
 - `app/components/criteria-app.tsx`: üç adımlı, PDF merkezli Kriter Atölyesi (Zorunlu / Diğer kriter listesi, kaynak sayfa, manuel düzenleme)
-- `app/components/evaluation-app.tsx`: Değerlendirme Atölyesi (giriş seçimi, yarışma → başvuru kutuları, Yapay Zeka Analizi, ✓/✗ kriter sonuçları, ONAY/RED şablonu, geçmiş)
+- `app/components/evaluation-app.tsx`: Değerlendirme Atölyesi (giriş seçimi, yarışma → başvuru kutuları, Yapay Zekâ Analizi + paralel benzerlik, kriter bazlı Onay/Ret kararları, nihai ONAY/RET, AI analizini silme, geçmiş)
 - `app/components/participant-portal.tsx`: yarışma arama, PDF başvurusu ve yarışmacı sonuç takibi
 - `app/components/manager-profile-history.tsx`: geçmiş kriter ayıklamaları ve yayımlanan profiller
 - `app/components/operations-panel.tsx`: 04 için ilk hakem ataması, hakem yükü, yeniden atama, hata kuyruğu ve yarışma aşaması yönetimi

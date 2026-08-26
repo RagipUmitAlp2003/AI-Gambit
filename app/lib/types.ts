@@ -471,11 +471,23 @@ export type ReportEvaluation = {
   preChecks: PreCheck[];
   /** Dört aşamanın bütüncül sonuçları (her zaman 4 kayıt, aşama sırasıyla). */
   stages: StageResult[];
-  /** Profildeki her aktif kriter için tam olarak bir bulgu bulunur. */
+  /**
+   * PDF'den denetlenebilir her aktif kriter için tam olarak bir bulgu bulunur.
+   * PDF dışı kanıt gerektiren kurallar (video, saha teslimi, portal yüklemesi)
+   * bu listeye HİÇ girmez: modele gönderilmez, bulgu üretilmez, sayaçlara
+   * katılmaz ve hakem ekranında gösterilmez. Eski kayıtlardaki
+   * DEGERLENDIRILEMEDI bulguları okunabilir ama görünür listeye alınmaz.
+   */
   findings: CriterionFinding[];
   summary: VerdictSummary;
   /** Hakem onayından geçmeden yarışmacıya gösterilmez. */
   feedbackDraft: ParticipantFeedback;
+  /**
+   * Aynı yarışma havuzundaki benzerlik kontrolünün sonucu. Kriter analizi
+   * sonuçlarını DEĞİŞTİRMEZ; ayrı bir not olarak en altta gösterilir.
+   * Benzerlik başarısız olsa da kriter analizi geçerli kalır.
+   */
+  similarityReport?: SimilarityReport | null;
   analysisWarnings: string[];
   provider: "demo" | "api";
   model?: string;
@@ -493,6 +505,105 @@ export type JudgeDecision = {
   note: string;
 };
 
+/* ------------------------------------------------------------------------- *
+ * Hakemin kriter bazlı AI BULGUSU doğrulaması (nihai hakem akışı)
+ *
+ * Kriter kartındaki Onayla/Ret düğmeleri katılımcının kriter sonucunu
+ * DOĞRUDAN ifade etmez; AI'nin ürettiği BULGUNUN hakem tarafından kabul
+ * edilip edilmediğini belirtir:
+ *
+ *   Onayla → hakem AI analizini doğru kabul eder. AI UYGUN dediyse kriterin
+ *            kesin sonucu uygun, AI OLUMSUZ dediyse kesin sonucu olumsuz olur.
+ *            AI'nin kaynak sayfası, alıntısı ve gerekçesi korunur; hakemin ek
+ *            açıklama yazması zorunlu değildir.
+ *   Ret    → hakem yalnızca AI BULGUSUNU reddeder (katılımcıyı değil). AI
+ *            bulgusu kesin sonuç olarak KULLANILAMAZ; hakem AYNI kriter için
+ *            kendi değerlendirmesini girmek zorundadır: kendi sonucu
+ *            (UYGUN/OLUMSUZ) + kaynak sayfa/bölüm/alıntı (veya "Raporda
+ *            bulunamadı" + aranan bölüm) + gerekçe.
+ *
+ * Kriterin KESİNLEŞMİŞ sonucu: bulgu onaylandıysa AI sonucu; bulgu
+ * reddedildiyse hakemin yerine yazdığı sonuç. Sayaçlar ve katılımcı geri
+ * bildirimi yalnızca kesinleşmiş sonuçlardan üretilir.
+ *
+ * Hakem kararı başlangıçta HER ZAMAN "pending"dir (KARAR BEKLİYOR); AI
+ * sonucu otomatik olarak onaylanmış sayılmaz. Bütün kriterler kesinleşmeden
+ * genel karar verilemez.
+ * ------------------------------------------------------------------------- */
+
+/** AI ön değerlendirmesinin kriter kartındaki iki durumlu gösterimi. */
+export type AiCriterionVerdict = "UYGUN" | "OLUMSUZ";
+
+export const AI_CRITERION_VERDICT_LABELS: Record<AiCriterionVerdict, string> = {
+  UYGUN: "Uygun",
+  OLUMSUZ: "Olumsuz",
+};
+
+/** AI kural durumunu iki durumlu ön değerlendirmeye indirger. */
+export function aiVerdictOf(verdict: RuleVerdict): AiCriterionVerdict {
+  return verdict === "BASARILI" ? "UYGUN" : "OLUMSUZ";
+}
+
+/**
+ * Ret kararının dayanak türü.
+ *
+ *   PDF_KONUMU          Ret sebebi katılımcı PDF'inin belirli bir kısmından
+ *                       görülüyor: sayfa + alıntı + gerekçe zorunludur.
+ *   RAPORDA_BULUNAMADI  Zorunlu başlık/içerik raporda hiç yok: aranan içerik
+ *                       adı + gerekçe zorunludur; olmayan içerik için sahte
+ *                       sayfa ve alıntı İSTENMEZ.
+ */
+export type JudgeEvidenceMode = "PDF_KONUMU" | "RAPORDA_BULUNAMADI";
+
+export const JUDGE_EVIDENCE_MODES: readonly JudgeEvidenceMode[] = ["PDF_KONUMU", "RAPORDA_BULUNAMADI"];
+
+export const JUDGE_EVIDENCE_MODE_LABELS: Record<JudgeEvidenceMode, string> = {
+  PDF_KONUMU: "PDF konumu",
+  RAPORDA_BULUNAMADI: "Raporda bulunamadı",
+};
+
+export type JudgeCriterionVerdict = "pending" | "approved" | "rejected";
+
+export const JUDGE_CRITERION_VERDICT_LABELS: Record<JudgeCriterionVerdict, string> = {
+  pending: "KARAR BEKLİYOR",
+  approved: "AI bulgusu onaylandı",
+  rejected: "AI bulgusu reddedildi",
+};
+
+/**
+ * Hakemin tek kriter üzerindeki AI bulgusu doğrulaması.
+ *
+ * `judgeVerdict` AI BULGUSUNUN kabulünü söyler (kriter sonucunu değil):
+ * approved → kesin sonuç = aiVerdict · rejected → kesin sonuç = judgeResult.
+ */
+export type JudgeCriterionDecision = {
+  criterionId: string;
+  /** Denetim kolaylığı için kriter adının kopyası. */
+  criterionName: string;
+  /** AI'nin bulgudaki sonucu; değiştirilemez, denetim için saklanır. */
+  aiVerdict: AiCriterionVerdict;
+  judgeVerdict: JudgeCriterionVerdict;
+  /**
+   * Hakem AI bulgusunu reddettiğinde YERİNE yazdığı kendi sonucu.
+   * approved/pending durumlarında null'dur; rejected'da zorunludur.
+   */
+  judgeResult: AiCriterionVerdict | null;
+  /** Ret (bulgu reddi) kararında zorunlu hakem gerekçesi; onayda boş kalabilir. */
+  rejectionReason: string;
+  /** Bulgu reddinde zorunlu dayanak türü; onayda null. */
+  evidenceMode: JudgeEvidenceMode | null;
+  /** PDF_KONUMU: katılımcı PDF'indeki 1 tabanlı sayfa; diğer durumlarda null. */
+  evidencePage: number | null;
+  /** PDF_KONUMU: kaynak bölüm/madde adı (isteğe bağlı). */
+  evidenceSection: string;
+  /** PDF_KONUMU: katılımcı PDF'inden doğrudan alıntı. */
+  evidenceQuote: string;
+  /** RAPORDA_BULUNAMADI: aranan başlık/bölüm adı. */
+  missingContent: string;
+  decidedBy: string | null;
+  decidedAt: string | null;
+};
+
 /** Hakem incelemesinin bütünü. */
 export type JudgeReview = {
   status: "in_progress" | "completed";
@@ -500,10 +611,61 @@ export type JudgeReview = {
   outcome: "pending" | "accepted" | "rejected" | "revision_required";
   /** Sonucun yarışmacıya gösterilebilen kısa açıklaması. */
   outcomeNote: string;
+  /** Geriye uyum: eski kayıtların kural düzeltme listesi. Yeni akış criterionDecisions kullanır. */
   decisions: JudgeDecision[];
+  /**
+   * Yeni akış: her görünür PDF kriteri için hakemin bağımsız kararı.
+   * Eski kayıtlarda bulunmaz; okunurken boş sayılır ve uygulama çökmez.
+   */
+  criterionDecisions?: JudgeCriterionDecision[];
   overallNote: string;
   /** Hakemin düzenlediği, yarışmacıya açılacak geri bildirim. */
   finalFeedback: ParticipantFeedback;
   feedbackApproved: boolean;
   completedAt: string | null;
+};
+
+/* ------------------------------------------------------------------------- *
+ * Benzerlik kontrolü (hibrit: MinHash + embedding)
+ *
+ * Kriter analizinin ALTINDA ayrı bir not olarak gösterilir. Otomatik ihlal,
+ * intihal veya ret kararı DEĞİLDİR; sayaçlara ve genel karara katılmaz.
+ * ------------------------------------------------------------------------- */
+
+export type SimilarityLevel = "none" | "normal" | "review" | "high";
+
+/** Hakeme gösterilen tek güçlü eşleşme; en fazla üç tane listelenir. */
+export type SimilarityMatch = {
+  /** Diğer başvurunun takım etiketi. */
+  peerLabel: string;
+  peerApplicationId: string;
+  /** Eşleşmenin türü: doğrudan metin (MinHash) veya anlamsal (embedding). */
+  kind: "direct" | "semantic";
+  /** Mevcut rapordaki sayfa ve kısa alıntı. */
+  ownPage: number | null;
+  ownQuote: string;
+  /** Diğer rapordaki sayfa ve kısa alıntı. */
+  peerPage: number | null;
+  peerQuote: string;
+  /** Bu hakem diğer başvuruyu görmeye yetkili mi? Bağlantı ancak o zaman gösterilir. */
+  peerFileAccessible: boolean;
+};
+
+/** Rapor düzeyi benzerlik sonucu; AI kriter sonucundan bağımsızdır. */
+export type SimilarityReport = {
+  /** none: havuz boş · normal · review: incelenmeli · high: yüksek benzerlik. */
+  level: SimilarityLevel;
+  /** Karşılaştırılan güncel başvuru sayısı. */
+  comparedCount: number;
+  /** 0–100 yaklaşık rapor benzerliği; içerik kapsamasına göre hesaplanır. Havuz boşsa null. */
+  approxPercent: number | null;
+  /** En yakın raporun takım etiketi; havuz boşsa null. */
+  closestLabel: string | null;
+  /** hybrid: MinHash + embedding · minhash-only: anlamsal karşılaştırma tamamlanamadı. */
+  method: "hybrid" | "minhash-only";
+  /** Hakeme gösterilen tek cümlelik not. */
+  note: string;
+  /** Yalnızca review/high seviyesinde; en fazla üç güçlü eşleşme. */
+  matches: SimilarityMatch[];
+  analyzedAt: string;
 };

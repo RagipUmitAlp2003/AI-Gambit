@@ -13,7 +13,7 @@
 | 03 | Yarışmacı | Yarışma seçer, takım bilgileri ve PDF ile başvurur; kendi durumunu ve yayımlanan sonucunu görür. | Yönetim alanlarını ve başka takımların verilerini göremez. |
 | 04 | Değerlendirme Yöneticisi | Başvuruya **ilk Hakemi atar**; iş yükü ve hataları izler; yeniden atama, hatırlatma, yeniden analiz ve sonuç yayın akışını yönetir. | Kriter değiştiremez, rapor değerlendiremez, nihai karar veya diskalifiye kararı veremez. |
 
-Yetki matrisi `app/lib/authorization.ts` içindedir ve tek doğruluk kaynağıdır: 00 yalnızca `manage_accounts`; 01 kriter/profil yazma ve yayımlama; 02 AI ön değerlendirme ve nihai karar; 04 operasyon panosu, ilk hakem ataması (`assign_judge`), yeniden atama ve yarışma aşaması yönetimi. Bir rol matriste yoksa uç ona 403 döner.
+Yetki matrisi `app/lib/authorization.ts` içindedir ve tek doğruluk kaynağıdır: 00 yalnızca `manage_accounts`; 01 kriter/profil yazma, yayımlama ve yarışma aşaması yönetimi; 02 AI ön değerlendirme, kriter bazlı hakem kararları ve nihai karar; 04 operasyon panosu ve koordinasyon (hatırlatma, hata kuyruğu). Hakem ataması yalnızca SİSTEM tarafından otomatik yapılır: `assign_judge` yetkisi ve manuel atama ucu kaldırılmıştır. Bir rol matriste yoksa uç ona 403 döner.
 
 ## Dört aşamalı kontrol prensibi
 

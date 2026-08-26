@@ -2,7 +2,7 @@
 
 import type { AdminAccount } from "./admin-types";
 import type { CompetitionEntry } from "./competitions";
-import type { JudgeReview, PreCheck, ProfileExport, ReportEvaluation } from "./types";
+import type { JudgeReview, PreCheck, ProfileExport, ReportEvaluation, SimilarityReport } from "./types";
 import type {
   CompetitionApplication,
   CompetitionOverview,
@@ -106,9 +106,19 @@ export const workflowApi = {
       method: "POST", credentials: "same-origin", body: form,
     }));
   },
-  similarityCheck: (id: string, text: string) => jsonRequest<{ check: PreCheck }>(
+  /**
+   * Hibrit benzerlik kontrolü (madde 9). Sayfa metinleri PDF'ten BİR KEZ
+   * çıkarılır ve kriter analiziyle paylaşılır; `pdfHash` sunucunun R2'deki
+   * geçerli PDF sürümüyle eşleşmezse istek reddedilir.
+   */
+  similarityCheck: (id: string, input: { pages: string[]; pdfHash: string }) => jsonRequest<{
+    similarity: SimilarityReport;
+    check: PreCheck;
+    /** Embedding 429 aldı: kriter analizinin arkasından kısa gecikmeyle yeniden denenebilir. */
+    embeddingRateLimited?: boolean;
+  }>(
     `/api/applications/${encodeURIComponent(id)}/similarity`,
-    { method: "POST", body: JSON.stringify({ text }) },
+    { method: "POST", body: JSON.stringify({ pages: input.pages, pdfHash: input.pdfHash }) },
   ),
   profiles: () => jsonRequest<{ profiles: CompetitionProfile[] }>("/api/profiles"),
   extractions: () => jsonRequest<{ extractions: CriteriaExtractionRun[] }>("/api/extractions"),

@@ -28,6 +28,14 @@ const BASE = (process.argv[2] || "http://localhost:3000").replace(/\/+$/, "");
  * Biriken senaryo verisi `node tools/dev_reset.mjs --apply` ile temizlenir.
  */
 const RUN = process.env.E2E_RUN_TAG || String(Date.now()).slice(-6);
+/**
+ * Admin girişi: temiz kurulumda bootstrap Admini (admin/1234) kullanılır.
+ * Veri tabanında parolası değiştirilmiş GERÇEK bir Admin varsa kimlik
+ * bilgileri ortamdan verilir; senaryo o hesabı DEĞİŞTİRMEZ.
+ *   E2E_ADMIN_IDENTIFIER=admin E2E_ADMIN_PASSWORD=... node tools/e2e_scenario.mjs
+ */
+const ADMIN_IDENTIFIER = process.env.E2E_ADMIN_IDENTIFIER || "admin";
+const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD || "1234";
 
 let passed = 0;
 const failures = [];
@@ -212,11 +220,11 @@ async function main() {
   const again = await post(admin, "/api/admin/bootstrap", { mode: "development" });
   check("ikinci çağrı ikinci Admin üretmiyor (idempotent)", again.status === 200 && again.json?.created === false);
 
-  const login = await post(admin, "/api/admin/session", { identifier: "admin", password: "1234" });
-  check("admin/1234 ile giriş", login.status === 200 && login.json?.account?.roleCode === "00", JSON.stringify(login.json));
+  const login = await post(admin, "/api/admin/session", { identifier: ADMIN_IDENTIFIER, password: ADMIN_PASSWORD });
+  check("Admin basit kullanıcı adıyla giriş yapabildi", login.status === 200 && login.json?.account?.roleCode === "00", JSON.stringify(login.json));
   check("rol veri tabanından geldi (istemci rol seçmedi)", login.json?.role?.code === "00");
 
-  const badLogin = await post(newClient("bad"), "/api/admin/session", { identifier: "admin", password: "yanlis" });
+  const badLogin = await post(newClient("bad"), "/api/admin/session", { identifier: ADMIN_IDENTIFIER, password: "yanlis-parola" });
   check("yanlış şifre reddediliyor", badLogin.status === 401);
 
   const noDevSession = await post(newClient("x"), "/api/admin/dev-session", { roleCode: "00" });
@@ -225,23 +233,27 @@ async function main() {
   /* ---------------------------------------------------------------- 2 */
   section("2 · Hesaplar ve rol bazlı yönlendirme");
   const staff = {};
+  // BASİT KULLANICI ADLARI (madde 11): projeyoneticisi1..3 · hakem1..3 ·
+  // degerlendirmeyoneticisi1. Parola yalnızca geliştirme içindir; veri
+  // tabanında açık metin tutulmaz (PBKDF2 · bkz. app/lib/password.ts).
   const plan = [
-    ["01", 3, "Yarışma Yöneticisi"],
-    ["02", 3, "Hakem"],
-    ["04", 1, "Değerlendirme Yöneticisi"],
+    ["01", 3, "Yarışma Yöneticisi", "projeyoneticisi"],
+    ["02", 3, "Hakem", "hakem"],
+    ["04", 1, "Değerlendirme Yöneticisi", "degerlendirmeyoneticisi"],
   ];
-  for (const [roleCode, count, title] of plan) {
+  for (const [roleCode, count, title, usernameBase] of plan) {
     staff[roleCode] = [];
     for (let index = 1; index <= count; index += 1) {
       const email = `rol${roleCode}.${index}.${RUN}@senaryo.test`;
+      const username = `${usernameBase}${index}`;
       const result = await post(admin, "/api/admin/accounts", {
-        fullName: `${title} ${index}`, email, roleCode, password: "senaryo1234",
+        fullName: `${title} ${index}`, email, username, roleCode, password: "senaryo1234",
       });
       if (result.status !== 201) {
         check(`${title} ${index} hesabı açıldı`, false, JSON.stringify(result.json));
         continue;
       }
-      staff[roleCode].push({ email, password: "senaryo1234", account: result.json.account });
+      staff[roleCode].push({ email, username, password: "senaryo1234", account: result.json.account });
     }
     check(`${count} adet ${title} hesabı açıldı`, staff[roleCode].length === count);
   }
@@ -255,27 +267,27 @@ async function main() {
   });
   check("Admin yarışmacı (03) hesabı açamıyor", adminCannotAddParticipant.status === 400);
 
-  // Rol bazlı yönlendirme: her hesap kendi rolüyle giriyor.
+  // Rol bazlı yönlendirme: her hesap BASİT KULLANICI ADIYLA giriyor (madde 11/14).
   const clients = { managers: [], judges: [], operations: null };
   for (const item of staff["01"]) {
-    const client = newClient(item.email);
-    const result = await post(client, "/api/admin/session", { identifier: item.email, password: item.password });
+    const client = newClient(item.username);
+    const result = await post(client, "/api/admin/session", { identifier: item.username, password: item.password });
     if (result.json?.account?.roleCode === "01") clients.managers.push({ client, account: result.json.account });
   }
   for (const item of staff["02"]) {
-    const client = newClient(item.email);
-    const result = await post(client, "/api/admin/session", { identifier: item.email, password: item.password });
+    const client = newClient(item.username);
+    const result = await post(client, "/api/admin/session", { identifier: item.username, password: item.password });
     if (result.json?.account?.roleCode === "02") clients.judges.push({ client, account: result.json.account });
   }
   {
     const item = staff["04"][0];
-    const client = newClient(item.email);
-    const result = await post(client, "/api/admin/session", { identifier: item.email, password: item.password });
+    const client = newClient(item.username);
+    const result = await post(client, "/api/admin/session", { identifier: item.username, password: item.password });
     if (result.json?.account?.roleCode === "04") clients.operations = { client, account: result.json.account };
   }
-  check("3 Yarışma Yöneticisi doğru rolle girdi", clients.managers.length === 3);
-  check("3 Hakem doğru rolle girdi", clients.judges.length === 3);
-  check("1 Değerlendirme Yöneticisi doğru rolle girdi", Boolean(clients.operations));
+  check("3 Yarışma Yöneticisi basit kullanıcı adıyla (projeyoneticisiN) girdi", clients.managers.length === 3);
+  check("3 Hakem basit kullanıcı adıyla (hakemN) girdi", clients.judges.length === 3);
+  check("1 Değerlendirme Yöneticisi basit kullanıcı adıyla girdi", Boolean(clients.operations));
 
   if (clients.managers.length !== 3 || clients.judges.length !== 3 || !clients.operations) {
     console.error("Hesaplar kurulamadı; senaryo durduruldu.");
@@ -379,11 +391,20 @@ async function main() {
   for (let index = 1; index <= 9; index += 1) {
     const client = newClient(`katilimci-${index}`);
     const result = await post(client, "/api/participant/register", {
-      fullName: `Katılımcı ${index}`, email: `katilimci${index}.${RUN}@senaryo.test`, password: "senaryo1234",
+      fullName: `Katılımcı ${index}`, email: `katilimci${index}.${RUN}@senaryo.test`,
+      username: `katilimci${index}`, password: "senaryo1234",
     });
     if (result.status === 201) participants.push({ client, account: result.json.account, index });
   }
   check("9 katılımcı hesabı açıldı", participants.length === 9);
+  {
+    // Basit kullanıcı adıyla giriş yarışmacıda da çalışır (madde 11).
+    const login = await post(newClient("katilimci-username"), "/api/admin/session", {
+      identifier: "katilimci1", password: "senaryo1234",
+    });
+    check("katılımcı basit kullanıcı adıyla (katilimci1) girebiliyor",
+      login.status === 200 && login.json?.account?.roleCode === "03", JSON.stringify(login.json?.error));
+  }
 
   const openList = await get(participants[0].client, "/api/applications");
   const openNames = (openList.json?.openCompetitions ?? []).map((item) => item.name);
@@ -468,13 +489,17 @@ async function main() {
     stages: ["language_template", "headings_content", "category_similarity", "criteria_evidence"].map((stage) => ({
       stage, verdict: "BASARILI", summary: "Kontrol edildi.", evidence: [],
     })),
-    findings: criteriaSet(target.competition.prefix).map((criterion) => ({
-      criterionId: criterion.id, criterionName: criterion.name, stage: criterion.stage,
-      required: criterion.required, verifiability: criterion.verifiability,
-      verdict: criterion.verifiability === "PDF_DENETLENEBILIR" ? "BASARILI" : "DEGERLENDIRILEMEDI",
-      rationale: "Senaryo sonucu.", evidence: [], evidenceMissing: false,
-    })),
-    summary: { total: 4, basarili: 3, revizyon: 0, kritikHata: 0, disiKanit: 1, overall: "BASARILI" },
+    // PDF DIŞI KANIT KURALLARI BULGU LİSTESİNE GİRMEZ (madde 2): video kriteri
+    // (criterion-4) modele gönderilmez, bulgu üretmez ve sayaçlara katılmaz.
+    findings: criteriaSet(target.competition.prefix)
+      .filter((criterion) => criterion.verifiability === "PDF_DENETLENEBILIR")
+      .map((criterion) => ({
+        criterionId: criterion.id, criterionName: criterion.name, stage: criterion.stage,
+        required: criterion.required, verifiability: criterion.verifiability,
+        verdict: "BASARILI",
+        rationale: "Senaryo sonucu.", evidence: [], evidenceMissing: false,
+      })),
+    summary: { total: 3, basarili: 3, revizyon: 0, kritikHata: 0, disiKanit: 0, overall: "BASARILI" },
     feedbackDraft: { strengths: [], improvements: [], suggestions: [] },
     analysisWarnings: [],
     provider: "api", model: "senaryo", analyzedAt: new Date().toISOString(),
@@ -509,14 +534,100 @@ async function main() {
   check("sonuç güncel sayılıyor", goodSave.json?.application?.criteriaOutdated === false);
 
   /* ---------------------------------------------------------------- 8 */
-  section("8 · Video kriteri PDF'de yok diye hatalı sayılmıyor (madde 4)");
+  section("8 · PDF dışı (video) kriteri hakem analizinden tamamen çıktı (madde 2)");
   const savedFindings = goodSave.json?.application?.evaluation?.findings ?? [];
   const videoFinding = savedFindings.find((item) => item.criterionId === "criterion-4");
-  check("video kriteri kaydedildi", Boolean(videoFinding));
-  check("video kriteri DEGERLENDIRILEMEDI olarak işaretli", videoFinding?.verdict === "DEGERLENDIRILEMEDI", videoFinding?.verdict);
-  check("video kriteri kritik hata sayılmadı", videoFinding?.verdict !== "KRITIK_HATA");
-  check("özet PDF dışı kuralı ayrı sayıyor", goodSave.json?.application?.evaluation?.summary?.disiKanit === 1);
+  // Video kriteri Yarışma Yöneticisinin kriter listesinde DURUR (bkz. bölüm 4:
+  // profil 4 kriterle yayımlandı) ama hakem analizinde HİÇ görünmez.
+  check("video kriteri için bulgu üretilmedi", !videoFinding, JSON.stringify(videoFinding));
+  check("bulgu listesi yalnızca 3 PDF kriterini içeriyor", savedFindings.length === 3, `bulgu: ${savedFindings.length}`);
+  check("toplam sayaç PDF dışı kuralı saymıyor", goodSave.json?.application?.evaluation?.summary?.total === 3);
+  check("hiçbir bulgu DEGERLENDIRILEMEDI değil",
+    savedFindings.every((item) => item.verdict !== "DEGERLENDIRILEMEDI"));
   check("genel durum video yüzünden bozulmadı", goodSave.json?.application?.evaluation?.summary?.overall === "BASARILI");
+  {
+    // İstemci DEGERLENDIRILEMEDI bulgusu gönderse bile sunucu süzer (geriye uyum).
+    const tamperedEvaluation = buildEvaluation();
+    tamperedEvaluation.findings = [...tamperedEvaluation.findings, {
+      criterionId: "criterion-4", criterionName: "Tanıtım videosu", stage: "criteria_evidence",
+      required: true, verifiability: "HARICI_KANIT_GEREKLI", verdict: "DEGERLENDIRILEMEDI",
+      rationale: "PDF dışı.", evidence: [], evidenceMissing: false,
+    }];
+    tamperedEvaluation.summary = { ...tamperedEvaluation.summary, total: 4, disiKanit: 1 };
+    const resaved = await patch(targetJudge.client, `/api/applications/${target.application.id}`, {
+      action: "save_evaluation", evaluation: tamperedEvaluation,
+    });
+    const resavedFindings = resaved.json?.application?.evaluation?.findings ?? [];
+    check("sunucu PDF dışı bulguyu kayıttan süzüyor",
+      resaved.status === 200 && !resavedFindings.some((item) => item.criterionId === "criterion-4"),
+      JSON.stringify(resaved.json?.error));
+    check("süzülen kayıtta toplam sayaç 3'e düzeltildi",
+      resaved.json?.application?.evaluation?.summary?.total === 3);
+  }
+
+  /* --------------------------------------------------------------- 8b */
+  section("8b · Hibrit benzerlik: kapsam, PDF bağı ve MinHash (madde 9)");
+  // ÜCRETLİ EMBEDDING ÇAĞRISI YAPILMAZ: skipEmbedding bayrağı test içindir;
+  // sonuç minhash-only olarak işaretlenir ve bu, hakeme de aynen söylenir.
+  // Metinler tekrar etmeyen kelimelerden üretilir; MinHash gerçekçi çalışır.
+  const wordSequence = (seed, count) =>
+    Array.from({ length: count }, (_, index) => `${seed}${index}bolumu`).join(" ");
+  const similarityPagesA = [
+    `Giris ${wordSequence("amac", 150)}`,
+    `Yapisal analiz ${wordSequence("gerilme", 150)}`,
+  ];
+  const targetSimilarity = await post(targetJudge.client, `/api/applications/${target.application.id}/similarity`, {
+    pages: similarityPagesA, pdfHash: target.pdfHash, skipEmbedding: true,
+  });
+  check("ilk başvurunun benzerlik kontrolü çalıştı", targetSimilarity.status === 200, JSON.stringify(targetSimilarity.json?.error));
+  check("karşılaştırılacak başka rapor yokken oran oluşturulmadı",
+    targetSimilarity.json?.similarity?.level === "none" && targetSimilarity.json?.similarity?.approxPercent === null,
+    JSON.stringify(targetSimilarity.json?.similarity));
+  check("normal/boş sonuç da alt not üretiyor",
+    /karşılaştırılabilecek başka güncel başvuru bulunmadığı/.test(targetSimilarity.json?.similarity?.note ?? ""));
+
+  const wrongHash = await post(targetJudge.client, `/api/applications/${target.application.id}/similarity`, {
+    pages: similarityPagesA, pdfHash: "0".repeat(64), skipEmbedding: true,
+  });
+  check("farklı PDF özetiyle gelen benzerlik metni reddediliyor", wrongHash.status === 409, `HTTP ${wrongHash.status}`);
+
+  // Aynı yarışmadaki İKİNCİ başvuru raporu DOĞRUDAN KOPYALAMIŞ (madde 14 · senaryo 2).
+  const peerApplication = applications.find((item) => item.competition === target.competition && item !== target);
+  const peerJudge = clients.judges.find((item) => item.account.id === peerApplication.application.assignedJudgeId);
+  const peerSimilarity = await post(peerJudge.client, `/api/applications/${peerApplication.application.id}/similarity`, {
+    pages: similarityPagesA, pdfHash: peerApplication.pdfHash, skipEmbedding: true,
+  });
+  check("aynı yarışmadaki başvuru havuzla karşılaştırıldı",
+    peerSimilarity.status === 200 && peerSimilarity.json?.similarity?.comparedCount === 1,
+    JSON.stringify(peerSimilarity.json?.similarity));
+  check("doğrudan kopya MinHash tarafından yakalandı (yüksek seviye)",
+    peerSimilarity.json?.similarity?.level === "high", peerSimilarity.json?.similarity?.level);
+  check("yaklaşık oran içerik kapsamasına göre yüksek",
+    (peerSimilarity.json?.similarity?.approxPercent ?? 0) >= 55,
+    `%${peerSimilarity.json?.similarity?.approxPercent}`);
+  check("en yakın rapor etiketi hakeme gösteriliyor",
+    typeof peerSimilarity.json?.similarity?.closestLabel === "string" && peerSimilarity.json.similarity.closestLabel.length > 0);
+  check("en fazla üç eşleşme, sayfa ve alıntıyla listeleniyor",
+    (peerSimilarity.json?.similarity?.matches ?? []).length >= 1
+    && (peerSimilarity.json?.similarity?.matches ?? []).length <= 3
+    && (peerSimilarity.json?.similarity?.matches ?? []).every((match) =>
+      typeof match.ownQuote === "string" && match.ownQuote.length > 0
+      && typeof match.peerQuote === "string" && match.peerQuote.length > 0
+      && typeof match.ownPage === "number" && typeof match.peerPage === "number"));
+  check("embedding atlandığında yöntem minhash-only olarak işaretli",
+    peerSimilarity.json?.similarity?.method === "minhash-only");
+  check("benzerlik sonucu otomatik ret/intihal kararı vermiyor",
+    /otomatik (ihlal|intihal)/.test(peerSimilarity.json?.similarity?.note ?? ""), peerSimilarity.json?.similarity?.note);
+
+  // FARKLI yarışmadaki benzer metin karşılaştırmaya GİRMEZ (madde 9.2).
+  const otherCompetitionApplication = applications.find((item) => item.competition !== target.competition);
+  const otherJudgeClient = clients.judges.find((item) => item.account.id === otherCompetitionApplication.application.assignedJudgeId);
+  const crossSimilarity = await post(otherJudgeClient.client, `/api/applications/${otherCompetitionApplication.application.id}/similarity`, {
+    pages: similarityPagesA, pdfHash: otherCompetitionApplication.pdfHash, skipEmbedding: true,
+  });
+  check("farklı yarışmanın raporu aynı metne rağmen karşılaştırılmıyor",
+    crossSimilarity.status === 200 && crossSimilarity.json?.similarity?.comparedCount === 0,
+    JSON.stringify(crossSimilarity.json?.similarity));
 
   /* ---------------------------------------------------------------- 9 */
   section("9 · Kriter güncellenince eski analiz kullanılamıyor (madde 2)");
@@ -549,12 +660,14 @@ async function main() {
   check("hata 'yeniden analiz gerekli' diyor", /yeniden analiz gerekli/i.test(staleDecision.json?.error ?? ""), staleDecision.json?.error);
 
   /* --------------------------------------------------------------- 10 */
-  section("10 · Onay sonucu katılımcıya görünüyor (madde 9)");
+  section("10 · Kriter bazlı hakem kararları ve ONAY görünürlüğü (maddeler 3, 4, 9)");
   // Kriterleri değişmemiş bir başvuruda hakem kararı verilir.
   const clean = applications.find((item) => item.competition !== target.competition);
   const cleanJudge = clients.judges.find((item) => item.account.id === clean.application.assignedJudgeId);
   await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, { action: "start_analysis" });
   const cleanVersion = clean.competition.version;
+  const cleanPdfCriteria = criteriaSet(clean.competition.prefix)
+    .filter((criterion) => criterion.verifiability === "PDF_DENETLENEBILIR");
   const cleanEvaluation = {
     version: "2.0",
     profileRef: {
@@ -567,13 +680,14 @@ async function main() {
     stages: ["language_template", "headings_content", "category_similarity", "criteria_evidence"].map((stage) => ({
       stage, verdict: "BASARILI", summary: "Kontrol edildi.", evidence: [],
     })),
-    findings: criteriaSet(clean.competition.prefix).map((criterion) => ({
+    // AI son kriteri OLUMSUZ buldu; hakem buna rağmen bağımsız karar verecek.
+    findings: cleanPdfCriteria.map((criterion, index) => ({
       criterionId: criterion.id, criterionName: criterion.name, stage: criterion.stage,
       required: criterion.required, verifiability: criterion.verifiability,
-      verdict: criterion.verifiability === "PDF_DENETLENEBILIR" ? "BASARILI" : "DEGERLENDIRILEMEDI",
+      verdict: index === cleanPdfCriteria.length - 1 ? "KRITIK_HATA" : "BASARILI",
       rationale: "Senaryo sonucu.", evidence: [], evidenceMissing: false,
     })),
-    summary: { total: 4, basarili: 3, revizyon: 0, kritikHata: 0, disiKanit: 1, overall: "BASARILI" },
+    summary: { total: 3, basarili: 2, revizyon: 0, kritikHata: 1, disiKanit: 0, overall: "KRITIK_HATA" },
     feedbackDraft: { strengths: [], improvements: [], suggestions: [] },
     analysisWarnings: [], provider: "api", model: "senaryo", analyzedAt: new Date().toISOString(),
   };
@@ -582,16 +696,144 @@ async function main() {
   });
   check("temiz başvurunun analizi kaydedildi", cleanSaved.status === 200, JSON.stringify(cleanSaved.json?.error));
 
+  /**
+   * Hakem AI BULGUSU doğrulaması üretici. Onayla/Ret bulgunun kabulüdür:
+   * approved → kesin sonuç AI sonucu · rejected → hakemin judgeResult'u.
+   */
+  const criterionDecision = (criterion, judgeVerdict, extra = {}) => ({
+    criterionId: criterion.id,
+    criterionName: criterion.name,
+    aiVerdict: criterion.id === cleanPdfCriteria[cleanPdfCriteria.length - 1].id ? "OLUMSUZ" : "UYGUN",
+    judgeVerdict,
+    judgeResult: null,
+    rejectionReason: "", evidenceMode: null, evidencePage: null,
+    evidenceSection: "", evidenceQuote: "", missingContent: "",
+    decidedBy: null, decidedAt: null,
+    ...extra,
+  });
+  const reviewEnvelope = (overrides = {}) => ({
+    status: "completed", outcome: "accepted", outcomeNote: "Rapor incelendi.",
+    decisions: [], overallNote: "",
+    finalFeedback: { strengths: ["✓ Rapor dili Türkçe"], improvements: [], suggestions: [] },
+    feedbackApproved: true, completedAt: new Date().toISOString(),
+    ...overrides,
+  });
+
+  // 10a · Kararsız kriter varken genel karar verilemez (sunucu doğrular).
+  const withPending = await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, {
+    action: "save_review",
+    review: reviewEnvelope({
+      criterionDecisions: [
+        criterionDecision(cleanPdfCriteria[0], "approved"),
+        criterionDecision(cleanPdfCriteria[1], "approved"),
+        criterionDecision(cleanPdfCriteria[2], "pending"),
+      ],
+    }),
+  });
+  check("bütün kriterler sonuçlanmadan genel karar reddediliyor", withPending.status === 409, `HTTP ${withPending.status}`);
+  check("hata bekleyen kriteri söylüyor", /karar bekliyor/i.test(withPending.json?.error ?? ""), withPending.json?.error);
+
+  // 10b · Kriter kararları olmadan (eski biçim) genel karar da reddedilir.
+  const withoutDecisions = await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, {
+    action: "save_review", review: reviewEnvelope(),
+  });
+  check("kriter kararları olmadan genel karar verilemiyor", withoutDecisions.status === 409, `HTTP ${withoutDecisions.status}`);
+
+  // 10c · Bulgu reddi hakem sonucu + gerekçe ister; PDF konumlu değerlendirme sayfa/alıntı ister.
+  const rejectNoJudgeResult = await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, {
+    action: "save_review",
+    review: reviewEnvelope({
+      criterionDecisions: [
+        criterionDecision(cleanPdfCriteria[0], "approved"),
+        criterionDecision(cleanPdfCriteria[1], "approved"),
+        criterionDecision(cleanPdfCriteria[2], "rejected", { rejectionReason: "AI bulgusu hatalı." }),
+      ],
+    }),
+  });
+  check("bulgu reddinde hakemin kendi sonucu (UYGUN/OLUMSUZ) zorunlu",
+    rejectNoJudgeResult.status === 409 && /kendi sonucu/.test(rejectNoJudgeResult.json?.error ?? ""),
+    `HTTP ${rejectNoJudgeResult.status} · ${rejectNoJudgeResult.json?.error}`);
+  const rejectNoReason = await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, {
+    action: "save_review",
+    review: reviewEnvelope({
+      criterionDecisions: [
+        criterionDecision(cleanPdfCriteria[0], "approved"),
+        criterionDecision(cleanPdfCriteria[1], "approved"),
+        criterionDecision(cleanPdfCriteria[2], "rejected", { judgeResult: "OLUMSUZ" }),
+      ],
+    }),
+  });
+  check("gerekçesiz hakem değerlendirmesi reddediliyor", rejectNoReason.status === 409, `HTTP ${rejectNoReason.status}`);
+  const rejectNoPage = await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, {
+    action: "save_review",
+    review: reviewEnvelope({
+      criterionDecisions: [
+        criterionDecision(cleanPdfCriteria[0], "approved"),
+        criterionDecision(cleanPdfCriteria[1], "approved"),
+        criterionDecision(cleanPdfCriteria[2], "rejected", {
+          judgeResult: "OLUMSUZ", rejectionReason: "Sınır aşılmış.", evidenceMode: "PDF_KONUMU",
+        }),
+      ],
+    }),
+  });
+  check("PDF konumlu değerlendirme sayfa/alıntı olmadan kaydedilemiyor", rejectNoPage.status === 409, `HTTP ${rejectNoPage.status}`);
+  const rejectMissingContentOk = await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, {
+    action: "save_review",
+    review: reviewEnvelope({
+      status: "in_progress", outcome: "pending", outcomeNote: "",
+      criterionDecisions: [
+        criterionDecision(cleanPdfCriteria[0], "approved"),
+        criterionDecision(cleanPdfCriteria[1], "pending"),
+        criterionDecision(cleanPdfCriteria[2], "rejected", {
+          judgeResult: "OLUMSUZ", rejectionReason: "Zorunlu bölüm raporda yok.",
+          evidenceMode: "RAPORDA_BULUNAMADI", missingContent: "Yapısal analiz sonuçları bölümü",
+        }),
+      ],
+    }),
+  });
+  check("'Raporda bulunamadı' kararı sahte sayfa istemeden kaydedilebiliyor (taslak)",
+    rejectMissingContentOk.status === 200, JSON.stringify(rejectMissingContentOk.json?.error));
+
+  /*
+   * 10d · AI son kriteri OLUMSUZ bulmuştu. Hakem BULGUYU reddeder ve kendi
+   * değerlendirmesiyle UYGUN yazar → kesin sonuç UYGUN olur (AI bulgusu
+   * kesin sonuç olarak KULLANILMAZ). Diğer iki bulgu onaylanır (AI UYGUN).
+   */
   const approved = await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, {
     action: "save_review",
-    review: {
-      status: "completed", outcome: "accepted", outcomeNote: "Rapor kriterlere uygun bulundu.",
-      decisions: [], overallNote: "",
-      finalFeedback: { strengths: ["✓ Rapor dili Türkçe"], improvements: [], suggestions: [] },
-      feedbackApproved: true, completedAt: new Date().toISOString(),
-    },
+    review: reviewEnvelope({
+      outcomeNote: "Rapor kriterlere uygun bulundu.",
+      criterionDecisions: [
+        criterionDecision(cleanPdfCriteria[0], "approved"),
+        criterionDecision(cleanPdfCriteria[1], "approved"),
+        criterionDecision(cleanPdfCriteria[2], "rejected", {
+          judgeResult: "UYGUN",
+          rejectionReason: "AI yanlış bölüme bakmış; gereksinim raporda karşılanıyor.",
+          evidenceMode: "PDF_KONUMU", evidencePage: 1,
+          evidenceSection: "Yapısal analiz", evidenceQuote: "Yapisal analiz sonuclari",
+        }),
+      ],
+      finalFeedback: {
+        strengths: cleanPdfCriteria.map((criterion) => `✓ ${criterion.name}`),
+        improvements: [], suggestions: [],
+      },
+    }),
   });
   check("hakem ONAY kararını kaydetti", approved.status === 200, JSON.stringify(approved.json?.error));
+  const savedDecisions = approved.json?.application?.review?.criterionDecisions ?? [];
+  const effectiveOf = (decision) => decision.judgeVerdict === "approved" ? decision.aiVerdict
+    : decision.judgeVerdict === "rejected" ? decision.judgeResult : null;
+  check("bulgu doğrulamaları AI sonucundan ayrı saklandı",
+    savedDecisions.length === 3
+    && savedDecisions.filter((decision) => decision.judgeVerdict === "approved").length === 2
+    && savedDecisions.filter((decision) => decision.judgeVerdict === "rejected").length === 1);
+  check("reddedilen AI bulgusu kesin sonuç olarak KULLANILMADI (hakem sonucu geçti)",
+    savedDecisions.every((decision) => effectiveOf(decision) === "UYGUN"),
+    JSON.stringify(savedDecisions.map(effectiveOf)));
+  check("AI'nin olumsuz bulgusu denetim için korunuyor",
+    savedDecisions.some((decision) => decision.aiVerdict === "OLUMSUZ"));
+  check("karar damgası sunucuda atıldı (decidedBy/decidedAt)",
+    savedDecisions.every((decision) => decision.decidedBy === cleanJudge.account.id && Boolean(decision.decidedAt)));
 
   const participantView = await get(clean.participant.client, "/api/applications");
   const seen = (participantView.json?.applications ?? []).find((item) => item.id === clean.application.id);
@@ -715,6 +957,65 @@ async function main() {
   check("operasyon panosu hakem iş yükünü gösteriyor",
     runWorkloads.length === 3 && runWorkloads.every((item) => typeof item.active === "number"),
     `listelenen: ${runWorkloads.length}/${workloads.length}`);
+
+  /* --------------------------------------------------------------- 13 */
+  section("13 · Manuel atama kapalı; AI analizi silme ve kararı yeniden açma (maddeler 5, 7)");
+  // Manuel `assign_judge` çağrısı HANGİ rolden gelirse gelsin reddedilir.
+  const manualAssign = await patch(operations.client, `/api/applications/${target.application.id}`, {
+    action: "assign_judge", judgeId: clients.judges[0].account.id, note: "elle atama denemesi",
+  });
+  check("manuel assign_judge çağrısı reddediliyor", manualAssign.status === 403, `HTTP ${manualAssign.status}`);
+  check("ret mesajı otomatik atamayı anlatıyor", /Manuel hakem atama kaldırıldı/.test(manualAssign.json?.error ?? ""));
+
+  // Tamamlanmış karar yeniden açılmadan analiz silinemez (sunucu doğrular).
+  const deleteWhileCompleted = await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, {
+    action: "delete_analysis",
+  });
+  check("kesinleşmiş kararda analiz silinemiyor", deleteWhileCompleted.status === 409, `HTTP ${deleteWhileCompleted.status}`);
+  check("hata 'Kararı yeniden aç' diyor", /Kararı yeniden aç/.test(deleteWhileCompleted.json?.error ?? ""));
+
+  // Başka hakem, başkasının analizini silemez (görünürlük 404 üretir).
+  const foreignDelete = await patch(
+    clients.judges.find((item) => item.account.id !== clean.application.assignedJudgeId).client,
+    `/api/applications/${clean.application.id}`,
+    { action: "delete_analysis" },
+  );
+  check("başka hakemin analizi silinemiyor", foreignDelete.status === 404 || foreignDelete.status === 403, `HTTP ${foreignDelete.status}`);
+
+  // Kararı yeniden aç → sonuç yarışmacıya kapanır → analiz silinebilir.
+  const reviewReopened = await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, { action: "reopen_review" });
+  check("hakem kesinleşmiş kararı yeniden açabiliyor", reviewReopened.status === 200, JSON.stringify(reviewReopened.json?.error));
+  check("yeniden açılan başvuru hakem incelemesine döndü",
+    reviewReopened.json?.application?.status === "judge_in_review", reviewReopened.json?.application?.status);
+  const participantAfterReopen = await get(clean.participant.client, "/api/applications");
+  const reopenedSeen = (participantAfterReopen.json?.applications ?? []).find((item) => item.id === clean.application.id);
+  check("yeniden açılan karar yarışmacıya kapandı", reopenedSeen?.outcome === "pending", `outcome=${reopenedSeen?.outcome}`);
+
+  const deleted = await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, { action: "delete_analysis" });
+  check("hakem kendi başvurusunun AI analizini silebiliyor", deleted.status === 200, JSON.stringify(deleted.json?.error));
+  check("analiz sonucu kaldırıldı", deleted.json?.application?.evaluation === null);
+  check("başvuru yeniden AI analizi bekliyor",
+    deleted.json?.application?.status === "assigned", deleted.json?.application?.status);
+  check("hakem ataması silinmedi",
+    deleted.json?.application?.assignedJudgeId === clean.application.assignedJudgeId);
+  const fileAfterDelete = await fetch(`${BASE}/api/applications/${clean.application.id}/file`, {
+    headers: { cookie: cleanJudge.client.cookie },
+  });
+  check("katılımcı PDF'i silinmedi", fileAfterDelete.status === 200);
+  const participantAfterDelete = await get(clean.participant.client, "/api/applications");
+  check("katılımcı başvurusu silinmedi",
+    (participantAfterDelete.json?.applications ?? []).some((item) => item.id === clean.application.id));
+  const restart = await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, { action: "start_analysis" });
+  check("analiz silindikten sonra yeniden çalıştırılabiliyor", restart.status === 200, JSON.stringify(restart.json?.error));
+  // Senaryo verisini kararlı bırak: analiz 'başarısız' olarak kapatılır.
+  await patch(cleanJudge.client, `/api/applications/${clean.application.id}`, { action: "analysis_failed" });
+
+  // Değerlendirme Yöneticisi silme olayını süreç geçmişinde ve denetimde görür.
+  const opsAfterDelete = await get(operations.client, "/api/operations");
+  check("silme olayı süreç geçmişinde görünüyor",
+    (opsAfterDelete.json?.recent ?? []).some((entry) => entry.event === "ai_analysis_deleted"));
+  check("silme işlemi denetim izinde (kim/ne zaman) görünüyor",
+    (opsAfterDelete.json?.audit ?? []).some((entry) => entry.action === "ai_analysis_deleted" && Boolean(entry.actorEmail)));
 
   /* ------------------------------------------------------------------- */
   section("SONUÇ");
