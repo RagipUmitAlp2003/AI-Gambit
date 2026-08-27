@@ -8,6 +8,16 @@ export type CompetitionEntry = {
  * listede olmayan bir yarışma serbest metin olarak da girilebilir.
  */
 export const COMPETITIONS: CompetitionEntry[] = [
+  { name: "5G Yapay Zekâ ile Akıllı Yol Güvenliği Yarışması", field: "Yapay Zeka" },
+  { name: "Yapay Zekâ Destekli Havayolu Optimizasyonu Yarışması", field: "Yapay Zeka" },
+  { name: "Makine Öğrenmesi Destekli Lojistik Anahat Optimizasyonu Yarışması", field: "Yapay Zeka" },
+  { name: "İleri Otonom Sistemler Tasarım ve Operasyon Yarışması", field: "Otonom Sistemler" },
+  { name: "Elektronik Harp Yarışması", field: "Savunma" },
+  { name: "Nükleer Enerji Teknolojileri Tasarım Yarışması", field: "Enerji" },
+  { name: "Dikey İnişli Roket Yarışması", field: "Uzay" },
+  { name: "Avcı Dron Yarışması", field: "Havacılık" },
+  { name: "Sürü İHA Yarışması", field: "Havacılık" },
+  { name: "Teknolojide Yararlı Düşünce ve Araştırma Yarışması", field: "Araştırma" },
   { name: "Akıllı Ulaşım Sistemleri Yarışması", field: "Ulaşım" },
   { name: "Çelikkubbe Hava Savunma Sistemleri Yarışması", field: "Savunma" },
   { name: "İnsansız Deniz Aracı Yarışması", field: "Deniz" },
@@ -132,16 +142,96 @@ export function reportTypesFor(competition: string, stage: string): string[] {
   return [...new Set(structure.stages.flatMap((item) => item.reportTypes))];
 }
 
-/** Büyük/küçük harfe duyarsız (tr-TR) anlık filtreleme. */
-export function filterCompetitions(query: string, limit = 12): CompetitionEntry[] {
-  const normalized = query.trim().toLocaleLowerCase("tr-TR");
-  if (!normalized) return COMPETITIONS.slice(0, limit);
-  const starts: CompetitionEntry[] = [];
-  const contains: CompetitionEntry[] = [];
-  for (const entry of COMPETITIONS) {
-    const name = entry.name.toLocaleLowerCase("tr-TR");
-    if (name.startsWith(normalized)) starts.push(entry);
-    else if (name.includes(normalized)) contains.push(entry);
+const FOLD_MAP: Record<string, string> = {
+  ı: "i", ş: "s", ğ: "g", ü: "u", ö: "o", ç: "c", â: "a", î: "i", û: "u",
+};
+
+/**
+ * Arama karşılaştırması için Türkçe sadeleştirme: önce tr-TR küçültme
+ * ("İ" → "i", "I" → "ı"), ardından aksan katlaması. Böylece görevli
+ * klavyesinde "insansiz" yazsa da "İnsansız Deniz Aracı" eşleşir.
+ */
+export function fold(value: string): string {
+  return value.toLocaleLowerCase("tr-TR").replace(/[ışğüöçâîû]/g, (character) => FOLD_MAP[character] ?? character);
+}
+
+type IndexedCompetition = CompetitionEntry & {
+  /** Ad üzerinden sıralama için sadeleştirilmiş biçim. */
+  foldedName: string;
+  /** Ad + alan; çok kelimeli aramada tüm parçalar burada aranır. */
+  haystack: string;
+};
+
+/**
+ * Arama dizini modül yüklenirken bir kez kurulur. Her tuş vuruşunda tüm
+ * listeyi yeniden küçültmek yerine hazır dizgeler taranır; liste binlerce
+ * yarışmaya çıksa da filtreleme tek geçişte kalır.
+ */
+const SEARCH_INDEX: IndexedCompetition[] = COMPETITIONS.map((entry) => {
+  const foldedName = fold(entry.name);
+  return { ...entry, foldedName, haystack: `${foldedName} ${fold(entry.field)}` };
+});
+
+/** Listede aynı anda gösterilecek en fazla kayıt; gerisi sayıyla bildirilir. */
+export const COMPETITION_RESULT_LIMIT = 50;
+
+export type CompetitionSearchResult = {
+  /** Gösterilecek kayıtlar (en fazla `limit` adet). */
+  items: CompetitionEntry[];
+  /** Aramayla eşleşen toplam kayıt sayısı; `items` kırpılmış olabilir. */
+  total: number;
+};
+
+/**
+ * Anlık yarışma araması. Boşlukla ayrılmış her parça ad veya alan içinde
+ * aranır; eşleşmeler "adın başı → kelime başı → içerik" sırasına göre döner.
+ */
+export function searchCompetitions(query: string, limit = COMPETITION_RESULT_LIMIT): CompetitionSearchResult {
+  return rankCompetitions(SEARCH_INDEX, COMPETITIONS, query, limit);
+}
+
+/**
+ * Aynı arama, kayıtlı olmayan bir yarışma listesi üzerinde.
+ *
+ * Yayımlanmış profillerin yarışma adı şartnameden çıkarılır ve kayıtlı havuzda
+ * bulunmayabilir. Yarışmacı portalı başvuruya açık yarışmaları bu yolla arar ki
+ * "yayımlandı ama seçilemiyor" durumu oluşmasın. Türkçe karakter katlaması
+ * (fold) burada da uygulanır: "İHA" araması "iha" ile de bulunur.
+ */
+export function searchCompetitionList(
+  entries: CompetitionEntry[],
+  query: string,
+  limit = COMPETITION_RESULT_LIMIT,
+): CompetitionSearchResult {
+  const index = entries.map((entry) => {
+    const foldedName = fold(entry.name);
+    return { ...entry, foldedName, haystack: `${foldedName} ${fold(entry.field)}` };
+  });
+  return rankCompetitions(index, entries, query, limit);
+}
+
+function rankCompetitions(
+  index: IndexedCompetition[],
+  all: CompetitionEntry[],
+  query: string,
+  limit: number,
+): CompetitionSearchResult {
+  const normalized = fold(query.trim());
+  if (!normalized) {
+    return { items: all.slice(0, limit), total: all.length };
   }
-  return [...starts, ...contains].slice(0, limit);
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  const ranked: Array<{ entry: CompetitionEntry; rank: number }> = [];
+  for (const indexed of index) {
+    if (!tokens.every((token) => indexed.haystack.includes(token))) continue;
+    const rank = indexed.foldedName.startsWith(normalized)
+      ? 0
+      : new RegExp(`(?:^|\\s)${tokens[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(indexed.foldedName)
+        ? 1
+        : 2;
+    ranked.push({ entry: indexed, rank });
+  }
+  // Aynı ranktaki kayıtlar özgün liste sırasını korur (kararlı sıralama).
+  ranked.sort((a, b) => a.rank - b.rank);
+  return { items: ranked.slice(0, limit).map((item) => item.entry), total: ranked.length };
 }

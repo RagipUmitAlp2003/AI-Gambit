@@ -1,31 +1,79 @@
 {
+  "_schema": "AI-Gambit benchmark ground-truth v2 (dört aşamalı, puansız)",
   "document": "2026_Celikkubbe_Hava_Savunma_Teknik_Sartnamesi.pdf",
-  "declaredTotalScore": 500,
-  "scoreGroups": [
-    { "name": "Rapor ve Sunum Puanlaması", "maxScore": 100, "keywords": ["rapor", "sunum"] },
-    { "name": "Ebat Puanlaması", "maxScore": 20, "keywords": ["ebat"] },
-    { "name": "1. Aşama Görevleri", "maxScore": 100, "keywords": ["1", "aşama"] },
-    { "name": "2. Aşama Görevleri", "maxScore": 120, "keywords": ["2", "aşama"] },
-    { "name": "3. Aşama Görevleri", "maxScore": 160, "keywords": ["3", "aşama"] }
-  ],
+  "pageCount": 25,
+  "minCriteria": 8,
+  "_requiredFindingsAciklama": "Yarışmacı RAPORUNDA (PDF aşamasında) kontrol edilebilen kurallar. keywords aynı kriterde birlikte geçmeli; stage tek değer ya da kabul edilen aşamalar dizisi; required belge 'zorunlu/olmalıdır/aksi hâlde elenir' diyorsa true. sourcePage PDF dosyasındaki 1 tabanlı sayfa sırasıdır (bilgi amaçlı, geçme koşuluna girmez).",
   "requiredFindings": [
-    { "name": "ÖTR azami 10 sayfa", "keywords": ["ön tasarım", "10 sayfa"] },
-    { "name": "KTR azami 30 sayfa", "keywords": ["kritik tasarım", "30 sayfa"] },
-    { "name": "Video 720p ve 2-5 dakika", "keywords": ["720p", "5 dakika"] },
-    { "name": "Video bağlantısı sorunu eleme", "keywords": ["link", "elen"] },
-    { "name": "Sistem boyutu 100 cm altı", "keywords": ["100", "boyut"] },
-    { "name": "60 cm altı 20 puan", "keywords": ["60", "20 puan"] },
-    { "name": "Hakem güvenlik uygunluğu", "keywords": ["hakem", "güvenlik"] },
-    { "name": "Acil durdurma zorunluluğu", "keywords": ["acil durdur"] },
-    { "name": "Patlayıcı kullanım yasağı", "keywords": ["patlayıcı", "yasak"] },
-    { "name": "Aşama 1 barajı 20", "keywords": ["aşama 1", "en az 20"] },
-    { "name": "Aşama 2 barajı 20", "keywords": ["aşama 2", "en az 20"] },
-    { "name": "Aşama 3 barajı 10", "keywords": ["aşama 3", "en az 10"] },
-    { "name": "Aşama 3 ardışık başarısızlık", "keywords": ["4 ardışık", "0 puan"] }
+    {
+      "name": "ÖTR azami 10 sayfa",
+      "keywords": ["ön tasarım", "10 sayfa"],
+      "stage": "language_template",
+      "required": true,
+      "sourcePage": 10
+    },
+    {
+      "name": "KTR azami 30 sayfa",
+      "keywords": ["kritik tasarım", "30 sayfa"],
+      "stage": "language_template",
+      "required": true,
+      "sourcePage": 10
+    },
+    {
+      "name": "Video 720p ve 2-5 dakika",
+      "keywords": ["720p", "5 dakika"],
+      "stage": ["language_template", "criteria_evidence"],
+      "required": true,
+      "sourcePage": 12
+    },
+    {
+      "name": "Video bağlantısı sorunu eleme",
+      "keywords": ["link", "elen"],
+      "required": true,
+      "sourcePage": 12
+    },
+    {
+      "name": "Kopya rapor diskalifiye",
+      "keywords": ["kopya", "diskalifiye"],
+      "stage": "category_similarity",
+      "required": true,
+      "sourcePage": 6
+    },
+    {
+      "name": "Kablo yalıtımı",
+      "keywords": ["kablo", "yalıtım"],
+      "stage": "criteria_evidence",
+      "required": true,
+      "sourcePage": 13
+    },
+    {
+      "name": "Acil durdurma zorunluluğu",
+      "keywords": ["acil durdur"],
+      "stage": "criteria_evidence",
+      "required": true,
+      "sourcePage": 17
+    },
+    {
+      "name": "Patlayıcı kullanım yasağı",
+      "keywords": ["patlayıcı", "yasak"],
+      "stage": "criteria_evidence",
+      "required": true,
+      "sourcePage": 17
+    }
   ],
-  "humanReviewFindings": [
-    { "name": "Acil durdurma", "keywords": ["acil durdur"] },
-    { "name": "Hakem güvenlik uygunluğu", "keywords": ["hakem", "güvenlik"] },
-    { "name": "Kablo yalıtımı", "keywords": ["kablo", "yalıtım"] }
-  ]
+  "_forbiddenFindingsAciklama": "Puan tabloları, baraj/ceza puanları ve saha/parkur maddeleri fiziksel aşamaya aittir; kriter olarak görülürse benchmark düşer. fields verilirse yalnızca o alanlara bakılır (ör. yalnızca kriter adı).",
+  "forbiddenFindings": [
+    { "name": "Ebat puanlaması: 60 cm altı 20 puan", "keywords": ["60", "20 puan"] },
+    { "name": "Rapor ve sunum puanlaması", "keywords": ["50 puan"] },
+    { "name": "Aşama 1 barajı", "keywords": ["aşama 1", "en az 20"] },
+    { "name": "Aşama 2 barajı", "keywords": ["aşama 2", "en az 20"] },
+    { "name": "Aşama 3 barajı", "keywords": ["aşama 3", "en az 10"] },
+    { "name": "Aşama 3 ardışık başarısızlık 0 puan", "keywords": ["4 ardışık", "0 puan"] },
+    { "name": "Yanlış sıra 5 ceza puanı", "keywords": ["5 ceza puanı"] },
+    { "name": "Puan kalemi kriter yapılmış", "keywords": ["puan"], "fields": ["name"] },
+    { "name": "Azami puan ifadesi", "keywords": ["azami puan"] },
+    { "name": "Parkur kriteri", "keywords": ["parkur"], "fields": ["name"] },
+    { "name": "Saha görevi kriteri", "keywords": ["saha görevi"] }
+  ],
+  "notes": "Bu dosya resmî Çelikkubbe şartnamesinden elle çıkarılmış YER GERÇEĞİDİR. Model çıktısından türetilmemiştir; benchmark yalnızca buna karşı ölçer. Puan grupları, barajlar ve cezalar yarışmanın fiziksel aşamasına ait olduğu için beklenen kriter değil, yasaklı ifadedir."
 }

@@ -1,11 +1,16 @@
 import type { AnalysisResult, Criterion, ProfileExport, SetupData, Step } from "./types";
 
-const SNAPSHOT_KEY = "kriter-atolyesi:draft-v1";
+// v2: dört aşamalı, puansız kriter modeli. Eski v1 taslakları okunmaz;
+// kaynak PDF IndexedDB'de korunur ve belge yeni prensiple yeniden analiz edilir.
+const SNAPSHOT_KEY = "kriter-atolyesi:draft-v2";
+const LEGACY_SNAPSHOT_KEYS = ["kriter-atolyesi:draft-v1"];
 const DB_NAME = "kriter-atolyesi";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_NAME = "draft-files";
 export const LIBRARY_STORE_NAME = "library-documents";
+export const REPORT_POOL_STORE_NAME = "report-pool";
 const FILE_KEY = "source-document";
+const TEMPLATE_FILE_KEY = "report-template";
 
 export type DraftSnapshot = {
   step: Step;
@@ -17,15 +22,28 @@ export type DraftSnapshot = {
 
 export function loadDraftSnapshot(): DraftSnapshot | null {
   try {
+    for (const key of LEGACY_SNAPSHOT_KEYS) localStorage.removeItem(key);
     const stored = localStorage.getItem(SNAPSHOT_KEY);
-    return stored ? JSON.parse(stored) as DraftSnapshot : null;
+    if (!stored) return null;
+    const snapshot = JSON.parse(stored) as DraftSnapshot;
+    // Yalnızca dört aşamalı modelde üretilmiş kriterler geri yüklenir.
+    const valid = Array.isArray(snapshot.criteria)
+      && snapshot.criteria.every((item) => typeof item?.stage === "string" && typeof item?.required === "boolean");
+    return valid ? snapshot : null;
   } catch {
     return null;
   }
 }
 
 export function saveDraftSnapshot(snapshot: DraftSnapshot) {
-  localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
+  try {
+    localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
+    return true;
+  } catch {
+    // Depolama kapalı/dolu olduğunda React efektini düşürme. Kaynak PDF ayrıca
+    // IndexedDB'de tutulur; kullanıcı mevcut oturumda çalışmaya devam edebilir.
+    return false;
+  }
 }
 
 export function clearDraftSnapshot() {
@@ -42,18 +60,29 @@ export function openDraftDatabase(): Promise<IDBDatabase> {
       if (!request.result.objectStoreNames.contains(LIBRARY_STORE_NAME)) {
         request.result.createObjectStore(LIBRARY_STORE_NAME, { keyPath: "id" });
       }
+      if (!request.result.objectStoreNames.contains(REPORT_POOL_STORE_NAME)) {
+        request.result.createObjectStore(REPORT_POOL_STORE_NAME, { keyPath: "id" });
+      }
     };
+    // Başka bir sekme eski sürümü açık tutuyorsa yükseltme bloke olur; sessizce beklemek yerine bildirilir.
+    request.onblocked = () => reject(new Error(
+      "Tarayıcı deposu güncellenemedi. Uygulamanın açık olduğu diğer sekmeleri kapatıp sayfayı yenileyin.",
+    ));
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 }
 
 export async function loadDraftFile(): Promise<File | null> {
+  return loadStoredDraftFile(FILE_KEY);
+}
+
+async function loadStoredDraftFile(key: string): Promise<File | null> {
   try {
     const database = await openDraftDatabase();
     return await new Promise((resolve, reject) => {
       const transaction = database.transaction(STORE_NAME, "readonly");
-      const request = transaction.objectStore(STORE_NAME).get(FILE_KEY);
+      const request = transaction.objectStore(STORE_NAME).get(key);
       request.onsuccess = () => resolve(request.result instanceof File ? request.result : null);
       request.onerror = () => reject(request.error);
       transaction.oncomplete = () => database.close();
@@ -64,12 +93,25 @@ export async function loadDraftFile(): Promise<File | null> {
 }
 
 export async function saveDraftFile(file: File | null) {
+  return saveStoredDraftFile(FILE_KEY, file);
+}
+
+/**
+ * Ayrı rapor şablonu yükleme alanı kaldırıldı (Yarışma Yöneticisi yalnızca
+ * şartname yükler). Eski sürümde saklanmış şablon PDF'i tarayıcıda kalmasın
+ * diye bir kez silinir; kayıt yoksa işlem sessizce geçer.
+ */
+export async function clearLegacyTemplateFile() {
+  return saveStoredDraftFile(TEMPLATE_FILE_KEY, null);
+}
+
+async function saveStoredDraftFile(key: string, file: File | null) {
   const database = await openDraftDatabase();
   await new Promise<void>((resolve, reject) => {
     const transaction = database.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
-    if (file) store.put(file, FILE_KEY);
-    else store.delete(FILE_KEY);
+    if (file) store.put(file, key);
+    else store.delete(key);
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
   }).finally(() => database.close());

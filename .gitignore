@@ -37,3 +37,8 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+*.tsbuildinfo
+
+# cloudflare local secrets
+.dev.vars
+.dev.vars.*

@@ -1,173 +1,102 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import CompetitionSelect from "./competition-select";
-import SearchSelect from "./search-select";
-import DocumentLibraryPanel from "./document-library-panel";
-import { categoriesFor, reportTypesFor, stagesFor } from "../lib/competitions";
+import DocumentLibraryModal from "./document-library-modal";
 import FileBadge from "./file-badge";
-import TemplatePreview from "./template-preview";
-import { analyzeWithGemini } from "../lib/gemini-analyzer";
-import { criterionEffectOf as criterionEffect, deriveDecisionRules, normalizeScore } from "../lib/evaluation-summary";
+import TopbarSession from "./topbar-session";
+import { AnalysisRequestError, analyzeWithGemini } from "../lib/gemini-analyzer";
 import { getPdfPageCount } from "../lib/pdf-reader";
+import { workflowApi } from "../lib/workflow-client";
+import { SAMPLE_DOCUMENTS } from "../lib/sample-documents";
 import {
   clearDraftSnapshot,
+  clearLegacyTemplateFile,
   loadDraftFile,
   loadDraftSnapshot,
   saveDraftFile,
   saveDraftSnapshot,
 } from "../lib/draft-store";
-import type {
-  AnalysisResult,
-  Confidence,
-  Criterion,
-  CriterionEffect,
-  CriterionType,
-  EvaluationMethod,
-  ProfileExport,
-  SetupData,
-  Step,
-  ViolationAction,
+import { resolveVerifiability } from "../lib/criteria-extraction";
+import {
+  CHECK_STAGES,
+  checkStageOf,
+  type AnalysisResult,
+  type CheckStage,
+  type Criterion,
+  type ProfileExport,
+  type SetupData,
+  type Step,
 } from "../lib/types";
 
-const DEFAULT_COMPETITION = "Akıllı Ulaşım Sistemleri Yarışması";
-const DEFAULT_CATEGORY = categoriesFor(DEFAULT_COMPETITION)[0];
-const DEFAULT_STAGE = stagesFor(DEFAULT_COMPETITION)[0];
-
 const DEFAULT_SETUP: SetupData = {
-  competition: DEFAULT_COMPETITION,
-  category: DEFAULT_CATEGORY,
-  stage: DEFAULT_STAGE,
-  reportType: reportTypesFor(DEFAULT_COMPETITION, DEFAULT_STAGE)[0],
-  year: "2026",
-  allowedFormats: ["PDF"],
-  maxFileSizeMb: 25,
-  maxFileCount: 1,
-  defaultViolationAction: "block",
+  competition: "Belgede belirtilmemiş",
+  category: "Belgede belirtilmemiş",
+  stage: "Belgede belirtilmemiş",
+  reportType: "Belgede belirtilmemiş",
+  year: "Belgede belirtilmemiş",
+  allowedFormats: [],
+  maxFileSizeMb: 0,
+  maxFileCount: 0,
+  defaultViolationAction: "unspecified",
+  reportLanguage: null,
 };
-
-type SampleDocument = {
-  path: string;
-  name: string;
-  title: string;
-  source: string;
-  description: string;
-  pages: number;
-  setup: Partial<SetupData>;
-};
-
-const SAMPLE_DOCUMENTS: SampleDocument[] = [
-  {
-    path: "/ornek-degerlendirme-kilavuzu.pdf",
-    name: "Ornek_Akilli_Ulasim_OTR_Degerlendirme_Kilavuzu.pdf",
-    title: "Akıllı Ulaşım - kısa test kılavuzu",
-    source: "Sentetik test belgesi",
-    description: "100 puanlık sade tablo, teknik teslim kuralları ve bilinçli olarak atlanan biçim kontrolleri.",
-    pages: 3,
-    setup: DEFAULT_SETUP,
-  },
-  {
-    path: "/samples/2026_Celikkubbe_Hava_Savunma_Teknik_Sartnamesi.pdf",
-    name: "2026_Celikkubbe_Hava_Savunma_Teknik_Sartnamesi.pdf",
-    title: "Çelikkubbe Hava Savunma Sistemleri",
-    source: "Resmî TEKNOFEST şartnamesi",
-    description: "Çok aşamalı puanlama, barajlar, sayfa sınırları, başarısızlık koşulları ve toplam puan formülleri.",
-    pages: 25,
-    setup: {
-      competition: "Çelikkubbe Hava Savunma Sistemleri Yarışması",
-      category: "Üniversite Seviyesi",
-      stage: "Teknik şartname profili",
-      reportType: "Kritik Tasarım Raporu (KTR)",
-      year: "2026",
-    },
-  },
-  {
-    path: "/samples/2026_Insansiz_Deniz_Araci_Sartnamesi.pdf",
-    name: "2026_Insansiz_Deniz_Araci_Sartnamesi.pdf",
-    title: "İnsansız Deniz Aracı Yarışması",
-    source: "Resmî TEKNOFEST şartnamesi",
-    description: "Rapor, video, teknik uygunluk ve parkur puanlarını aynı belgede birleştiren karmaşık değerlendirme yapısı.",
-    pages: 29,
-    setup: {
-      competition: "İnsansız Deniz Aracı Yarışması",
-      category: "Üniversite Seviyesi",
-      stage: "Kritik tasarım değerlendirmesi",
-      reportType: "Kritik Tasarım Raporu (KTR)",
-      year: "2026",
-    },
-  },
-  {
-    path: "/samples/2026_Insansiz_Su_Alti_Sistemleri_Sartnamesi.pdf",
-    name: "2026_Insansiz_Su_Alti_Sistemleri_Sartnamesi.pdf",
-    title: "İnsansız Su Altı Sistemleri",
-    source: "Resmî TEKNOFEST şartnamesi",
-    description: "Kategoriye göre değişen puanlar, görev başarımı, minimum başarı şartları ve eleme incelemeleri.",
-    pages: 35,
-    setup: {
-      competition: "İnsansız Su Altı Sistemleri Yarışması",
-      category: "Temel / İleri Kategori",
-      stage: "Kritik tasarım değerlendirmesi",
-      reportType: "Kritik Tasarım Raporu (KTR)",
-      year: "2026",
-    },
-  },
-];
 
 const STEPS = [
-  { id: 1, title: "Temel ayarlar", short: "Yarışma ve teslim kapısı" },
-  { id: 2, title: "Kaynak belge", short: "Resmî kriter PDF'si" },
-  { id: 3, title: "Kriter inceleme", short: "AI çıkarımlarını doğrula" },
-  { id: 4, title: "Profil onayı", short: "Sürümü kaydet" },
+  { id: 1, title: "Kaynak belge", short: "Resmî şartname PDF'si" },
+  { id: 2, title: "Kriter inceleme", short: "Dört aşamalı kriterleri doğrula" },
+  { id: 3, title: "Kriter profilini yayımla", short: "Yarışmayı başvuruya hazırla" },
 ] as const;
 
-const TYPE_LABELS: Record<CriterionType, string> = {
-  technical_upload: "Teknik yükleme kuralı",
-  format_rule: "Biçim kuralı",
-  mandatory_content: "Zorunlu içerik",
-  qualitative_score: "Nitel puanlama",
-  elimination_review: "Eleme incelemesi",
-  formula: "Hesaplama / formül",
-  human_only: "Yalnızca jüri",
+type StageFilter = "all" | CheckStage;
+
+/**
+ * Kriter yalnızca ZORUNLU ya da ZORUNLU OLMAYAN olabilir; üçüncü bir durum
+ * yoktur. İki bölüm her zaman yan yana listelenir, ekleme iki ayrı düğmeyle
+ * yapılır. Kriterler arasında görsel bir uygunluk/güven farkı GÖSTERİLMEZ:
+ * şeması geçerli her kriter normal görünür, soluk veya kararsız gösterim yoktur.
+ */
+type CriterionKind = "required" | "other";
+
+/**
+ * Yeni kriter formunun taslak durumu.
+ *
+ * PDF'den denetlenebilirlik alanı KULLANICIYA SORULMAZ: sistem, kriter
+ * metninden (ad + açıklama + alıntı) otomatik belirler (resolveVerifiability).
+ * Video, portal, saha teslimi gibi açık ifadeler arka planda PDF dışı
+ * sınıflandırılır; amaç yalnızca bu kuralların hakem rapor analizine
+ * gönderilmesini engellemektir. Alan arayüzde gösterilmez ve düzenlenemez.
+ */
+type CriterionDraft = {
+  kind: CriterionKind;
+  name: string;
+  stage: CheckStage;
+  description: string;
+  violationOutcome: string;
+  sourcePage: string;
+  sourceText: string;
 };
 
-const METHOD_LABELS: Record<EvaluationMethod, string> = {
-  deterministic: "Kesin otomatik kontrol",
-  ai: "AI önerisi",
-  human: "Hakem / jüri kararı",
-  hybrid: "AI önerisi + görevli onayı",
-};
-
-const EFFECT_LABELS: Record<CriterionEffect, string> = {
-  gate: "Uygunluk / geçiş şartı",
-  score: "Puan kazandırır",
-  penalty: "Ceza puanı",
-  threshold: "Baraj / devam şartı",
-  advisory: "Bilgi ve öneri",
-};
-
-const CONFIDENCE_LABELS: Record<Confidence, string> = {
-  high: "Yüksek güven",
-  medium: "Orta güven",
-  low: "Düşük güven",
-};
-
-const ACTION_LABELS: Record<ViolationAction, string> = {
-  block: "Yüklemeyi engelle",
-  warn: "Uyarı oluştur",
-  jury: "Jüri incelemesine gönder",
-};
+function emptyDraft(kind: CriterionKind): CriterionDraft {
+  return {
+    kind,
+    name: "",
+    stage: "criteria_evidence",
+    description: "",
+    violationOutcome: "Belgede belirtilmemiş",
+    sourcePage: "",
+    sourceText: "",
+  };
+}
 
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function applyDecisionSafetyPolicy(item: Criterion): Criterion {
-  const text = `${item.name} ${item.scope || ""} ${item.sourceText}`;
-  const requiresHuman = /hakem|jüri|güvenlik|acil durdur|yalıtım|açık kablo|keskin nokta|patlayıcı|fiziksel boyut|sistem maksimum boyut|yasak bölge|mülakat|dışarıdan (?:yardım|yönlendirme)/i.test(text);
-  return requiresHuman && item.evaluationMethod === "deterministic"
-    ? { ...item, evaluationMethod: "human" }
-    : item;
+function stageBadge(stage: CheckStage) {
+  const definition = checkStageOf(stage);
+  return <span className={`stage-badge stage-${definition.order}`} title={definition.title}>{definition.order} · {definition.shortTitle}</span>;
 }
 
 function Field({
@@ -199,7 +128,7 @@ function StepRail({ step, completedSteps, onNavigate }: {
         <span className="rail-mark">KA</span>
         <div>
           <strong>Kriter Atölyesi</strong>
-          <span>Profil oluşturucu</span>
+          <span>Dört aşamalı kriter seti</span>
         </div>
       </div>
       <ol>
@@ -227,238 +156,60 @@ function StepRail({ step, completedSteps, onNavigate }: {
       <div className="rail-note">
         <span className="status-dot" />
         <div>
-          <strong>AI belge analiz motoru</strong>
-          <p>PDF sunucuda analiz edilir; API anahtarı tarayıcıya gönderilmez.</p>
+          <strong>Tek AI çağrısı · dört aşama</strong>
+          <p>Şartname sunucuda tek geçişte analiz edilir; yalnızca PDF aşaması kuralları çıkarılır, puan üretilmez.</p>
         </div>
       </div>
     </nav>
   );
 }
 
-function Topbar({ step }: { step: Step }) {
+function Topbar({ step, onBack }: { step: Step; onBack: () => void }) {
   const current = STEPS.find((item) => item.id === step)!;
   return (
     <header className="topbar">
-      <div>
-        <span className="topbar-context">P4 · Değerlendirme karar destek sistemi</span>
-        <strong>{current.title}</strong>
+      <div className="topbar-lead">
+        <button type="button" className="topbar-back" onClick={onBack} aria-label="Geri dön" title="Geri dön">
+          <span aria-hidden="true">←</span>
+        </button>
+        <div>
+          <span className="topbar-context">Değerlendirme karar destek sistemi</span>
+          <strong>{current.title}</strong>
+        </div>
       </div>
-      <div className="topbar-status">
-        <span className="status-chip neutral">Yerel prototip</span>
-        <span className="operator-avatar" aria-label="Proje yöneticisi">PY</span>
-      </div>
+      <TopbarSession />
     </header>
   );
 }
 
-function SetupStep({
-  setup,
-  onChange,
-  onContinue,
-  file,
-  result,
-  criteria,
-}: {
-  setup: SetupData;
-  onChange: (value: SetupData) => void;
-  onContinue: () => void;
-  file: File | null;
-  result: AnalysisResult | null;
-  criteria: Criterion[];
-}) {
-  const canContinue = setup.competition.trim() && setup.stage.trim() && setup.reportType.trim();
-  const categoryOptions = categoriesFor(setup.competition);
-  const stageOptions = stagesFor(setup.competition);
-  const reportOptions = reportTypesFor(setup.competition, setup.stage);
-
-  // Yarışma → Kategori → Aşama → Rapor türü zinciri: üst alan listeden
-  // seçildiğinde alt alanlar yeni seçeneklere göre güncellenir; mevcut değer
-  // hâlâ geçerliyse korunur, görevli her değeri sonradan değiştirebilir.
-  function pickCompetition(competition: string) {
-    const categories = categoriesFor(competition);
-    const category = categories.includes(setup.category) ? setup.category : categories[0] ?? setup.category;
-    const stages = stagesFor(competition);
-    const stage = stages.includes(setup.stage) ? setup.stage : stages[0] ?? setup.stage;
-    const reports = reportTypesFor(competition, stage);
-    const reportType = reports.includes(setup.reportType) ? setup.reportType : reports[0] ?? setup.reportType;
-    onChange({ ...setup, competition, category, stage, reportType });
-  }
-
-  function pickStage(stage: string) {
-    const reports = reportTypesFor(setup.competition, stage);
-    const reportType = reports.includes(setup.reportType) ? setup.reportType : reports[0] ?? setup.reportType;
-    onChange({ ...setup, stage, reportType });
-  }
-
-  return (
-    <section className="workspace setup-workspace" aria-labelledby="setup-title">
-      <div className="workspace-heading">
-        <div>
-          <span className="section-kicker">Katılımcı raporundan önce</span>
-          <h1 id="setup-title">Değerlendirme profilinin çerçevesini kurun</h1>
-          <p>
-            Bu üç bölüm, şartnamede unutulabilecek en temel teslim kurallarını güvenceye alır.
-            İçerik ve sayfa düzeni kriterlerini bir sonraki adımda belgeden çıkaracağız.
-          </p>
-        </div>
-        <span className="step-fraction">1 / 4</span>
-      </div>
-
-      <div className="setup-layout">
-        <form className="setup-form" onSubmit={(event) => { event.preventDefault(); onContinue(); }}>
-          <fieldset>
-            <legend><span>1</span> Bu profil ne için hazırlanıyor?</legend>
-            <div className="form-grid two-col">
-              <Field label="Yarışma adı" hint="Yazmaya başlayın; kayıtlı yarışmalar anlık filtrelenir.">
-                <CompetitionSelect
-                  value={setup.competition}
-                  onChange={(competition) => onChange({ ...setup, competition })}
-                  onPick={pickCompetition}
-                />
-              </Field>
-              <Field label="Kategori / seviye" hint="Seçenekler seçilen yarışmaya göre listelenir.">
-                <SearchSelect
-                  value={setup.category}
-                  onChange={(category) => onChange({ ...setup, category })}
-                  options={categoryOptions}
-                  placeholder="Örn. Üniversite Seviyesi"
-                  ariaLabel="Kategori veya seviye seç"
-                />
-              </Field>
-              <Field label="Aşama" hint="Seçenekler yarışma ve kategoriye göre listelenir.">
-                <SearchSelect
-                  value={setup.stage}
-                  onChange={(stage) => onChange({ ...setup, stage })}
-                  onPick={pickStage}
-                  options={stageOptions}
-                  placeholder="Örn. Ön değerlendirme"
-                  ariaLabel="Değerlendirme aşaması seç"
-                />
-              </Field>
-              <Field label="Rapor türü" hint="Seçenekler seçilen aşamaya göre listelenir.">
-                <SearchSelect
-                  value={setup.reportType}
-                  onChange={(reportType) => onChange({ ...setup, reportType })}
-                  options={reportOptions}
-                  placeholder="Örn. Ön Tasarım Raporu (ÖTR)"
-                  ariaLabel="Rapor türü seç"
-                />
-              </Field>
-              <Field label="Yarışma yılı">
-                <input
-                  inputMode="numeric"
-                  value={setup.year}
-                  onChange={(event) => onChange({ ...setup, year: event.target.value })}
-                />
-              </Field>
-            </div>
-          </fieldset>
-
-          <fieldset>
-            <legend><span>2</span> Katılımcı hangi dosyayı yükleyebilir?</legend>
-            <div className="form-grid three-col">
-              <Field label="İzin verilen format" hint="İlk sürümde PDF ile sınırlandı.">
-                <div className="fixed-value"><span>PDF</span><small>Değiştirilemez</small></div>
-              </Field>
-              <Field label="En büyük dosya boyutu">
-                <div className="input-with-unit">
-                  <input
-                    type="number"
-                    min={1}
-                    max={500}
-                    value={setup.maxFileSizeMb}
-                    onChange={(event) => onChange({ ...setup, maxFileSizeMb: Number(event.target.value) })}
-                  />
-                  <span>MB</span>
-                </div>
-              </Field>
-              <Field label="En fazla dosya sayısı">
-                <input
-                  type="number"
-                  min={1}
-                  max={10}
-                  value={setup.maxFileCount}
-                  onChange={(event) => onChange({ ...setup, maxFileCount: Number(event.target.value) })}
-                />
-              </Field>
-            </div>
-          </fieldset>
-
-          <fieldset>
-            <legend><span>3</span> Teknik kurala uyulmazsa ne yapılmalı?</legend>
-            <div className="action-options">
-              {(Object.keys(ACTION_LABELS) as ViolationAction[]).map((action) => (
-                <label key={action} className={`action-option ${setup.defaultViolationAction === action ? "selected" : ""}`}>
-                  <input
-                    type="radio"
-                    name="violation"
-                    value={action}
-                    checked={setup.defaultViolationAction === action}
-                    onChange={() => onChange({ ...setup, defaultViolationAction: action })}
-                  />
-                  <span className="radio-mark" />
-                  <span>
-                    <strong>{ACTION_LABELS[action]}</strong>
-                    <small>
-                      {action === "block" && "Kesin teknik ihlallerde katılımcı dosyası kabul edilmez."}
-                      {action === "warn" && "Dosya alınır, yönetici ekranında açık uyarı oluşur."}
-                      {action === "jury" && "Karar otomatik verilmez; görevliye inceleme açılır."}
-                    </small>
-                  </span>
-                </label>
-              ))}
-            </div>
-          </fieldset>
-
-          <div className="form-actions">
-            <span className="save-note">Ayarlar bu cihazda taslak olarak tutulur.</span>
-            <button className="primary-button" type="submit" disabled={!canContinue}>
-              Kaynak belgeye geç <span aria-hidden="true">→</span>
-            </button>
-          </div>
-        </form>
-
-        <aside className="setup-preview" aria-label="Değerlendirme şablonu canlı önizlemesi">
-          <TemplatePreview setup={setup} file={file} result={result} criteria={criteria} />
-        </aside>
-      </div>
-    </section>
-  );
-}
-
 function UploadStep({
-  setup,
   file,
-  result,
-  criteria,
   onFile,
   onSample,
-  onBack,
   onAnalyze,
+  onReanalyze,
+  analysisReady,
   loading,
   loadingMessage,
   error,
+  errorRetryable,
 }: {
-  setup: SetupData;
   file: File | null;
-  result: AnalysisResult | null;
-  criteria: Criterion[];
   onFile: (file: File) => void;
-  onSample: (file: File, setup: Partial<SetupData>) => void;
-  onBack: () => void;
+  onSample: (file: File) => void;
   onAnalyze: () => void;
+  /** Kayıtlı sonucu atlayıp modeli gerçekten yeniden çalıştırır. */
+  onReanalyze: () => void;
+  analysisReady: boolean;
   loading: boolean;
   loadingMessage: string;
   error: string;
+  /** Geçici model hatası: kullanıcıya "Yeniden dene" sunulur. */
+  errorRetryable: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
-
-  async function loadSample(sample: SampleDocument) {
-    const response = await fetch(sample.path);
-    const blob = await response.blob();
-    onSample(new File([blob], sample.name, { type: "application/pdf" }), sample.setup);
-  }
+  const [libraryOpen, setLibraryOpen] = useState(false);
 
   function accept(selected?: File) {
     if (selected) onFile(selected);
@@ -469,22 +220,24 @@ function UploadStep({
       <div className="workspace-heading">
         <div>
           <span className="section-kicker">Organizatör kaynağı</span>
-          <h1 id="upload-title">Resmî değerlendirme belgesini yükleyin</h1>
-          <p>Buraya katılımcı projesi değil; kriterleri, yazım kurallarını ve ihlal sonuçlarını anlatan PDF yüklenir.</p>
+          <h1 id="upload-title">Resmî şartname belgesini yükleyin</h1>
+          <p>Buraya katılımcı projesi değil; rapor kurallarını, zorunlu başlıkları ve teknik gereksinimleri anlatan şartname PDF&apos;si yüklenir. Tek yüklenen belge budur; ayrı bir rapor şablonu istenmez.</p>
         </div>
-        <span className="step-fraction">2 / 4</span>
+        <span className="step-fraction">1 / 3</span>
       </div>
 
       <div className="source-explainer">
         <span className="explainer-mark">K</span>
         <div>
-          <strong>Bu belge, değerlendirme profilinin kaynağı olacak.</strong>
-          <p>AI önce belgeyi yorumlayacak; hiçbir çıkarım yönetici onayı olmadan uygulanmayacak.</p>
+          <strong>Belge tek AI çağrısıyla dört aşamaya göre okunur.</strong>
+          <p>
+            {CHECK_STAGES.map((stage) => `${stage.order}. ${stage.title}`).join(" · ")}. Puan tabloları ve saha aşaması kuralları kriter yapılmaz; hiçbir çıkarım yönetici onayı olmadan yayımlanmaz.
+          </p>
         </div>
         <span className="draft-safe-note">Geri dönerseniz seçilen belge ve analiz taslağı korunur.</span>
       </div>
 
-      <div className="upload-layout">
+      <div className="upload-layout source-only">
         <div
           className={`drop-zone ${dragging ? "dragging" : ""} ${file ? "has-file" : ""}`}
           onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
@@ -516,53 +269,45 @@ function UploadStep({
             <div className="empty-upload">
               <div className="upload-symbol" aria-hidden="true">↑</div>
               <h2>PDF’yi buraya bırakın</h2>
-              <p>veya bilgisayarınızdan bir değerlendirme kılavuzu seçin</p>
+              <p>veya bilgisayarınızdan resmî şartnameyi seçin</p>
               <button type="button" className="secondary-button" onClick={() => inputRef.current?.click()}>PDF seç</button>
             </div>
           )}
         </div>
-
-        <aside className="setup-preview upload-preview" aria-label="Değerlendirme şablonu canlı önizlemesi">
-          <TemplatePreview setup={setup} file={file} result={result} criteria={criteria} />
-        </aside>
       </div>
 
-      <section className="sample-library" aria-labelledby="sample-library-title">
-        <div className="sample-library-heading">
-          <div>
-            <h2 id="sample-library-title">Hazır test belgeleri</h2>
-            <p>Farklı yarışma ve kriter yapılarında sistemi sınayın.</p>
-          </div>
-          <span>{SAMPLE_DOCUMENTS.length} belge</span>
+      <section className="library-shortcut" aria-labelledby="library-shortcut-title">
+        <div>
+          <h2 id="library-shortcut-title">Belge havuzu</h2>
+          <p>
+            {SAMPLE_DOCUMENTS.length} hazır test belgesi ve havuza eklediğiniz şartname, kılavuz,
+            referans dokümanları. Yeni belgeleri buradan ekleyip kaynak olarak seçebilirsiniz.
+          </p>
         </div>
-        <div className="sample-document-list">
-          {SAMPLE_DOCUMENTS.map((sample) => (
-            <article key={sample.path} className={file?.name === sample.name ? "selected" : ""}>
-              <FileBadge fileName={sample.name} mimeType="application/pdf" size="sm" />
-              <div className="sample-copy">
-                <span>{sample.source} · {sample.pages} sayfa</span>
-                <h3>{sample.title}</h3>
-                <p>{sample.description}</p>
-              </div>
-              <div className="sample-actions">
-                <a href={sample.path} target="_blank" rel="noreferrer">Belgeyi aç</a>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => loadSample(sample)}
-                  disabled={file?.name === sample.name}
-                >
-                  {file?.name === sample.name ? "Seçildi" : "Bu belgeyi seç"}
-                </button>
-              </div>
-            </article>
-          ))}
-        </div>
+        <button type="button" className="secondary-button" onClick={() => setLibraryOpen(true)}>
+          Belge havuzunu aç
+        </button>
       </section>
 
-      <DocumentLibraryPanel selectedFileName={file?.name ?? null} onSelect={onFile} />
+      <DocumentLibraryModal
+        open={libraryOpen}
+        usage="kriter"
+        selectedFile={file}
+        onClose={() => setLibraryOpen(false)}
+        onSelect={onFile}
+        onSelectSample={onSample}
+      />
 
-      {error ? <div className="inline-error" role="alert"><strong>Belge analiz edilemedi.</strong><span>{error}</span></div> : null}
+      {error ? (
+        <div className="inline-error analysis-error" role="alert">
+          <strong>Belge analiz edilemedi.</strong>
+          <span>{error}</span>
+          {/* Sistem kendiliğinden ikinci bir AI çağrısı yapmaz; tekrar denemeye kullanıcı karar verir. */}
+          {errorRetryable && file && !loading ? (
+            <button type="button" className="secondary-button" onClick={onAnalyze}>Yeniden dene</button>
+          ) : null}
+        </div>
+      ) : null}
 
       {loading ? (
         <div className="analysis-progress" role="status" aria-live="polite">
@@ -573,9 +318,17 @@ function UploadStep({
       ) : null}
 
       <div className="workspace-actions">
-        <button type="button" className="back-button" onClick={onBack}>← Temel ayarlara dön <small>Taslak korunur</small></button>
+        <span className="source-limit-note">Kaynak PDF analiz motoru için teknik yükleme sınırı: 18 MB.</span>
+        {/*
+          YENİDEN ANALİZ (madde 1): kayıtlı sonuç atlanır, model gerçekten
+          yeniden çalışır ve yeni sonuç eski kaydın üzerine yazılır. Sonuç
+          hatalıysa yönetici bu düğmeyle kaydı tazeler.
+        */}
+        <button type="button" className="secondary-button" disabled={!file || loading} onClick={onReanalyze}>
+          Yeniden analiz et
+        </button>
         <button type="button" className="primary-button" disabled={!file || loading} onClick={onAnalyze}>
-          Belgeyi analiz et <span aria-hidden="true">→</span>
+          {analysisReady ? "Mevcut analize dön" : "Belgeyi analiz et"} <span aria-hidden="true">→</span>
         </button>
       </div>
     </section>
@@ -584,76 +337,164 @@ function UploadStep({
 
 function CriteriaReview({
   setup,
-  setSetup,
-  file,
+  sourceName,
+  pageCount,
+  analysisWarnings,
   documentUrl,
-  result,
+  editingPublished,
+  cacheNotice,
   criteria,
   setCriteria,
   onBack,
   onApprove,
+  onReanalyze,
+  publishing,
+  approvalError,
 }: {
   setup: SetupData;
-  setSetup: (setup: SetupData) => void;
-  file: File;
+  /** Kaynak şartnamenin adı; geçmiş profil düzenlenirken kayıttan gelir. */
+  sourceName: string;
+  pageCount: number;
+  analysisWarnings: string[];
+  /**
+   * Kaynak şartnamenin açılabileceği adres.
+   *
+   * Öncelik bu oturumdaki yerel dosyanın nesne URL'idir (anında açılır);
+   * profil geçmişten açıldığında yerel dosya yoktur ve sunucudaki kopya
+   * kullanılır (`/api/profiles/{id}/file`). İkisi de yoksa boştur ve
+   * bağlantı yerine "kaynak belge kayıtlı değil" notu gösterilir.
+   */
   documentUrl: string;
-  result: AnalysisResult;
+  /**
+   * Bu proje daha önce kaydedilmiş mi?
+   *
+   * false → ilk analiz; ana eylem "Kriterleri Oluştur" (yeni profil yazılır).
+   * true  → kayıtlı profil düzenleniyor; ana eylem "Değişiklikleri Kaydet"
+   *         ve yapay zekâ TEKRAR ÇALIŞTIRILMAZ; form doğrudan aynı profil
+   *         kimliğiyle veri tabanına yazılır.
+   */
+  editingPublished: boolean;
+  /** Sonuç kalıcı analiz kaydından geldiyse gösterilen bilgi notu; taze analizde boş. */
+  cacheNotice: string;
   criteria: Criterion[];
   setCriteria: (criteria: Criterion[]) => void;
   onBack: () => void;
   onApprove: () => void;
+  /** Kayıtlı analizi atlayıp şartnameyi baştan analiz eder; kaynak PDF elde ise açıktır. */
+  onReanalyze: (() => void) | null;
+  publishing: boolean;
+  approvalError: string;
 }) {
   const [selectedId, setSelectedId] = useState(criteria[0]?.id ?? "");
   const [query, setQuery] = useState("");
-  const [scopeFilter, setScopeFilter] = useState("all");
+  const [stageFilter, setStageFilter] = useState<StageFilter>("all");
+  /** Açık olan kriter ekleme formu; kapalıyken null. */
+  const [draft, setDraft] = useState<CriterionDraft | null>(null);
+  const [draftError, setDraftError] = useState("");
   const [reviewConfirmed, setReviewConfirmed] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  /** Yayın öncesi ikinci kesinleştirme penceresi. */
+  const [confirmingPublish, setConfirmingPublish] = useState(false);
 
   const selected = criteria.find((item) => item.id === selectedId) ?? criteria[0];
-  const scopes = [...new Set(criteria.map((item) => item.scope || "Genel"))];
+  // Pasif kriter yoktur: listedeki her kriter yayımlanır. Yönetici istemediği
+  // kriteri siler; "aktif/pasif" ikilemi ve yarı yayımlanmış set kaldırıldı.
+  const active = criteria;
+  const requiredCount = active.filter((item) => item.required).length;
+  const otherCount = active.length - requiredCount;
+  const stageCounts = CHECK_STAGES.map((stage) => ({ stage, count: active.filter((item) => item.stage === stage.id).length }));
+  const missingSource = active.filter((item) => item.sourcePage === null).length;
+
   const filtered = criteria.filter((item) => {
-    const queryMatch = item.name.toLocaleLowerCase("tr-TR").includes(query.toLocaleLowerCase("tr-TR"));
-    return queryMatch && (scopeFilter === "all" || (item.scope || "Genel") === scopeFilter);
+    const queryMatch = !query.trim()
+      || `${item.name} ${item.description} ${item.sourceText}`.toLocaleLowerCase("tr-TR").includes(query.toLocaleLowerCase("tr-TR"));
+    const stageMatch = stageFilter === "all" || item.stage === stageFilter;
+    return queryMatch && stageMatch;
   });
-  const active = criteria.filter((item) => item.active);
-  const scorePlan = result.scorePlan;
-  const displayTotal = scorePlan?.declaredTotalScore ?? null;
-  const scoreGroupCount = scorePlan?.groups.length ?? active.filter((item) => criterionEffect(item) === "score").length;
-  const humanReviewCount = active.filter((item) => ["human", "hybrid"].includes(item.evaluationMethod)).length;
-  const deterministicCount = active.filter((item) => item.evaluationMethod === "deterministic").length;
-  const conflicts = active.filter((item) => item.issue).length;
-  const canApprove = reviewConfirmed && conflicts === 0 && active.length > 0;
-  const decisionRules = deriveDecisionRules(criteria, scorePlan);
+  const stageOrder = (item: Criterion) => checkStageOf(item.stage).order;
+  const byStageThenPage = (left: Criterion, right: Criterion) => (
+    stageOrder(left) - stageOrder(right)
+    || (left.sourcePage ?? Number.MAX_SAFE_INTEGER) - (right.sourcePage ?? Number.MAX_SAFE_INTEGER)
+  );
+  // Yalnızca İKİ grup gösterilir: Zorunlu ve Zorunlu olmayan (madde 1).
+  // İki bölüm her zaman birlikte listelenir; zorunluluğa göre filtre yoktur.
+  const groups: Array<{ id: CriterionKind; title: string; hint: string; items: Criterion[] }> = [
+    {
+      id: "required",
+      title: "Zorunlu kriterler",
+      hint: "Değerlendirmede zorunlu tutulur.",
+      items: filtered.filter((item) => item.required).sort(byStageThenPage),
+    },
+    {
+      id: "other",
+      title: "Zorunlu olmayan kriterler",
+      hint: "Değerlendirmede zorunlu tutulmaz.",
+      items: filtered.filter((item) => !item.required).sort(byStageThenPage),
+    },
+  ];
+
+  const canApprove = reviewConfirmed && active.length > 0 && !publishing;
 
   function update(patch: Partial<Criterion>) {
-    setCriteria(criteria.map((item) => item.id === selected.id ? { ...item, ...patch } : item));
+    if (!selected) return;
+    setCriteria(criteria.map((item) => {
+      if (item.id !== selected.id) return item;
+      const next = { ...item, ...patch };
+      /*
+       * Denetlenebilirlik arayüzden SEÇİLMEZ ve gösterilmez; sistem otomatik
+       * belirler. AI kriterlerinde modelin işaretlediği değer korunur; manuel
+       * kriterde metin değiştikçe yeniden hesaplanır (video/portal/saha
+       * ifadeleri arka planda PDF dışı sınıflandırılır).
+       */
+      if (next.origin === "manager" && (patch.name !== undefined || patch.description !== undefined)) {
+        next.verifiability = resolveVerifiability(undefined, next.name, next.sourceText, next.description);
+      }
+      return next;
+    }));
+    setReviewConfirmed(false);
   }
 
-  function addCriterion() {
+  /** İlgili ekleme düğmesi kriter giriş formunu açar; kayıt "Ekle" ile olur. */
+  function openDraft(kind: CriterionKind) {
+    setDraft((current) => current?.kind === kind ? null : emptyDraft(kind));
+    setDraftError("");
+    setConfirmingDelete(false);
+    requestAnimationFrame(() => document.getElementById("criterion-draft")?.scrollIntoView({ behavior: "smooth", block: "center" }));
+  }
+
+  function saveDraft() {
+    if (!draft) return;
+    const name = draft.name.trim();
+    const description = draft.description.trim();
+    if (!name) { setDraftError("Kriter adı zorunludur."); return; }
+    if (!description) { setDraftError("Kural açıklaması zorunludur; hakem bu metne göre değerlendirir."); return; }
+    const page = draft.sourcePage.trim() ? Math.round(Number(draft.sourcePage)) : null;
+    if (draft.sourcePage.trim() && (!Number.isInteger(page) || (page as number) < 1 || (page as number) > pageCount)) {
+      setDraftError(`Kaynak sayfa 1 ile ${pageCount} arasında bir sayı olmalıdır.`);
+      return;
+    }
     const added: Criterion = {
-      id: `manual-${Date.now()}`,
-      name: "Yeni yönetici kriteri",
-      type: "qualitative_score",
-      maxScore: 0,
-      weight: 0,
-      required: false,
-      violationOutcome: "Jüri değerlendirmesine bilgi ver",
-      evaluationMethod: "human",
-      sourcePage: null,
-      sourceText: "Bu kriter yönetici tarafından eklendi; kaynak belgeye dayanmıyor.",
-      aiInterpretation: "Yönetici eklemesi",
-      confidence: "high",
+      id: `manual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+      name: name.slice(0, 200),
+      stage: draft.stage,
+      required: draft.kind === "required",
+      description: description.slice(0, 1200),
+      violationOutcome: draft.violationOutcome.trim().slice(0, 240) || "Belgede belirtilmemiş",
+      sourcePage: page,
+      sourceText: draft.sourceText.trim().slice(0, 900),
+      // Kullanıcıya sorulmaz: kriter metninden otomatik belirlenir (madde 1).
+      verifiability: resolveVerifiability(undefined, name, draft.sourceText.trim(), description),
       active: true,
       origin: "manager",
-      effect: "advisory",
-      scope: setup.stage || "Genel",
     };
     setCriteria([...criteria, added]);
     setSelectedId(added.id);
-    setScopeFilter("all");
+    setDraft(null);
+    setDraftError("");
+    setStageFilter("all");
     setQuery("");
     setReviewConfirmed(false);
-    setConfirmingDelete(false);
+    requestAnimationFrame(() => document.getElementById("criterion-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }
 
   function removeSelectedCriterion() {
@@ -665,184 +506,215 @@ function CriteriaReview({
     setReviewConfirmed(false);
   }
 
-  function resolveConflict(useDocumentValue: boolean) {
-    const match = selected.name.match(/(\d+)\s*MB/i);
-    if (useDocumentValue && match) {
-      setSetup({ ...setup, maxFileSizeMb: Number(match[1]) });
-    }
-    update({
-      issue: undefined,
-      aiInterpretation: `${selected.aiInterpretation} Yönetici çakışmayı inceledi ve ${useDocumentValue ? "belgedeki değeri" : "başlangıç ayarını"} geçerli kabul etti.`,
-    });
-    setReviewConfirmed(false);
+  function renderRow(item: Criterion) {
+    return (
+      <button
+        key={item.id}
+        type="button"
+        role="option"
+        aria-selected={item.id === selected?.id}
+        className={`criterion-row ${item.id === selected?.id ? "selected" : ""}`}
+        onClick={() => {
+          setSelectedId(item.id);
+          setConfirmingDelete(false);
+          requestAnimationFrame(() => document.getElementById("criterion-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+        }}
+      >
+        <span className={`type-mark stage-${checkStageOf(item.stage).order}`} aria-hidden="true" />
+        <span className="criterion-main">
+          <strong>{item.name}</strong>
+          <small>
+            {stageBadge(item.stage)}
+            {/*
+              Kaynak sayfa bilgi değil BAĞLANTIDIR: tıklayınca şartname PDF'i
+              o sayfada açılır. Satır bir <button> olduğu için bağlantının
+              tıklaması satır seçimini tetiklememeli — olay durdurulur.
+            */}
+            {item.sourcePage ? (
+              documentUrl ? (
+                <>
+                  {" · "}
+                  <a
+                    className="source-page-link"
+                    href={`${documentUrl}#page=${item.sourcePage}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(event) => event.stopPropagation()}
+                    title="Şartnameyi bu sayfada aç"
+                  >Kaynak s. {item.sourcePage} ↗</a>
+                </>
+              ) : ` · Kaynak s. ${item.sourcePage}`
+            ) : " · Kaynak sayfa girilmedi"}
+            {item.origin === "manager" ? " · Yönetici ekledi" : ""}
+          </small>
+        </span>
+        {/*
+          Satırda yalnızca dört bilgi bulunur: kriter adı, analiz aşaması,
+          kaynak sayfa bağlantısı ve zorunlu/zorunlu olmayan durumu. Başka
+          uygulanabilirlik/denetlenebilirlik rozeti GÖSTERİLMEZ (madde 1).
+        */}
+        <span className={`criterion-value ${item.required ? "required" : "other"}`}>
+          {item.required ? "Zorunlu" : "Zorunlu olmayan"}
+        </span>
+      </button>
+    );
   }
 
   return (
     <section className="workspace review-workspace" aria-labelledby="review-title">
       <div className="review-heading">
         <div>
-          <span className="section-kicker">AI çıkarım taslağı</span>
-          <h1 id="review-title">Kriterleri doğrulayın ve kesinleştirin</h1>
-          <p>{file.name} · {result.pageCount} sayfa · Her çıkarım kaynağıyla birlikte gösteriliyor.</p>
+          <span className="section-kicker">{editingPublished ? "Kayıtlı profil · düzenleme" : "Belgeden çıkarılan kriterler"}</span>
+          <h1 id="review-title">{editingPublished ? "Kriterleri düzenleyin ve kaydedin" : "Kriterleri doğrulayın ve kesinleştirin"}</h1>
+          <p>{sourceName} · {pageCount} sayfa · {setup.competition} · Her kriter kaynak sayfasıyla birlikte gösteriliyor.</p>
         </div>
-        <span className="step-fraction">3 / 4</span>
+        <span className="step-fraction">2 / 3</span>
       </div>
 
-      <div className="analysis-summary" aria-label="Analiz özeti">
-        <div><strong>{active.length}</strong><span>aktif kural</span></div>
-        <div><strong>{scoreGroupCount}</strong><span>puan grubu</span></div>
-        <div><strong>{deterministicCount}</strong><span>kesin kontrol</span></div>
-        <div><strong>{humanReviewCount}</strong><span>görevli onayı</span></div>
-        <div className={conflicts ? "summary-warning" : "summary-ok"}><strong>{conflicts}</strong><span>açık çakışma</span></div>
-        <div><strong>{displayTotal ?? "—"}</strong><span>PDF toplam puanı</span></div>
+      <div className="analysis-summary" aria-label="Kriter özeti">
+        <div><strong>{requiredCount}</strong><span>zorunlu</span></div>
+        <div><strong>{otherCount}</strong><span>zorunlu olmayan</span></div>
+        <div><strong>{active.length}</strong><span>toplam kriter</span></div>
+        {stageCounts.map(({ stage, count }) => (
+          <div key={stage.id} title={stage.detail}><strong>{count}</strong><span>{stage.order}. {stage.shortTitle}</span></div>
+        ))}
+        {missingSource ? <div className="summary-warning"><strong>{missingSource}</strong><span>kaynak sayfası eksik</span></div> : null}
       </div>
 
-      <details className="template-peek">
-        <summary>Şablon önizlemesi — yaptığınız değişiklikler anında yansır</summary>
-        <TemplatePreview setup={setup} file={file} result={result} criteria={criteria} />
-      </details>
-
-      <section className="score-plan" aria-labelledby="score-plan-title">
-        <div className="score-plan-heading">
-          <div>
-            <h2 id="score-plan-title">Belgedeki puan yapısı</h2>
-            <p>Sistem puanı değiştirmez; PDF’de ilan edilen grupları, barajları ve alt kalemleri görünür kılar.</p>
-          </div>
-          <span className={`score-audit ${scorePlan?.auditStatus ?? "not_declared"}`}>
-            {scorePlan?.auditStatus === "matched" ? "Toplam doğrulandı" : scorePlan?.auditStatus === "mismatch" ? "Eksik veya çakışan puan" : "Genel toplam belirtilmemiş"}
-          </span>
-        </div>
-        {scorePlan?.groups.length ? (
-          <div className="score-group-list">
-            {scorePlan.groups.map((group) => (
-              <details key={`${group.name}-${group.sourcePage}`} className="score-group-row">
-                <summary>
-                  <span><strong>{group.name}</strong><small>{group.scope} · Sayfa {group.sourcePage}</small></span>
-                  <span className="score-group-value">
-                    {group.maxScore} puan
-                    {displayTotal ? <small>≈ {normalizeScore(group.maxScore, displayTotal)}/100</small> : null}
-                  </span>
-                </summary>
-                <div>
-                  {group.minimumScore !== null ? <p><strong>Baraj:</strong> En az {group.minimumScore} puan</p> : null}
-                  {group.breakdown.length ? <ul>{group.breakdown.map((item) => <li key={item}>{item}</li>)}</ul> : null}
-                  <blockquote>{group.sourceText}</blockquote>
-                </div>
-              </details>
-            ))}
-          </div>
-        ) : (
-          <p className="score-plan-empty">PDF’de sayısal puan tablosu bulunmadı. Sistem bu belge için puan üretmedi.</p>
-        )}
-        {displayTotal ? (
-          <p className="normalization-note">
-            Yarışmanın orijinal puan sistemi korunur: değerlendirme {displayTotal} puan üzerinden yapılır,
-            sonuç (alınan puan ÷ {displayTotal}) × 100 formülüyle 100 üzerinden gösterilir.
-          </p>
-        ) : null}
-        <p className={`score-audit-note ${scorePlan?.auditStatus === "mismatch" ? "warning" : ""}`}>
-          {scorePlan?.auditMessage ?? "Bu analiz eski veri modeliyle oluşturuldu. Güncel puan denetimi için belgeyi yeniden analiz edin."}
+      {editingPublished ? (
+        <p className="page-note" role="status">
+          Bu profil daha önce kaydedildi. <strong>Değişiklikleri Kaydet</strong> yapay zekâyı yeniden
+          çalıştırmaz; formdaki güncel kriterler aynı profil kimliğiyle veri tabanına yazılır ve
+          mevcut başvurular güncel kriter setine bağlı kalır.
         </p>
-      </section>
+      ) : null}
 
-      <section className="decision-rules" aria-labelledby="decision-rules-title">
-        <div className="score-plan-heading">
-          <div>
-            <h2 id="decision-rules-title">Karar kuralları</h2>
-            <p>Toplam puanın yanında ayrıca denetlenecek geçiş koşulları, barajlar, cezalar ve eleme maddeleri.</p>
-          </div>
-        </div>
-        <div className="decision-rule-grid">
-          {([
-            { key: "gates", title: "Geçiş koşulları", items: decisionRules.gates },
-            { key: "thresholds", title: "Barajlar", items: decisionRules.thresholds },
-            { key: "penalties", title: "Cezalar", items: decisionRules.penalties },
-            { key: "eliminations", title: "Eleme / diskalifiye", items: decisionRules.eliminations },
-          ] as const).map((column) => (
-            <details key={column.key} className={`decision-column ${column.key}`}>
-              <summary><strong>{column.items.length}</strong><span>{column.title}</span></summary>
-              {column.items.length ? (
-                <ul>
-                  {column.items.slice(0, 8).map((rule, index) => (
-                    <li key={`${rule.name}-${index}`}>
-                      <strong>{rule.name}</strong>
-                      <span>{rule.detail}{rule.sourcePage ? ` · s. ${rule.sourcePage}` : ""}</span>
-                    </li>
-                  ))}
-                  {column.items.length > 8 ? <li className="more">+ {column.items.length - 8} madde daha</li> : null}
-                </ul>
-              ) : (
-                <p>Bu belgede tanımlı madde bulunmadı.</p>
-              )}
-            </details>
-          ))}
-        </div>
-      </section>
-
-      <details className="analysis-notes">
-        <summary>AI’nin kriter dışında bıraktığı notları göster</summary>
-        <div>
-          {result.informationalNotes.length ? (
-            <section><strong>Bilgi metni</strong><p>{result.informationalNotes[0]}</p></section>
+      {/* Not yalnızca taze bir önbellek isabetini anlatır; yayımlanmış profil
+          düzenlenirken bağlam değiştiği için gösterilmez. */}
+      {cacheNotice && !editingPublished ? (
+        <p className="page-note cache-notice" role="status">
+          {cacheNotice}
+          {onReanalyze ? (
+            <button type="button" className="text-button" onClick={onReanalyze}>Yeniden analiz et</button>
           ) : null}
-          <section><strong>Çalıştırılmayacak kontroller</strong><p>{result.skippedChecks.join(" · ") || "Atlanan kontrol bulunmadı"}</p></section>
-          {result.analysisWarnings?.length ? <section><strong>Analiz uyarısı</strong><p>{result.analysisWarnings.join(" · ")}</p></section> : null}
-        </div>
-      </details>
+        </p>
+      ) : null}
+
+      {analysisWarnings.length ? (
+        <ul className="analysis-warning-list" role="status">
+          {analysisWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+        </ul>
+      ) : null}
 
       <div className="review-grid">
         <div className="criteria-ledger" id="criteria-list">
           <div className="criteria-section-heading">
-            <div><h2>Kriter listesi</h2><p>Düzenlemek istediğiniz kriteri seçin.</p></div>
-            <button type="button" className="secondary-button" onClick={addCriterion}>+ Kriter ekle</button>
+            <div><h2>Kriter listesi</h2><p>AI çıkarımlarını düzeltin, gereksizleri silin veya belgedeki eksik bir kriteri kendiniz ekleyin.</p></div>
+            {/*
+              Kriter ya ZORUNLU ya ZORUNLU OLMAYANdır. İki bağımsız düğme,
+              ilgili türde bir giriş formu açar; tür formun içinde
+              değiştirilemez, hangi düğmeye basıldıysa o olur.
+            */}
+            <div className="add-criterion-group">
+              <button
+                type="button"
+                className={`secondary-button add-criterion-button ${draft?.kind === "required" ? "active" : ""}`}
+                aria-expanded={draft?.kind === "required"}
+                onClick={() => openDraft("required")}
+              >
+                <span aria-hidden="true">＋</span>
+                <span><strong>Zorunlu Kriter Ekle</strong><small>Değerlendirmede zorunlu tutulur</small></span>
+              </button>
+              <button
+                type="button"
+                className={`secondary-button add-criterion-button ${draft?.kind === "other" ? "active" : ""}`}
+                aria-expanded={draft?.kind === "other"}
+                onClick={() => openDraft("other")}
+              >
+                <span aria-hidden="true">＋</span>
+                <span><strong>Zorunlu Olmayan Kriter Ekle</strong><small>Değerlendirmede zorunlu tutulmaz</small></span>
+              </button>
+            </div>
           </div>
-          <div className="ledger-tools">
+
+          {draft ? (
+            <div className={`criterion-draft ${draft.kind}`} id="criterion-draft" role="group" aria-label="Yeni kriter">
+              <div className="criterion-draft-head">
+                <strong>{draft.kind === "required" ? "Yeni zorunlu kriter" : "Yeni zorunlu olmayan kriter"}</strong>
+                <span>{draft.kind === "required" ? "Zorunlu" : "Zorunlu olmayan"}</span>
+              </div>
+              <div className="form-grid two-col">
+                <Field label="Kriter adı">
+                  <input
+                    value={draft.name}
+                    maxLength={200}
+                    placeholder="Örn. Rapor dili Türkçe"
+                    onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+                  />
+                </Field>
+                <Field label="Kontrol aşaması" hint={checkStageOf(draft.stage).detail}>
+                  <select value={draft.stage} onChange={(event) => setDraft({ ...draft, stage: event.target.value as CheckStage })}>
+                    {CHECK_STAGES.map((stage) => <option key={stage.id} value={stage.id}>{stage.order}. {stage.title}</option>)}
+                  </select>
+                </Field>
+              </div>
+              <Field label="Kural açıklaması" hint="Koşul ve raporda ne aranacağı tek anlamlı yazılmalı; rapor değerlendirmesinde bu metin kullanılır.">
+                <textarea
+                  value={draft.description}
+                  onChange={(event) => setDraft({ ...draft, description: event.target.value })}
+                  placeholder="Örn. Rapor Türkçe yazılmalıdır; başka dilde yazılan rapor değerlendirmeye alınmaz."
+                />
+              </Field>
+              <div className="form-grid two-col">
+                <Field label="İhlal sonucunda">
+                  <input value={draft.violationOutcome} maxLength={240} onChange={(event) => setDraft({ ...draft, violationOutcome: event.target.value })} />
+                </Field>
+                <Field label="Kaynak PDF sayfası (isteğe bağlı)" hint={`1–${pageCount} arası. Şartnamede dayanağı varsa yazın.`}>
+                  <input
+                    type="number"
+                    min={1}
+                    max={pageCount}
+                    value={draft.sourcePage}
+                    placeholder="Örn. 12"
+                    onChange={(event) => setDraft({ ...draft, sourcePage: event.target.value })}
+                  />
+                </Field>
+              </div>
+              <Field label="Kaynak alıntı (isteğe bağlı)" hint="Kuralı kanıtlayan cümle, belgeden birebir.">
+                <textarea value={draft.sourceText} onChange={(event) => setDraft({ ...draft, sourceText: event.target.value })} />
+              </Field>
+              {draftError ? <p className="approval-error" role="alert">{draftError}</p> : null}
+              <div className="criterion-draft-actions">
+                <button type="button" className="text-button" onClick={() => { setDraft(null); setDraftError(""); }}>Vazgeç</button>
+                <button type="button" className="primary-button" onClick={saveDraft}>
+                  {draft.kind === "required" ? "Zorunlu kriteri ekle" : "Zorunlu olmayan kriteri ekle"}
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="ledger-tools two-col">
             <label className="search-box">
               <span aria-hidden="true">⌕</span>
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Kriter ara" aria-label="Kriter ara" />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Kriter, açıklama veya alıntı ara" aria-label="Kriter ara" />
             </label>
-            <select value={scopeFilter} onChange={(event) => setScopeFilter(event.target.value)} aria-label="Aşamaya göre filtrele">
+            <select value={stageFilter} onChange={(event) => setStageFilter(event.target.value as StageFilter)} aria-label="Aşamaya göre filtrele">
               <option value="all">Tüm aşamalar</option>
-              {scopes.map((scope) => <option key={scope} value={scope}>{scope}</option>)}
+              {CHECK_STAGES.map((stage) => <option key={stage.id} value={stage.id}>{stage.order}. {stage.title}</option>)}
             </select>
           </div>
-          <div className="ledger-list" role="listbox" aria-label="Çıkarılan kriterler">
-            {filtered.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                role="option"
-                aria-selected={item.id === selected?.id}
-                className={`criterion-row ${item.id === selected?.id ? "selected" : ""} ${!item.active ? "inactive" : ""}`}
-                onClick={() => {
-                  setSelectedId(item.id);
-                  setConfirmingDelete(false);
-                  requestAnimationFrame(() => document.getElementById("criterion-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }));
-                }}
-              >
-                <span className={`type-mark ${item.type}`} aria-hidden="true" />
-                <span className="criterion-main">
-                  <strong>{item.name}</strong>
-                  <small>{item.scope || "Genel"} · {EFFECT_LABELS[criterionEffect(item)]} · {item.sourcePage ? `Sayfa ${item.sourcePage}` : "Yönetici eklemesi"}</small>
-                </span>
-                <span className={`criterion-value ${criterionEffect(item)}`}>
-                  {criterionEffect(item) === "score" && item.maxScore !== null
-                    ? `${item.maxScore}p`
-                    : criterionEffect(item) === "score"
-                      ? "Puan"
-                    : criterionEffect(item) === "penalty"
-                      ? "Ceza"
-                      : criterionEffect(item) === "threshold"
-                        ? "Baraj"
-                        : criterionEffect(item) === "gate"
-                          ? "Geçiş"
-                          : "Öneri"}
-                </span>
-                {item.issue ? <span className="row-alert" title="Çakışma var">!</span> : null}
-              </button>
-            ))}
-            {!filtered.length ? <div className="empty-ledger">Bu filtrede kriter bulunamadı.</div> : null}
-          </div>
+          {groups.map((group) => (
+            <section key={group.id} className="ledger-group" aria-labelledby={`ledger-group-${group.id}`}>
+              <div className="ledger-group-heading">
+                <h3 id={`ledger-group-${group.id}`}>{group.title}</h3>
+                <span>{group.items.length} kriter · {group.hint}</span>
+              </div>
+              <div className="ledger-list" role="listbox" aria-label={group.title}>
+                {group.items.map(renderRow)}
+                {!group.items.length ? <div className="empty-ledger">Bu bölümde kriter yok.</div> : null}
+              </div>
+            </section>
+          ))}
         </div>
 
         {selected ? (
@@ -853,170 +725,203 @@ function CriteriaReview({
             </div>
             <div className="inspector-topline">
               <div>
-                <span className={`confidence ${selected.confidence}`}>{CONFIDENCE_LABELS[selected.confidence]}</span>
+                {stageBadge(selected.stage)}
+                <span className={`required-chip ${selected.required ? "required" : "other"}`}>{selected.required ? "Zorunlu" : "Zorunlu olmayan"}</span>
                 <span className="origin-label">{selected.origin === "document" ? "AI tarafından belgeden çıkarıldı" : "Yönetici tarafından eklendi"}</span>
               </div>
-              <label className="active-toggle">
-                <input type="checkbox" checked={selected.active} onChange={(event) => { update({ active: event.target.checked }); setReviewConfirmed(false); }} />
-                <span />
-                {selected.active ? "Aktif" : "Pasif"}
-              </label>
             </div>
-
-            {selected.issue ? (
-              <div className="conflict-box" role="alert">
-                <div><strong>Kaynaklar arasında çakışma bulundu</strong><p>{selected.issue}</p></div>
-                <div className="conflict-actions">
-                  <button type="button" onClick={() => resolveConflict(true)}>Belgedeki değeri kullan</button>
-                  <button type="button" onClick={() => resolveConflict(false)}>Başlangıç ayarını koru</button>
-                </div>
-              </div>
-            ) : null}
 
             <div className="inspector-section edit-section">
               <span className="inspector-label">Kriter tanımı</span>
               <div className="form-grid two-col">
                 <Field label="Kriter adı">
-                  <input value={selected.name} onChange={(event) => { update({ name: event.target.value }); setReviewConfirmed(false); }} />
+                  <input value={selected.name} onChange={(event) => update({ name: event.target.value })} />
                 </Field>
-                <Field label="Kriter türü">
-                  <select value={selected.type} onChange={(event) => { update({ type: event.target.value as CriterionType }); setReviewConfirmed(false); }}>
-                    {(Object.keys(TYPE_LABELS) as CriterionType[]).map((type) => <option key={type} value={type}>{TYPE_LABELS[type]}</option>)}
+                <Field label="Kontrol aşaması" hint={checkStageOf(selected.stage).detail}>
+                  <select value={selected.stage} onChange={(event) => update({ stage: event.target.value as CheckStage })}>
+                    {CHECK_STAGES.map((stage) => <option key={stage.id} value={stage.id}>{stage.order}. {stage.title}</option>)}
                   </select>
                 </Field>
-                <Field label="Etkisi">
-                  <select value={criterionEffect(selected)} onChange={(event) => { update({ effect: event.target.value as CriterionEffect }); setReviewConfirmed(false); }}>
-                    {(Object.keys(EFFECT_LABELS) as CriterionEffect[]).map((effect) => <option key={effect} value={effect}>{EFFECT_LABELS[effect]}</option>)}
-                  </select>
-                </Field>
-                <Field label="Değerlendirme yöntemi">
-                  <select value={selected.evaluationMethod} onChange={(event) => { update({ evaluationMethod: event.target.value as EvaluationMethod }); setReviewConfirmed(false); }}>
-                    {(Object.keys(METHOD_LABELS) as EvaluationMethod[]).map((method) => <option key={method} value={method}>{METHOD_LABELS[method]}</option>)}
-                  </select>
-                </Field>
-                <Field label="Kapsam / aşama">
-                  <input value={selected.scope || "Genel"} onChange={(event) => { update({ scope: event.target.value }); setReviewConfirmed(false); }} />
-                </Field>
-                {criterionEffect(selected) === "score" ? (
-                  <Field label="Azami puan">
-                    <input
-                      type="number"
-                      min={0}
-                      value={selected.maxScore ?? ""}
-                      placeholder="Belirtilmemiş"
-                      onChange={(event) => {
-                        const next = event.target.value === "" ? null : Number(event.target.value);
-                        update({ maxScore: next, weight: next });
-                        setReviewConfirmed(false);
-                      }}
-                    />
-                  </Field>
-                ) : null}
-                <Field label="Zorunluluk">
-                  <select value={selected.required ? "required" : "optional"} onChange={(event) => { update({ required: event.target.value === "required" }); setReviewConfirmed(false); }}>
+                <Field label="Zorunluluk" hint="Kriter değerlendirmede ya zorunludur ya da zorunlu tutulmaz.">
+                  <select value={selected.required ? "required" : "other"} onChange={(event) => update({ required: event.target.value === "required" })}>
                     <option value="required">Zorunlu</option>
-                    <option value="optional">İsteğe bağlı / bilgi</option>
+                    <option value="other">Zorunlu olmayan</option>
                   </select>
                 </Field>
+                {/*
+                  PDF'den denetlenebilirlik alanı ARAYÜZDE YOKTUR (madde 1):
+                  sistem, kriter metninden otomatik belirler ve yalnızca PDF
+                  dışı kuralların hakem rapor analizine gönderilmesini
+                  engellemek için kullanır. Kullanıcı seçemez ve düzenleyemez.
+                */}
                 <Field label="İhlal sonucunda">
-                  <input value={selected.violationOutcome} onChange={(event) => { update({ violationOutcome: event.target.value }); setReviewConfirmed(false); }} />
+                  <input value={selected.violationOutcome} onChange={(event) => update({ violationOutcome: event.target.value })} />
                 </Field>
               </div>
+              <Field label="Kural açıklaması" hint="Koşul, raporda ne aranacağı ve karşılanmadığında ne olacağı tek anlamlı yazılmalı; rapor değerlendirmesinde bu metin kullanılır.">
+                <textarea value={selected.description} onChange={(event) => update({ description: event.target.value })} />
+              </Field>
             </div>
 
             <div className="inspector-section evidence-section">
               <div className="inspector-section-heading">
                 <span className="inspector-label">Belgedeki dayanak</span>
                 {selected.sourcePage && documentUrl ? (
-                  <a href={`${documentUrl}#page=${selected.sourcePage}`} target="_blank" rel="noreferrer">Kaynak sayfayı aç · s. {selected.sourcePage} ↗</a>
-                ) : <span>Kaynak sayfa yok</span>}
+                  <a className="source-page-link" href={`${documentUrl}#page=${selected.sourcePage}`} target="_blank" rel="noreferrer">Kaynak sayfayı aç · s. {selected.sourcePage} ↗</a>
+                ) : selected.sourcePage ? (
+                  <span title="Şartname PDF'i sunucuda saklanmamış; kriterleri yeniden yayımlayın.">Kaynak s. {selected.sourcePage} · belge kayıtlı değil</span>
+                ) : <span>Kaynak sayfa girilmedi</span>}
               </div>
-              <blockquote>{selected.sourceText}</blockquote>
+              {/*
+                KAYNAK KİLİDİ (madde 12)
+                Kaynak sayfa ve kaynak alıntı AI'nin belgeden çıkardığı kanıttır
+                ve elle DEĞİŞTİRİLEMEZ; salt okunur gösterilir. Sunucu da aynı
+                kuralı uygular: istek elle düzenlense bile ilk yayımdaki değer
+                geri konur. Kaynak yanlışsa çözüm "Yeniden analiz et" ya da
+                kriteri silip yerine yenisini oluşturmaktır.
+              */}
+              <div className="manual-evidence-grid locked-evidence-grid">
+                <div className="field locked-field">
+                  <span className="field-label">Kaynak PDF sayfası</span>
+                  <output className="locked-value">
+                    {selected.sourcePage ?? (selected.origin === "manager" ? "Manuel kriter · kaynak yok" : "Kaynak sayfa yok")}
+                  </output>
+                  <span className="field-hint">Salt okunur. Değiştirilemez.</span>
+                </div>
+                <div className="field locked-field">
+                  <span className="field-label">Kaynak alıntı</span>
+                  <output className="locked-value locked-quote">
+                    {selected.sourceText || (selected.origin === "manager" ? "Manuel kriter · alıntı yok" : "Alıntı yok")}
+                  </output>
+                  <span className="field-hint">Salt okunur. Değiştirilemez.</span>
+                </div>
+              </div>
+              <p className="locked-evidence-note">
+                Kaynak sayfa ve alıntı yapay zekânın belgeden çıkardığı kanıttır; düzenlenemez.
+                Kaynak yanlışsa <strong>şartnameyi yeniden analiz edin</strong> veya bu kriteri silip
+                doğru kaynağıyla yeni bir kriter oluşturun.
+              </p>
             </div>
 
-            <div className="inspector-section ai-section">
-              <span className="inspector-label">Sistem önerisi</span>
-              <textarea value={selected.aiInterpretation} onChange={(event) => { update({ aiInterpretation: event.target.value }); setReviewConfirmed(false); }} />
-              {selected.evaluationMethod === "human" || selected.evaluationMethod === "hybrid" ? (
-                <p className="human-authority-note">Bu kontrol için sistem yalnızca bulgu sunar. Nihai karar hakem, jüri veya sorumlu görevlidedir.</p>
-              ) : null}
-              <div className="ai-meta">
-                <span>Güven seviyesi</span>
-                <select value={selected.confidence} onChange={(event) => { update({ confidence: event.target.value as Confidence }); setReviewConfirmed(false); }}>
-                  {(Object.keys(CONFIDENCE_LABELS) as Confidence[]).map((confidence) => <option key={confidence} value={confidence}>{CONFIDENCE_LABELS[confidence]}</option>)}
-                </select>
-                <span className="provider-note">
-                  {result.provider === "api" ? "AI modeli · sunucu analizi" : "Yerel demo motoru"}
-                </span>
-              </div>
+            <div className="inspector-section delete-section">
+              <span className="inspector-label">Kriteri kaldır</span>
+              {confirmingDelete ? (
+                <div className="delete-confirm-row" role="alertdialog" aria-label="Kriter silme onayı">
+                  <p><strong>“{selected.name}”</strong> listeden kalıcı olarak silinecek. Emin misiniz?</p>
+                  <div>
+                    <button type="button" className="danger-button" onClick={removeSelectedCriterion}>Evet, kriteri sil</button>
+                    <button type="button" className="text-button" onClick={() => setConfirmingDelete(false)}>Vazgeç</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="delete-confirm-row">
+                  <p>Yanlış çıkarılan veya bu yarışmada uygulanmayacak kriterleri silin. Yayımlanan sette pasif kriter bulunmaz: listede kalan her kriter değerlendirmede kullanılır.</p>
+                  <div>
+                    <button type="button" className="danger-button ghost" onClick={() => setConfirmingDelete(true)}>Kriteri sil</button>
+                  </div>
+                </div>
+              )}
             </div>
-
-            {selected.id.startsWith("manual-") ? (
-              <div className="inspector-section delete-section">
-                <span className="inspector-label">Kriteri kaldır</span>
-                {confirmingDelete ? (
-                  <div className="delete-confirm-row" role="alertdialog" aria-label="Kriter silme onayı">
-                    <p><strong>“{selected.name}”</strong> kalıcı olarak silinecek. Emin misiniz?</p>
-                    <div>
-                      <button type="button" className="danger-button" onClick={removeSelectedCriterion}>Evet, kriteri sil</button>
-                      <button type="button" className="text-button" onClick={() => setConfirmingDelete(false)}>Vazgeç</button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="delete-confirm-row">
-                    <p>Yanlışlıkla veya fazladan eklenen kriterler buradan kaldırılabilir. Belgeden çıkarılan kriterler silinmez; pasifleştirilir.</p>
-                    <div>
-                      <button type="button" className="danger-button ghost" onClick={() => setConfirmingDelete(true)}>Kriteri sil</button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ) : null}
           </div>
         ) : null}
       </div>
 
       <div className="approval-bar">
-        <button type="button" className="back-button" onClick={onBack}>← Kaynak belgeye dön <small>Taslak korunur</small></button>
+        <button type="button" className="icon-back" onClick={onBack} aria-label="Kaynak belgeye dön · taslak korunur" title="Kaynak belgeye dön · taslak korunur"><span aria-hidden="true">←</span></button>
         <div className="approval-check">
           <label>
-            <input type="checkbox" checked={reviewConfirmed} onChange={(event) => setReviewConfirmed(event.target.checked)} />
-            <span>Aktif kriterleri, kaynaklarını, puan planını ve görevli onayı gerektiren kontrolleri inceledim.</span>
+            <input
+              type="checkbox"
+              checked={reviewConfirmed}
+              onChange={(event) => { setReviewConfirmed(event.target.checked); setConfirmingPublish(false); }}
+            />
+            <span>Zorunlu ve zorunlu olmayan kriterleri, aşamalarını ve kaynak sayfalarını inceledim.</span>
           </label>
           {!canApprove ? (
             <small>
-              {conflicts > 0 && `${conflicts} çakışmayı çözün. `}
-              {!reviewConfirmed && "Görevli kontrolünü onaylayın."}
+              {active.length === 0 && "En az bir kriter gerekli. "}
+              {!reviewConfirmed && "Yönetici kontrolünü onaylayın."}
             </small>
-          ) : <small className="ready-note">Profil onaya hazır.</small>}
+          ) : <small className="ready-note">{editingPublished ? "Değişiklikler kaydedilmeye hazır." : "Profil yayıma hazır."}</small>}
+          {approvalError ? <small className="approval-error" role="alert">{approvalError}</small> : null}
         </div>
-        <button type="button" className="primary-button" disabled={!canApprove} onClick={onApprove}>Profili onayla <span>→</span></button>
+        {/* Etiket projenin durumuna göre değişir: ilk analizde oluşturma, kayıtlı profilde güncelleme. */}
+        <button type="button" className="primary-button" disabled={!canApprove} onClick={() => setConfirmingPublish(true)}>
+          {editingPublished ? "Değişiklikleri Kaydet" : "Kriterleri Oluştur"} <span>→</span>
+        </button>
       </div>
+
+      {/*
+        İkinci kesinleştirme: onay kutusu yanlışlıkla işaretlenmiş olabilir.
+        Yayımlanan profil aynı anda hakem değerlendirme sistemine aktarılır ve
+        yarışma başvuruya açılır; bu yüzden geri dönüşü olmayan bir adımdır.
+      */}
+      {confirmingPublish ? (
+        <div className="publish-confirm-backdrop" role="presentation" onClick={() => setConfirmingPublish(false)}>
+          <div
+            className="publish-confirm"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="publish-confirm-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2 id="publish-confirm-title">
+              {editingPublished ? "Değişiklikler kaydedilsin mi?" : "Kriter profili yayımlansın mı?"}
+            </h2>
+            <p>
+              <strong>{setup.competition}</strong> için {active.length} kriter ({requiredCount} zorunlu, {otherCount} zorunlu olmayan)
+              {editingPublished
+                ? " veri tabanına yazılacak. Yapay zekâ yeniden çalıştırılmaz; yalnızca formdaki güncel kriterler kaydedilir."
+                : " yayımlanacak. Profil yayımlandığı anda hakem değerlendirme sistemine aktarılır ve yarışma yarışmacı portalında başvuruya açılır."}
+            </p>
+            {missingSource ? (
+              <p className="publish-confirm-warning">
+                {missingSource} kriterin kaynak sayfası boş. İsterseniz vazgeçip kaynak sayfalarını tamamlayabilirsiniz.
+              </p>
+            ) : null}
+            {editingPublished ? (
+              <p className="publish-confirm-warning">
+                Bu bir GÜNCELLEMEDİR: kayıt aynı profil kimliğiyle değiştirilir, yeni bir profil oluşmaz.
+              </p>
+            ) : null}
+            <div className="publish-confirm-actions">
+              <button type="button" className="text-button" disabled={publishing} onClick={() => setConfirmingPublish(false)}>Vazgeç</button>
+              <button type="button" className="primary-button" disabled={publishing} onClick={onApprove}>
+                {publishing
+                  ? (editingPublished ? "Kaydediliyor…" : "Yayımlanıyor…")
+                  : (editingPublished ? "Evet, kaydet" : "Evet, yayımla")}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
 
 function ProfileReady({
   profile,
+  summary,
   onEdit,
   onRestart,
 }: {
   profile: ProfileExport;
+  /** Yayımın sürüm künyesi; kriter sürümleri değişmezdir (madde 2). */
+  summary: { version: number; created: boolean; sourceLockWarning: string } | null;
   onEdit: () => void;
   onRestart: () => void;
 }) {
-  const active = profile.criteria.filter((item) => item.active);
-  const scoreCriteria = active.filter((item) => criterionEffect(item) === "score");
-  const scoreTotal = profile.scorePlan?.declaredTotalScore
-    ?? scoreCriteria.reduce((sum, item) => sum + (item.maxScore ?? 0), 0);
-  const decisionRules = profile.decisionRules ?? deriveDecisionRules(profile.criteria, profile.scorePlan);
+  // Pasif kriter yoktur; profildeki her kriter değerlendirmede kullanılır.
+  const active = profile.criteria;
+  const requiredCount = active.filter((item) => item.required).length;
+  const stageCounts = CHECK_STAGES.map((stage) => ({ stage, count: active.filter((item) => item.stage === stage.id).length }));
 
   function downloadProfile() {
     const blob = new Blob([JSON.stringify(profile, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `${profile.setup.year}-${profile.setup.competition.replace(/\s+/g, "-").toLocaleLowerCase("tr-TR")}-profil-v1.json`;
+    anchor.download = `${profile.setup.year}-${profile.setup.competition.replace(/\s+/g, "-").toLocaleLowerCase("tr-TR")}-profil-v2.json`;
     anchor.click();
     URL.revokeObjectURL(url);
   }
@@ -1025,55 +930,63 @@ function ProfileReady({
     <section className="workspace ready-workspace" aria-labelledby="ready-title">
       <div className="ready-hero">
         <span className="approval-seal" aria-hidden="true">✓</span>
-        <span className="section-kicker">Onaylı değerlendirme profili</span>
-        <h1 id="ready-title">Kurallar artık tek ve izlenebilir bir profilde</h1>
+        <span className="section-kicker">Profil yayımlandı</span>
+        <h1 id="ready-title">Kriter seti değerlendirmeye hazır</h1>
         <p>
-          {profile.setup.competition} · {profile.setup.reportType} için kriterler yönetici tarafından doğrulandı.
-          Bu profil sonraki aşamada katılımcı raporlarını değerlendirmek için kullanılabilir.
+          {profile.setup.competition} · {profile.setup.reportType} için doğruladığınız dört aşamalı kriter seti yayımlandı ve
+          hakem değerlendirme sistemine aktarıldı. Yarışma yarışmacı portalında başvuruya açıldı; hakemler
+          katılımcı raporlarını yalnızca bu sürümlü profile göre değerlendirebilir.
         </p>
         <div className="ready-actions">
           <button type="button" className="primary-button" onClick={downloadProfile}>Profil JSON’unu indir</button>
-          <button type="button" className="secondary-button" onClick={onEdit}>Kriterleri yeniden düzenle</button>
+          <button type="button" className="secondary-button" onClick={onEdit}>Kriterleri düzenle</button>
         </div>
       </div>
 
+      {summary?.sourceLockWarning ? (
+        <div className="inline-error" role="alert">
+          <strong>Kaynak alanları değiştirilemez.</strong>
+          <span>{summary.sourceLockWarning} Kaynak yanlışsa şartnameyi yeniden analiz edin ya da kriteri silip yenisini oluşturun.</span>
+        </div>
+      ) : null}
+
+      {summary ? (
+        <p className="page-note" role="status">
+          {summary.created
+            ? `Kriter sürümü v${summary.version} yayımlandı. Hakem analizleri bu sürümü kullanır; önceki sürümler geçmiş değerlendirmeler için değişmeden saklanır.`
+            : `Kriter içeriği değişmediği için yeni sürüm açılmadı; yürürlükteki sürüm v${summary.version} olarak kaldı.`}
+        </p>
+      ) : null}
+
       <div className="profile-sheet">
         <div className="profile-sheet-header">
-          <div><span>Profil kimliği</span><strong>{profile.setup.year} / {profile.setup.stage} / v1.0</strong></div>
-          <span className="status-chip success">Onaylandı</span>
+          <div><span>Profil kimliği</span><strong>{profile.setup.year} / {profile.setup.stage} / v2.0{summary ? ` · kriter sürümü v${summary.version}` : ""}</strong></div>
+          <span className="status-chip success">Yayında</span>
         </div>
         <dl className="profile-facts">
           <div><dt>Yarışma</dt><dd>{profile.setup.competition}</dd></div>
           <div><dt>Kategori</dt><dd>{profile.setup.category}</dd></div>
           <div><dt>Rapor</dt><dd>{profile.setup.reportType}</dd></div>
+          <div><dt>Rapor dili</dt><dd>{profile.setup.reportLanguage || "Belgede belirtilmemiş"}</dd></div>
           <div><dt>Kaynak</dt><dd>{profile.sourceDocument.name}</dd></div>
         </dl>
         <div className="profile-metrics">
-          <div><strong>{active.length}</strong><span>aktif kural</span></div>
-          <div><strong>{profile.scorePlan?.groups.length ?? scoreCriteria.length}</strong><span>puan grubu</span></div>
-          <div><strong>{scoreTotal || "—"}</strong><span>PDF toplam puanı</span></div>
+          <div><strong>{active.length}</strong><span>toplam kriter</span></div>
+          <div><strong>{requiredCount}</strong><span>zorunlu</span></div>
+          <div><strong>{active.length - requiredCount}</strong><span>zorunlu olmayan</span></div>
           <div><strong>{profile.sourceDocument.pages}</strong><span>kaynak sayfa</span></div>
         </div>
-        {scoreTotal ? (
-          <div className="profile-footer-note">
-            <span>Puan gösterimi</span>
-            <p>
-              Değerlendirme orijinal sistemle, {scoreTotal} puan üzerinden yapılır; sonuç
-              (alınan puan ÷ {scoreTotal}) × 100 formülüyle 100 üzerinden raporlanır.
-            </p>
-          </div>
-        ) : null}
         <div className="profile-footer-note">
-          <span>Karar kuralları</span>
-          <p>
-            Geçiş koşulu {decisionRules.gates.length} · Baraj {decisionRules.thresholds.length} ·
-            Ceza {decisionRules.penalties.length} · Eleme {decisionRules.eliminations.length} madde
-            toplam puandan bağımsız olarak ayrıca denetlenir.
-          </p>
+          <span>Aşama dağılımı</span>
+          <p>{stageCounts.map(({ stage, count }) => `${stage.order}. ${stage.title}: ${count}`).join(" · ")}</p>
         </div>
         <div className="profile-footer-note">
-          <span>Sonraki modül</span>
-          <p>Katılımcı raporundaki kanıtları bu onaylı kriterlerle eşleştirme ve gerekçeli puan önerisi.</p>
+          <span>Sonraki adım</span>
+          <p>
+            Katılımcı raporları bu profile göre dört aşamada kontrol edilir; her kural için BAŞARILI / REVİZYON / KRİTİK HATA durumu, rapordan sayfa/paragraf alıntısı ve gerekçe üretilir. Kriter değişikliği gerekiyorsa Yarışma Yöneticisi
+            profili yeniden düzenleyip yeni sürüm olarak yayımlar.{" "}
+            <Link className="next-module-link" href="/">Yönetim paneline dön →</Link>
+          </p>
         </div>
       </div>
 
@@ -1090,37 +1003,90 @@ export default function CriteriaApp() {
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [criteria, setCriteria] = useState<Criterion[]>([]);
   const [profile, setProfile] = useState<ProfileExport | null>(null);
+  /**
+   * Kriter Geçmişi'nden açılan yayımlanmış profil (`/kriter-atolyesi?profile=<id>`).
+   * Kaynak PDF elde olmasa da kriterler düzenlenip yeniden yayımlanabilir; profil
+   * kimliği korunur, bu yüzden D1'de ikinci bir "yürürlükte" satır oluşmaz.
+   */
+  const [editedProfile, setEditedProfile] = useState<ProfileExport | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("");
   const [error, setError] = useState("");
+  const [errorRetryable, setErrorRetryable] = useState(false);
+  /** Sonuç kayıttan geldiyse (önbellek isabeti) inceleme adımında gösterilen bilgi notu. */
+  const [cacheNotice, setCacheNotice] = useState("");
+  const [approvalError, setApprovalError] = useState("");
+  const [publishing, setPublishing] = useState(false);
   const [draftReady, setDraftReady] = useState(false);
+  /** Son yayımın sürüm künyesi ve varsa kaynak kilidi uyarısı. */
+  const [publishSummary, setPublishSummary] = useState<{
+    version: number;
+    created: boolean;
+    sourceLockWarning: string;
+  } | null>(null);
 
-  const backgroundLabel = useMemo(() => `${setup.competition} · ${setup.reportType}`, [setup]);
+  const backgroundLabel = useMemo(
+    () => result || editedProfile ? `${setup.competition} · ${setup.reportType}` : "Organizatör PDF'si bekleniyor",
+    [editedProfile, result, setup],
+  );
 
   useEffect(() => {
     let active = true;
+
+    /**
+     * Geçmişten açılan profil taslaktan önceliklidir: yönetici "düzenle"ye
+     * bastığında Kriter Atölyesi doğrudan o profilin kriterleriyle açılır.
+     */
+    async function restorePublishedProfile(profileId: string): Promise<boolean> {
+      try {
+        const stored = await workflowApi.profile(profileId);
+        if (!active) return true;
+        const loaded = stored.profile.profile;
+        setEditedProfile(loaded);
+        setSetup(loaded.setup);
+        setCriteria(loaded.criteria);
+        setProfile(null);
+        setResult(null);
+        setStep(2);
+        setError("");
+        return true;
+      } catch (caught) {
+        if (!active) return true;
+        setError(caught instanceof Error ? caught.message : "Yayımlanmış profil açılamadı.");
+        setStep(1);
+        return false;
+      }
+    }
+
     async function restoreDraft() {
+      const profileId = new URLSearchParams(window.location.search).get("profile");
+      if (profileId) {
+        await restorePublishedProfile(profileId);
+        if (active) setDraftReady(true);
+        return;
+      }
       const snapshot = loadDraftSnapshot();
       const storedFile = await loadDraftFile();
+      // Eski sürümde saklanmış rapor şablonu artık kullanılmıyor; tarayıcıdan silinir.
+      clearLegacyTemplateFile().catch(() => undefined);
       if (!active) return;
       if (snapshot) {
-        const restoredCriteria = snapshot.criteria.map(applyDecisionSafetyPolicy);
-        setSetup(snapshot.setup);
+        setSetup(snapshot.result?.setup ?? snapshot.setup ?? DEFAULT_SETUP);
         setResult(snapshot.result);
-        setCriteria(restoredCriteria);
-        setProfile(snapshot.profile ? { ...snapshot.profile, criteria: snapshot.profile.criteria.map(applyDecisionSafetyPolicy) } : null);
+        setCriteria(snapshot.criteria);
+        setProfile(snapshot.profile);
       }
       if (storedFile) {
         setFile(storedFile);
         setDocumentUrl(URL.createObjectURL(storedFile));
       }
-      if (snapshot) {
-        const safeStep = snapshot.step === 4 && !snapshot.profile
-          ? 3
-          : snapshot.step === 3 && (!snapshot.result || !storedFile)
-            ? 2
-            : snapshot.step;
-        setStep(safeStep);
+      // Kaynak PDF tarayıcı deposundan geri gelmediyse inceleme/yayın adımı
+      // açılamaz; taslak korunur, belge yeniden seçilince analiz tekrar edilir.
+      if (snapshot && !storedFile) {
+        setStep(1);
+        setError("Taslak bulundu ancak kaynak PDF tarayıcı deposunda yok. Aynı belgeyi yeniden seçip analiz edin.");
+      } else {
+        setStep(snapshot ? (snapshot.profile ? 3 : snapshot.result ? 2 : 1) : 1);
       }
       setDraftReady(true);
     }
@@ -1129,17 +1095,19 @@ export default function CriteriaApp() {
   }, []);
 
   useEffect(() => {
-    if (!draftReady) return;
+    // Geçmişten açılan yayımlanmış profil yerel taslağın üstüne yazılmaz.
+    if (!draftReady || editedProfile) return;
     saveDraftSnapshot({ step, setup, result, criteria, profile });
-  }, [criteria, draftReady, profile, result, setup, step]);
+  }, [criteria, draftReady, editedProfile, profile, result, setup, step]);
 
   useEffect(() => {
-    if (!draftReady) return;
+    if (!draftReady || editedProfile) return;
     saveDraftFile(file).catch(() => undefined);
-  }, [draftReady, file]);
+  }, [draftReady, editedProfile, file]);
 
   function chooseFile(nextFile: File) {
     setError("");
+    setErrorRetryable(false);
     if (nextFile.type !== "application/pdf" && !nextFile.name.toLocaleLowerCase("tr-TR").endsWith(".pdf")) {
       setError("Kaynak değerlendirme belgesi PDF olmalıdır. Lütfen PDF biçiminde bir belge seçin.");
       return;
@@ -1154,59 +1122,140 @@ export default function CriteriaApp() {
     setResult(null);
     setCriteria([]);
     setProfile(null);
+    setEditedProfile(null);
+    setCacheNotice("");
   }
 
-  async function analyze() {
-    if (!file) return;
+  async function analyze(forceRefresh = false) {
+    if (!file || loading) return;
+    // Yeniden analizde kayıtlı sonuca dönülmez; model gerçekten yeniden çalışır.
+    if (!forceRefresh && result && criteria.length) {
+      setStep(2);
+      return;
+    }
     setLoading(true);
     setError("");
+    setErrorRetryable(false);
     try {
       setLoadingMessage("PDF sayfa yapısı doğrulanıyor…");
       const pageCount = await getPdfPageCount(file);
-      setLoadingMessage("PDF, yapısı korunarak AI modele aktarılıyor…");
-      const analysis = await analyzeWithGemini(file, setup, pageCount);
-      setLoadingMessage("Kaynak sayfaları ve güven açıklamaları eşleştiriliyor…");
+      setLoadingMessage(forceRefresh
+        ? "Kayıtlı sonuç atlanıyor; belge baştan analiz ediliyor…"
+        : "Belgenin tamamı tek AI çağrısıyla dört aşamaya göre okunuyor…");
+      // Sunucu tek `generateContent` isteği yapar; burada da yeniden deneme yoktur.
+      const analysis = await analyzeWithGemini(file, pageCount, forceRefresh);
+      setLoadingMessage("Kriterler kaynak sayfalarıyla eşleştiriliyor…");
       if (!analysis.criteria.length) {
-        throw new Error("Belgede güvenilir bir değerlendirme kriteri bulunamadı.");
+        throw new Error("Belgede PDF aşamasında kontrol edilebilecek bir kriter bulunamadı.");
       }
       setResult(analysis);
-      setCriteria(analysis.criteria.map(applyDecisionSafetyPolicy));
-      setStep(3);
+      setSetup(analysis.setup);
+      setCriteria(analysis.criteria);
+      setEditedProfile(null);
+      // Önbellek isabetinde model hiç çağrılmaz; yönetici bunu açıkça görür.
+      if (analysis.diagnostics?.cached) {
+        let firstAnalyzed = "";
+        if (analysis.diagnostics.firstAnalyzedAt) {
+          const parsed = new Date(analysis.diagnostics.firstAnalyzedAt);
+          if (!Number.isNaN(parsed.getTime())) {
+            firstAnalyzed = parsed.toLocaleString("tr-TR", { dateStyle: "long", timeStyle: "short" });
+          }
+        }
+        setCacheNotice(
+          `Bu şartname daha önce analiz edilmişti${firstAnalyzed ? ` (ilk analiz: ${firstAnalyzed})` : ""}. `
+          + "Kayıtlı sonuç gösterildi; yapay zekâ yeniden çalıştırılmadı ve token harcanmadı.",
+        );
+      } else {
+        setCacheNotice("");
+      }
+      setStep(2);
     } catch (analysisError) {
+      // Geçici model hatasında kullanıcıya "Yeniden dene" sunulur; sistem
+      // kendiliğinden ikinci bir çağrı yapmaz.
+      const retryable = analysisError instanceof AnalysisRequestError && analysisError.retryable;
       const message = analysisError instanceof Error ? analysisError.message : "Bilinmeyen bir hata oluştu.";
-      setError(`${message} API bağlantısını, kotayı veya kaynak belgenin geçerliliğini kontrol edin.`);
+      setErrorRetryable(retryable);
+      setError(retryable ? message : `${message} API bağlantısını, kotayı veya kaynak belgenin geçerliliğini kontrol edin.`);
     } finally {
       setLoading(false);
     }
   }
 
-  function approve() {
-    if (!file || !result) return;
-    const declaredTotal = result.scorePlan?.declaredTotalScore ?? null;
+  /**
+   * Bu proje daha önce KAYDEDİLDİ mi?
+   *   editedProfile  Kriter Geçmişi'nden açılmış, veri tabanında duran profil.
+   *   profile        Bu oturumda yayımlanmış ve geri dönülüp düzenlenen profil.
+   * İkisinden biri varsa ana eylem "Değişiklikleri Kaydet" olur ve yapay zekâ
+   * yeniden çalıştırılmaz.
+   */
+  const savedBefore = Boolean(editedProfile ?? profile);
+
+  /**
+   * Kaynak şartnamenin açılacağı adres.
+   *
+   * Bu oturumda dosya elde ise nesne URL'i (anında açılır); değilse profil
+   * yayımlanırken R2'ye yazılmış kopya. Eski profillerde kopya yoktur ve
+   * bağlantı gösterilmez.
+   */
+  const sourceDocumentUrl = useMemo(() => {
+    if (documentUrl) return documentUrl;
+    const stored = editedProfile ?? profile;
+    return stored?.profileId && stored.sourceDocument.fileKey
+      ? workflowApi.profileFileUrl(stored.profileId)
+      : "";
+  }, [documentUrl, editedProfile, profile]);
+
+  /** İnceleme adımının kaynak künyesi: taze analiz ya da geçmişten açılan profil. */
+  const source = result && file
+    ? { name: file.name, pages: result.pageCount, analyzedAt: result.analyzedAt, warnings: result.analysisWarnings }
+    : editedProfile
+      ? {
+        name: editedProfile.sourceDocument.name,
+        pages: editedProfile.sourceDocument.pages,
+        analyzedAt: editedProfile.sourceDocument.analyzedAt,
+        warnings: [] as string[],
+      }
+      : null;
+
+  async function approve() {
+    if (!source || publishing) return;
+    setApprovalError("");
+    setPublishing(true);
     const nextProfile: ProfileExport = {
-      version: "1.0",
+      version: "2.0",
       status: "approved",
+      // Aynı taslak veya yayımlanmış profil yeniden yayımlanıyorsa mevcut profil
+      // kimliği korunur; D1'de ikinci bir "yürürlükte" satır oluşmaz ve eski
+      // başvurular aynı profile bağlı kalır. Sunucu ayrıca `created_by`
+      // sahipliğini doğrular: başka bir yöneticinin profili güncellenemez.
+      profileId: profile?.profileId ?? editedProfile?.profileId
+        ?? `profil-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       setup,
-      sourceDocument: {
-        name: file.name,
-        pages: result.pageCount,
-        analyzedAt: result.analyzedAt,
-      },
-      criteria,
-      skippedChecks: result.skippedChecks,
-      scorePlan: result.scorePlan,
-      normalization: {
-        declaredTotal,
-        normalizedTo: 100,
-        formula: declaredTotal
-          ? `(alınan puan / ${declaredTotal}) × 100`
-          : "Belgede genel toplam ilan edilmediği için normalizasyon uygulanmaz.",
-      },
-      decisionRules: deriveDecisionRules(criteria, result.scorePlan),
+      sourceDocument: { name: source.name, pages: source.pages, analyzedAt: source.analyzedAt },
+      templateProfile: result?.templateProfile ?? editedProfile?.templateProfile,
+      // Pasif kriter yayımlanmaz: listedeki her kriter etkin olarak kaydedilir.
+      criteria: criteria.map((item) => ({ ...item, active: true })),
     };
-    localStorage.setItem("kriter-atolyesi:last-profile", JSON.stringify(nextProfile));
-    setProfile(nextProfile);
-    setStep(4);
+    try {
+      // Kaynak şartname elde ise sunucuya da yazılır; kaynak sayfa bağlantısı
+      // profil geçmişten açıldığında ancak bu kopya sayesinde çalışır.
+      const published = await workflowApi.submitProfileForReview(nextProfile, file);
+      localStorage.setItem("kriter-atolyesi:last-profile", JSON.stringify(published.profile.profile));
+      setProfile(published.profile.profile);
+      setPublishSummary({
+        version: published.criteriaVersion?.criteriaVersion ?? 0,
+        created: published.versionCreated === true,
+        // Sunucu kaynak sayfa/alıntı değişikliğini geri aldıysa yönetici bunu görmeli:
+        // alanlar salt okunurdur ve elle düzeltilemez (madde 12).
+        sourceLockWarning: published.sourceLockWarning ?? "",
+      });
+      setEditedProfile(null);
+      setStep(3);
+    } catch (caught) {
+      setApprovalError(caught instanceof Error ? caught.message : "Profil yayımlanamadı. Bağlantıyı kontrol edip yeniden deneyin.");
+    } finally {
+      setPublishing(false);
+    }
   }
 
   function restart() {
@@ -1218,25 +1267,33 @@ export default function CriteriaApp() {
     setResult(null);
     setCriteria([]);
     setProfile(null);
+    setEditedProfile(null);
     setError("");
+    setErrorRetryable(false);
+    setCacheNotice("");
+    setApprovalError("");
+    setPublishSummary(null);
     clearDraftSnapshot();
     saveDraftFile(null).catch(() => undefined);
+    // Geçmiş profil düzenleme adresinden çıkılır; yenilemede taslak geri gelmesin.
+    if (new URLSearchParams(window.location.search).has("profile")) {
+      window.history.replaceState(null, "", "/kriter-atolyesi");
+    }
   }
 
   const completedSteps = useMemo(() => {
     const completed = new Set<Step>();
-    if (step > 1 || file) completed.add(1);
-    if (result && file) {
+    if ((result && file) || editedProfile) completed.add(1);
+    if (profile) {
       completed.add(2);
       completed.add(3);
     }
-    if (profile) completed.add(4);
     return completed;
-  }, [file, profile, result, step]);
+  }, [editedProfile, file, profile, result]);
 
   function navigate(nextStep: Step) {
-    if (nextStep === 3 && (!result || !file)) return;
-    if (nextStep === 4 && !profile) return;
+    if (nextStep === 2 && !source) return;
+    if (nextStep === 3 && !profile) return;
     setStep(nextStep);
   }
 
@@ -1244,57 +1301,48 @@ export default function CriteriaApp() {
     <main className="app-shell">
       {/*
         THESIS: Kaynak belge ile onaylı kural arasındaki zinciri tek çalışma masasında görünür kılar; genel dashboard düzenini reddeder.
-        OWN-WORLD: Soğuk beyaz kâğıt yüzey, lacivert mürekkep, turkuaz kanıt bağlantıları, kehribar belirsizlik ve sıkı belge satırları.
-        STORY: Yönetici çerçeveyi kurar, resmî PDF'yi yükler, AI çıkarımlarını kaynaklarıyla düzeltir ve sürümlü profili onaylar.
-        FIRST VIEWPORT: Solda dört adımlı sabit süreç izi; ortada tek aktif görev ve sağda yalnızca o göreve ait özet/kanıt yüzeyi.
+        OWN-WORLD: Soğuk beyaz kâğıt yüzey, lacivert mürekkep, turkuaz kanıt bağlantıları ve sıkı belge satırları.
+        STORY: Yönetici resmî PDF'yi yükler, dört aşamaya ayrılmış kuralları kaynaklarıyla düzeltir ve sürümlü profili yayımlar.
+        FIRST VIEWPORT: Solda üç adımlı sabit süreç izi; ortada yalnızca kriter listesi ve seçili kriterin kanıt/düzenleme paneli.
         FORM: Operasyonel inceleme masası; belge defteri ve karar tutanağı biçimlerinin birleşimi.
       */}
       <StepRail step={step} completedSteps={completedSteps} onNavigate={navigate} />
       <div className="app-main">
-        <Topbar step={step} />
+        <Topbar step={step} onBack={() => { if (step > 1) setStep((step - 1) as Step); else window.location.href = "/"; }} />
         <div className="context-line" aria-hidden="true">{backgroundLabel}</div>
         {step === 1 ? (
-          <SetupStep
-            setup={setup}
-            onChange={setSetup}
-            onContinue={() => setStep(2)}
-            file={file}
-            result={result}
-            criteria={criteria}
-          />
-        ) : null}
-        {step === 2 ? (
           <UploadStep
-            setup={setup}
-            result={result}
-            criteria={criteria}
             file={file}
             onFile={chooseFile}
-            onSample={(sampleFile, sampleSetup) => {
-              setSetup((current) => ({ ...current, ...sampleSetup }));
-              chooseFile(sampleFile);
-            }}
-            onBack={() => setStep(1)}
-            onAnalyze={analyze}
+            onSample={(sampleFile) => chooseFile(sampleFile)}
+            onAnalyze={() => analyze(false)}
+            onReanalyze={() => analyze(true)}
+            analysisReady={Boolean(result && criteria.length)}
             loading={loading}
             loadingMessage={loadingMessage}
             error={error}
+            errorRetryable={errorRetryable}
           />
         ) : null}
-        {step === 3 && result && file ? (
+        {step === 2 && source ? (
           <CriteriaReview
             setup={setup}
-            setSetup={setSetup}
-            file={file}
-            documentUrl={documentUrl}
-            result={result}
+            sourceName={source.name}
+            pageCount={source.pages || 1}
+            analysisWarnings={source.warnings}
+            documentUrl={sourceDocumentUrl}
+            editingPublished={savedBefore}
+            cacheNotice={cacheNotice}
             criteria={criteria}
             setCriteria={setCriteria}
-            onBack={() => setStep(2)}
+            onBack={() => setStep(1)}
             onApprove={approve}
+            onReanalyze={file ? () => analyze(true) : null}
+            publishing={publishing}
+            approvalError={approvalError}
           />
         ) : null}
-        {step === 4 && profile ? <ProfileReady profile={profile} onEdit={() => setStep(3)} onRestart={restart} /> : null}
+        {step === 3 && profile ? <ProfileReady profile={profile} summary={publishSummary} onEdit={() => navigate(2)} onRestart={restart} /> : null}
       </div>
     </main>
   );

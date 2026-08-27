@@ -1,0 +1,35 @@
+{
+  "_schema": "AI-Gambit benchmark ground-truth v2 (dört aşamalı, puansız)",
+  "_nasilDoldurulur": [
+    "Bu dosya RESMÎ ŞARTNAMEDEN ELLE doldurulur. Model çıktısından (docs/corpus/ida-analiz.json gibi) kopyalanmaz;",
+    "AI çıktısını AI çıktısıyla doğrulamak dairesel test olur ve hiçbir hatayı yakalamaz.",
+    "Yalnızca yarışmacı RAPORUNDA (PDF aşamasında) kontrol edilebilen kurallar requiredFindings'e yazılır.",
+    "Puan tabloları, ağırlıklar, baraj ve ceza puanları, parkur/saha görevleri kriter DEĞİLDİR; bunlar forbiddenFindings'e yazılır.",
+    "Her madde için keywords alanına o maddeyi metinde tekilleştiren 2-3 kelime girin (küçük harf, Türkçe karakterli yazılabilir);",
+    "stage alanına dört aşamadan birini (veya kabul edilen aşamalar dizisini), required alanına belge zorunlu kılıyorsa true yazın;",
+    "sourcePage alanına şartnamedeki 1 tabanlı PDF sayfa sırasını yazın (bilgi amaçlı).",
+    "Doldurulmamış diziler benchmark tarafından ATLANIR; uydurma değer girmeyin.",
+    "Doldurduktan sonra (sunucu çalışırken): node tools/run_celikkubbe_benchmark.mjs --benchmark ida"
+  ],
+  "competition": "İnsansız Deniz Aracı Yarışması",
+  "document": "2026_Insansiz_Deniz_Araci_Sartnamesi.pdf",
+  "pageCount": 29,
+  "category": "",
+  "stage": "",
+  "reportType": "",
+  "minCriteria": null,
+
+  "_requiredFindingsAciklama": "Rapor aşamasında kontrol edilecek kurallar: dil/şablon (sayfa sınırı, biçim), zorunlu başlıklar, kategori/özgünlük koşulları ve raporda kanıtlanması gereken teknik kurallar.",
+  "requiredFindings": [],
+  "_requiredFindingOrnek": {
+    "name": "",
+    "keywords": [],
+    "stage": "language_template | headings_content | category_similarity | criteria_evidence",
+    "required": true,
+    "sourcePage": null
+  },
+
+  "_forbiddenFindingsAciklama": "Şartnamede BULUNMAYAN ya da fiziksel aşamaya ait (puan, baraj, ceza, parkur, saha) ifadeler. Sonuçta görülürse hata sayılır. fields: [\"name\"] yalnızca kriter adına bakar.",
+  "forbiddenFindings": [],
+  "_forbiddenFindingOrnek": { "name": "", "keywords": [], "fields": ["name"] }
+}
