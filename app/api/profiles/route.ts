@@ -70,11 +70,29 @@ export async function POST(request: Request): Promise<Response> {
     const { profile: candidate, sourceFile } = await readPublishRequest(request);
     const validated = validateProfileExport(candidate);
     if (!validated.profile) return jsonError(400, validated.error);
-    // SAHİPLİK: `profileId` istemciden gelir. Başka bir yöneticinin profilini
-    // güncelleme denemesi 403 ile reddedilir (kontrol workflow-db içindedir;
-    // arayüzde düğme gizlemek yetmez).
-    // Şartname PDF'i verildiyse R2'ye yazılır; anahtarı profile işlenir.
     let profileExport: ProfileExport = validated.profile;
+    // Sahiplik R2 yazımından ÖNCE doğrulanır. Yeni profil kimliğini istemci
+    // belirleyemez; sunucu üretir. Mevcut fileKey de istemciden güvenilmez,
+    // veritabanındaki doğrulanmış profilden alınır.
+    const requestedId = profileExport.profileId;
+    const existing = requestedId ? await findProfile(requestedId) : null;
+    if (existing && existing.createdBy !== auth.account.id) {
+      return jsonError(403, "Bu kriter profilini yalnızca onu hazırlayan Yarışma Yöneticisi güncelleyebilir.");
+    }
+    const profileId = existing?.id ?? crypto.randomUUID();
+    profileExport = {
+      ...profileExport,
+      profileId,
+      sourceDocument: {
+        ...profileExport.sourceDocument,
+        ...(existing?.profile.sourceDocument.fileKey
+          ? { fileKey: existing.profile.sourceDocument.fileKey }
+          : { fileKey: undefined }),
+      },
+    };
+
+    // Şartname PDF'i verildiyse yeni ve sürümlü bir anahtara yazılır. D1
+    // yayımı kesinleşmeden eski nesne silinmez veya üzerine yazılmaz.
     if (sourceFile) {
       if (sourceFile.size > MAX_SOURCE_BYTES) return jsonError(413, "Şartname PDF'i en fazla 18 MB olabilir.");
       if (!sourceFile.name.toLocaleLowerCase("tr-TR").endsWith(".pdf")) {
@@ -83,10 +101,7 @@ export async function POST(request: Request): Promise<Response> {
       const bytes = await sourceFile.arrayBuffer();
       const integrityError = pdfIntegrityError(bytes);
       if (integrityError) return jsonError(422, `Şartname PDF'i okunamıyor: ${integrityError}`);
-      // Anahtar profil kimliğine bağlanır: aynı profil yeniden yayımlanınca
-      // bağlantı değişmez ve eski nesne üzerine yazılır.
-      const profileId = profileExport.profileId ?? crypto.randomUUID();
-      uploadedKey = `profiles/${profileId}/${safeFileName(sourceFile.name)}`;
+      uploadedKey = `profiles/${profileId}/${crypto.randomUUID()}-${safeFileName(sourceFile.name)}`;
       await reportBucket().put(uploadedKey, sourceFile, {
         httpMetadata: { contentType: "application/pdf" },
         customMetadata: { profileId, createdBy: auth.account.id },
@@ -103,6 +118,7 @@ export async function POST(request: Request): Promise<Response> {
         throw caught;
       });
     if (published === "forbidden") {
+      if (uploadedKey) { try { await reportBucket().delete(uploadedKey); } catch { /* Asıl hata korunur. */ } }
       return jsonError(403, "Bu kriter profilini yalnızca onu hazırlayan Yarışma Yöneticisi güncelleyebilir.");
     }
     const { profile, criteriaVersion, versionCreated, sourceLockReverted } = published;

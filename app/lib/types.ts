@@ -129,6 +129,35 @@ export function isRuleVerdict(value: unknown): value is RuleVerdict {
 
 export type CriterionOrigin = "document" | "manager";
 
+/** Kriterin katılımcı PDF'inde hangi yöntemle aranacağını açıkça belirtir. */
+export type CriterionControlType =
+  | "BIREBIR_BASLIK"
+  | "ICERIK_VARLIGI"
+  | "ANLAMSAL_UYGUNLUK"
+  | "KANIT_KONTROLU";
+
+export const CRITERION_CONTROL_TYPES: readonly CriterionControlType[] = [
+  "BIREBIR_BASLIK",
+  "ICERIK_VARLIGI",
+  "ANLAMSAL_UYGUNLUK",
+  "KANIT_KONTROLU",
+];
+
+export function isCriterionControlType(value: unknown): value is CriterionControlType {
+  return typeof value === "string" && (CRITERION_CONTROL_TYPES as readonly string[]).includes(value);
+}
+
+export function criterionControlTypesForStage(stage: CheckStage): readonly CriterionControlType[] {
+  if (stage === "headings_content") return ["BIREBIR_BASLIK", "ICERIK_VARLIGI", "ANLAMSAL_UYGUNLUK"];
+  if (stage === "category_similarity") return ["ANLAMSAL_UYGUNLUK"];
+  if (stage === "criteria_evidence") return ["KANIT_KONTROLU"];
+  return ["BIREBIR_BASLIK", "ICERIK_VARLIGI", "KANIT_KONTROLU"];
+}
+
+export function isControlTypeCompatible(stage: CheckStage, value: unknown): value is CriterionControlType {
+  return isCriterionControlType(value) && criterionControlTypesForStage(stage).includes(value);
+}
+
 /* ------------------------------------------------------------------------- *
  * Kriterin PDF'den denetlenebilirliği
  *
@@ -190,8 +219,14 @@ export type Criterion = {
   required: boolean;
   /** Kuralın tek anlamlı açıklaması: koşul, raporda ne aranacağı ve sonucu. */
   description: string;
-  /** Belgede yazan ihlal sonucu; yoksa "Belgede belirtilmemiş". */
-  violationOutcome: string;
+  /** Yeni akışta kullanılmaz; yalnızca eski profilleri okuyabilmek için korunur. */
+  violationOutcome?: string;
+  /** Belgeden çıkarılan kriterin doğrulanmış yapısal kaynak kimliği. */
+  sourceId?: string | null;
+  /** Aynı kural birden fazla yerde geçiyorsa doğrulanmış bütün kaynak kimlikleri. */
+  sourceIds?: string[];
+  /** Başlık, içerik veya teknik kanıtın nasıl denetleneceği. */
+  controlType?: CriterionControlType;
   /** PDF dosyasındaki 1 tabanlı sayfa sırası; belgede dayanağı yoksa null. */
   sourcePage: number | null;
   /** Kaynak sayfadan özgün dilde birebir kısa alıntı. */
@@ -226,12 +261,25 @@ export type AnalysisDiagnostics = {
   apiCalls?: number;
   /** PDF baytlarının ağ üzerinden kaç kez taşındığı. */
   documentTransfers?: number;
-  /** Belge referansla mı gönderildi (Files API) yoksa satır içi mi? */
-  documentDelivery?: "file_uri" | "inline";
+  /** Modele PDF değil, sunucuda ayrıştırılmış aday metinleri gönderilir. */
+  documentDelivery?: "file_uri" | "inline" | "structured_text";
   /** Önbellek isabetinin kaynağı: süreç belleği ya da D1'deki kalıcı kayıt. */
   cacheStore?: "memory" | "database";
   /** Önbellekten dönen sonucun İLK analiz zamanı; taze analizde bulunmaz. */
   firstAnalyzedAt?: string;
+  /** Deterministik şartname taramasının açıklanabilir kapsam değerleri. */
+  structureVersion?: string;
+  dictionaryVersion?: string;
+  selectorVersion?: string;
+  totalBlocks?: number;
+  selectedBlocks?: number;
+  unselectedBlocks?: number;
+  classifiedCriteria?: number;
+  excludedCandidates?: number;
+  rejectedSources?: number;
+  duplicateCriteria?: number;
+  /** Tam kaynak/aday izi R2'de saklandıysa denetim nesnesinin anahtarı. */
+  coverageArtifactKey?: string;
 };
 
 /**

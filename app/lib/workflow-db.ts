@@ -754,7 +754,7 @@ export async function criteriaHash(criteria: Criterion[]): Promise<string> {
   const canonical = criteria
     .map((item) => [
       item.id, item.name, item.stage, item.required ? "1" : "0",
-      item.description, item.violationOutcome,
+      item.description, item.controlType ?? "", item.sourceId ?? "", (item.sourceIds ?? []).join(","),
       item.sourcePage === null ? "" : String(item.sourcePage),
       item.sourceText, item.verifiability, item.active ? "1" : "0", item.origin,
     ].join("␟"))
@@ -827,7 +827,13 @@ export async function listCriteriaVersions(profileId: string): Promise<CriteriaV
   return (result.results ?? []).map(toCriteriaVersion);
 }
 
-type SourceLock = { sourcePage: number | null; sourceText: string; origin: Criterion["origin"] };
+type SourceLock = {
+  sourcePage: number | null;
+  sourceText: string;
+  sourceId: string | null;
+  sourceIds: string[];
+  origin: Criterion["origin"];
+};
 
 /**
  * Kaynak sayfa / kaynak alıntı kilidi (madde 12).
@@ -852,6 +858,8 @@ async function sourceLockFor(profileId: string): Promise<Map<string, SourceLock>
       lock.set(item.id, {
         sourcePage: typeof item.sourcePage === "number" ? item.sourcePage : null,
         sourceText: typeof item.sourceText === "string" ? item.sourceText : "",
+        sourceId: typeof item.sourceId === "string" ? item.sourceId : null,
+        sourceIds: Array.isArray(item.sourceIds) ? item.sourceIds.filter((value): value is string => typeof value === "string") : [],
         origin: item.origin === "manager" ? "manager" : "document",
       });
     }
@@ -870,10 +878,19 @@ export function applySourceLock(
     if (!locked) return item;
     const changed = (item.sourcePage ?? null) !== locked.sourcePage
       || (item.sourceText ?? "") !== locked.sourceText
+      || (item.sourceId ?? null) !== locked.sourceId
+      || JSON.stringify(item.sourceIds ?? []) !== JSON.stringify(locked.sourceIds)
       || item.origin !== locked.origin;
     if (!changed) return item;
     reverted.push(item.name);
-    return { ...item, sourcePage: locked.sourcePage, sourceText: locked.sourceText, origin: locked.origin };
+    return {
+      ...item,
+      sourcePage: locked.sourcePage,
+      sourceText: locked.sourceText,
+      sourceId: locked.sourceId,
+      sourceIds: locked.sourceIds,
+      origin: locked.origin,
+    };
   });
   return { criteria: next, reverted };
 }

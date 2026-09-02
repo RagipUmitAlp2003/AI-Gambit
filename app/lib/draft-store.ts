@@ -2,14 +2,16 @@ import type { AnalysisResult, Criterion, ProfileExport, SetupData, Step } from "
 
 // v2: dört aşamalı, puansız kriter modeli. Eski v1 taslakları okunmaz;
 // kaynak PDF IndexedDB'de korunur ve belge yeni prensiple yeniden analiz edilir.
-const SNAPSHOT_KEY = "kriter-atolyesi:draft-v2";
+const SNAPSHOT_KEY_PREFIX = "kriter-atolyesi:draft-v3:";
+const PREVIOUS_SNAPSHOT_KEY = "kriter-atolyesi:draft-v2";
 const LEGACY_SNAPSHOT_KEYS = ["kriter-atolyesi:draft-v1"];
 const DB_NAME = "kriter-atolyesi";
 const DB_VERSION = 3;
 const STORE_NAME = "draft-files";
 export const LIBRARY_STORE_NAME = "library-documents";
 export const REPORT_POOL_STORE_NAME = "report-pool";
-const FILE_KEY = "source-document";
+const FILE_KEY_PREFIX = "source-document:";
+const PREVIOUS_FILE_KEY = "source-document";
 const TEMPLATE_FILE_KEY = "report-template";
 
 export type DraftSnapshot = {
@@ -20,10 +22,30 @@ export type DraftSnapshot = {
   profile: ProfileExport | null;
 };
 
-export function loadDraftSnapshot(): DraftSnapshot | null {
+function safeScope(scope: string): string {
+  return encodeURIComponent(scope.trim() || "workspace").slice(0, 240);
+}
+
+function snapshotKey(scope: string): string {
+  return `${SNAPSHOT_KEY_PREFIX}${safeScope(scope)}`;
+}
+
+function fileKey(scope: string): string {
+  return `${FILE_KEY_PREFIX}${safeScope(scope)}`;
+}
+
+export function loadDraftSnapshot(scope = "workspace"): DraftSnapshot | null {
   try {
     for (const key of LEGACY_SNAPSHOT_KEYS) localStorage.removeItem(key);
-    const stored = localStorage.getItem(SNAPSHOT_KEY);
+    const scopedKey = snapshotKey(scope);
+    let stored = localStorage.getItem(scopedKey);
+    if (!stored && scope === "workspace") {
+      stored = localStorage.getItem(PREVIOUS_SNAPSHOT_KEY);
+      if (stored) {
+        localStorage.setItem(scopedKey, stored);
+        localStorage.removeItem(PREVIOUS_SNAPSHOT_KEY);
+      }
+    }
     if (!stored) return null;
     const snapshot = JSON.parse(stored) as DraftSnapshot;
     // Yalnızca dört aşamalı modelde üretilmiş kriterler geri yüklenir.
@@ -35,9 +57,9 @@ export function loadDraftSnapshot(): DraftSnapshot | null {
   }
 }
 
-export function saveDraftSnapshot(snapshot: DraftSnapshot) {
+export function saveDraftSnapshot(snapshot: DraftSnapshot, scope = "workspace") {
   try {
-    localStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot));
+    localStorage.setItem(snapshotKey(scope), JSON.stringify(snapshot));
     return true;
   } catch {
     // Depolama kapalı/dolu olduğunda React efektini düşürme. Kaynak PDF ayrıca
@@ -46,8 +68,8 @@ export function saveDraftSnapshot(snapshot: DraftSnapshot) {
   }
 }
 
-export function clearDraftSnapshot() {
-  localStorage.removeItem(SNAPSHOT_KEY);
+export function clearDraftSnapshot(scope = "workspace") {
+  localStorage.removeItem(snapshotKey(scope));
 }
 
 export function openDraftDatabase(): Promise<IDBDatabase> {
@@ -73,8 +95,15 @@ export function openDraftDatabase(): Promise<IDBDatabase> {
   });
 }
 
-export async function loadDraftFile(): Promise<File | null> {
-  return loadStoredDraftFile(FILE_KEY);
+export async function loadDraftFile(scope = "workspace"): Promise<File | null> {
+  const scoped = await loadStoredDraftFile(fileKey(scope));
+  if (scoped || scope !== "workspace") return scoped;
+  const previous = await loadStoredDraftFile(PREVIOUS_FILE_KEY);
+  if (previous) {
+    await saveStoredDraftFile(fileKey(scope), previous);
+    await saveStoredDraftFile(PREVIOUS_FILE_KEY, null);
+  }
+  return previous;
 }
 
 async function loadStoredDraftFile(key: string): Promise<File | null> {
@@ -92,8 +121,8 @@ async function loadStoredDraftFile(key: string): Promise<File | null> {
   }
 }
 
-export async function saveDraftFile(file: File | null) {
-  return saveStoredDraftFile(FILE_KEY, file);
+export async function saveDraftFile(file: File | null, scope = "workspace") {
+  return saveStoredDraftFile(fileKey(scope), file);
 }
 
 /**

@@ -1,4 +1,3 @@
-import { Buffer } from "node:buffer";
 import { requirePermission } from "../../lib/admin-guard";
 import { acquireAnalysisPermit, requestBodyTooLarge } from "../../lib/request-guard";
 import {
@@ -9,20 +8,22 @@ import {
   normalizeExtraction,
   type RawExtraction,
 } from "../../lib/criteria-extraction";
-import { MEDIA_RESOLUTION, describeGeminiFailure, mediaResolutionPart, runSingleGeneration } from "../../lib/gemini-generation";
+import { describeGeminiFailure, runSingleGeneration } from "../../lib/gemini-generation";
 import { recordUsage } from "../../lib/usage-metrics";
 import { pdfIntegrityError } from "../../lib/pdf-integrity";
-import { sourcePageLimit } from "../../lib/pdf-page-count";
-import { deleteStoredAnalysis, findStoredAnalysis, saveCriteriaExtractionRun, saveStoredAnalysis, touchStoredAnalysis } from "../../lib/workflow-db";
+import { CANDIDATE_SELECTOR_VERSION, formatCandidatesForLlm, selectCriteriaCandidates, type CandidateSelection } from "../../lib/criteria-candidates";
+import { DICTIONARY_VERSION } from "../../lib/criteria-dictionary";
+import { extractPdfStructure, PDF_STRUCTURE_VERSION, PdfTextLayerError, type StructuredPdf } from "../../lib/pdf-structure";
+import { deleteStoredAnalysis, findStoredAnalysis, reportBucket, saveCriteriaExtractionRun, saveStoredAnalysis, touchStoredAnalysis } from "../../lib/workflow-db";
 import type { AnalysisDiagnostics, AnalysisResult } from "../../lib/types";
 
 /**
  * Şartname analizi ucu — dört aşamalı prensip, TEK LLM çağrısı.
  *
  * Yarışma Yöneticisi YALNIZCA şartname PDF'sini yükler; ayrı bir resmî rapor
- * şablonu alanı yoktur. PDF'nin tamamı bir kez modele verilir; model dört
- * aşamaya ayrılmış kriterleri (dil/şablon, başlık/içerik, kategori, teknik
- * kural) kaynak sayfası ve birebir alıntıyla döndürür.
+ * şablonu alanı yoktur. PDF sunucuda yapısal bloklara ayrılır; sürümlü sözlük
+ * ve deterministik sinyaller güçlü adayları seçer. Modele PDF değil, yalnızca
+ * kaynak kimlikli aday metinleri tek çağrıda verilir.
  *
  * TEK ÇAĞRI: bir "Belgeyi analiz et" işlemi için modele tam olarak bir
  * `generateContent` isteği gider. Yedek model kademesi, model taraması ve gizli
@@ -39,12 +40,9 @@ const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
 
 const CACHE_LIMIT = 12;
 const MAX_PDF_BYTES = 18 * 1024 * 1024;
-// Küçük PDF'ler satır içi gönderilir; büyük belgeler bir kez Files API'ye
-// yüklenip URI ile verilir ki gövde gereksiz büyümesin.
-const INLINE_PDF_FAST_PATH_BYTES = 512 * 1024;
 // Multipart sınırına dosya dışında başlıklar için küçük pay eklenir.
 const MAX_MULTIPART_BYTES = MAX_PDF_BYTES + 768 * 1024;
-// Tek çağrı bütün belgeyi kapsadığı için uzun belgelerde geniş zaman tanınır.
+// Tek çağrı bütün güçlü adayları kapsadığı için uzun belgelerde geniş zaman tanınır.
 const GENERATION_TIMEOUT_MS = 150_000;
 
 /**
@@ -58,14 +56,8 @@ const MAX_OUTPUT_TOKENS = 24_576;
 /**
  * Modelin "düşünme" bütçesi — analiz süresinin en büyük belirleyicisi.
  *
- * Çelikkubbe şartnamesi (25 sayfa · 1,75 MB) üzerinde ölçüm:
- *   LOW    47,6 sn · 13 kriter · 13/13 kaynak sayfa dolu
- *   MEDIUM 73,6 sn · 16 kriter · 16/16 kaynak sayfa dolu
- *
- * Orta boy şartnamelerde LOW, hedeflenen 13 maddelik derinliği kaynak
- * sayfalarıyla birlikte yakalıyor ve süreyi üçte bir kısaltıyor. Uzun
- * belgelerde model bağlamı bir arada tutmak için bütçeye ihtiyaç duyduğundan
- * kademe yükselir. `GEMINI_THINKING_LEVEL` ile elle sabitlenebilir.
+ * Aday sayısı arttıkça bağlamı tutmak zorlaştığı için uzun belgelerde kademe
+ * yükselir. `GEMINI_THINKING_LEVEL` ile elle sabitlenebilir.
  */
 const THINKING_OVERRIDE = (process.env.GEMINI_THINKING_LEVEL || "").toUpperCase();
 function thinkingLevelFor(pageCount: number): string {
@@ -78,80 +70,6 @@ function extractGeminiText(payload: unknown) {
   if (!payload || typeof payload !== "object") return "";
   const candidates = (payload as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }).candidates;
   return candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
-}
-
-function delay(milliseconds: number) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-async function deleteGeminiFile(apiKey: string, name: string) {
-  try {
-    await fetch(`https://generativelanguage.googleapis.com/v1beta/${name}`, {
-      method: "DELETE",
-      headers: { "x-goog-api-key": apiKey },
-      signal: AbortSignal.timeout(5_000),
-    });
-  } catch {
-    // Geçici dosya temizliği ana analiz sonucunu etkilememelidir.
-  }
-}
-
-/**
- * Belgeyi Gemini Files API'ye BİR KEZ yükler ve `fileUri` döndürür. Yükleme
- * başarısız olursa null döner ve çağıran satır içi (inlineData) gönderime
- * düşer: yeni bir kırılma noktası eklenmez.
- */
-async function uploadPdfOnce(
-  apiKey: string,
-  bytes: ArrayBuffer,
-  displayName: string,
-): Promise<{ uri: string; name: string } | null> {
-  let uploadedName = "";
-  try {
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=media",
-      {
-        method: "POST",
-        headers: {
-          "x-goog-api-key": apiKey,
-          "Content-Type": "application/pdf",
-          "X-Goog-Upload-File-Name": encodeURIComponent(displayName),
-        },
-        body: bytes,
-        signal: AbortSignal.timeout(60_000),
-      },
-    );
-    if (!response.ok) {
-      const failure = await response.text().catch(() => "");
-      console.error("[gemini] files upload reddedildi", { httpStatus: response.status, detail: failure.slice(0, 400) });
-      return null;
-    }
-    const payload = await response.json() as { file?: { uri?: string; name?: string; state?: string } };
-    const file = payload.file;
-    if (!file?.uri || !file.name) return null;
-    uploadedName = file.name;
-
-    // PDF'ler genelde anında ACTIVE olur; değilse kısa süre beklenir.
-    let state = file.state ?? "ACTIVE";
-    for (let attempt = 0; attempt < 5 && state === "PROCESSING"; attempt += 1) {
-      await delay(700);
-      const check = await fetch(`https://generativelanguage.googleapis.com/v1beta/${file.name}`, {
-        headers: { "x-goog-api-key": apiKey },
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!check.ok) {
-        await deleteGeminiFile(apiKey, uploadedName);
-        return null;
-      }
-      state = ((await check.json()) as { state?: string }).state ?? "ACTIVE";
-    }
-    if (state === "ACTIVE") return { uri: file.uri, name: file.name };
-    await deleteGeminiFile(apiKey, uploadedName);
-    return null;
-  } catch {
-    if (uploadedName) await deleteGeminiFile(apiKey, uploadedName);
-    return null;
-  }
 }
 
 /**
@@ -196,10 +114,11 @@ function rememberExtraction(cacheKey: string, extraction: CachedExtraction) {
  * deterministik değildir; yeniden deneme gerçekten kurtarabilir). Böyle bir
  * sonuç yine istemciye döndürülür ama hiçbir önbellek katmanına yazılmaz.
  */
-function cacheableExtraction(extraction: CachedExtraction): boolean {
+function cacheableExtraction(extraction: CachedExtraction, structure: StructuredPdf, selection: CandidateSelection): boolean {
   if (!extraction.raw || typeof extraction.raw !== "object") return false;
   try {
-    return normalizeExtraction(extraction.raw, extraction.pageCount).criteria.length > 0;
+    const candidateIds = new Set(selection.candidates.map((candidate) => candidate.block.sourceId));
+    return normalizeExtraction(extraction.raw, extraction.pageCount, structure.blocks, candidateIds).criteria.length > 0;
   } catch {
     return false;
   }
@@ -221,7 +140,7 @@ function inflightAnalyses(): Map<string, Promise<CachedExtraction | null>> {
 
 async function documentHash(bytes: ArrayBuffer) {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Buffer.from(digest).toString("hex");
+  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
 function extractUsage(payload: unknown) {
@@ -235,8 +154,14 @@ function extractUsage(payload: unknown) {
   };
 }
 
-function buildResult(extraction: CachedExtraction, diagnostics: AnalysisDiagnostics): AnalysisResult {
-  const normalized = normalizeExtraction(extraction.raw, extraction.pageCount);
+function buildResult(
+  extraction: CachedExtraction,
+  diagnostics: AnalysisDiagnostics,
+  structure: StructuredPdf,
+  selection: CandidateSelection,
+): AnalysisResult {
+  const candidateIds = new Set(selection.candidates.map((candidate) => candidate.block.sourceId));
+  const normalized = normalizeExtraction(extraction.raw, extraction.pageCount, structure.blocks, candidateIds);
   const analysisWarnings = [...normalized.warnings];
   return {
     setup: normalized.setup,
@@ -247,8 +172,52 @@ function buildResult(extraction: CachedExtraction, diagnostics: AnalysisDiagnost
     model: extraction.model,
     analyzedAt: new Date().toISOString(),
     analysisWarnings,
-    diagnostics,
+    diagnostics: {
+      ...diagnostics,
+      structureVersion: PDF_STRUCTURE_VERSION,
+      dictionaryVersion: DICTIONARY_VERSION,
+      selectorVersion: CANDIDATE_SELECTOR_VERSION,
+      totalBlocks: selection.diagnostics.totalBlocks,
+      selectedBlocks: selection.diagnostics.selectedBlocks,
+      unselectedBlocks: selection.diagnostics.unselectedBlocks,
+      classifiedCriteria: normalized.stats.classifiedCriteria,
+      excludedCandidates: normalized.stats.excludedCandidates,
+      rejectedSources: normalized.stats.rejectedSources,
+      duplicateCriteria: normalized.stats.duplicateCriteria,
+    },
   };
+}
+
+function documentContextOf(structure: StructuredPdf): string {
+  const selected = structure.blocks.filter((block, index) => (
+    index < 10 || block.blockType === "HEADING" || block.pageNumber === structure.pageCount
+  )).slice(0, 80);
+  return selected.map((block) => (
+    `${block.sourceId} | s.${block.pageNumber} | ${block.blockType} | ${block.originalText}`
+  )).join("\n");
+}
+
+async function saveCoverageArtifact(
+  documentHashValue: string,
+  structure: StructuredPdf,
+  selection: CandidateSelection,
+): Promise<string | undefined> {
+  const key = `criteria-analysis/${documentHashValue}/${EXTRACTION_PROMPT_VERSION}-${DICTIONARY_VERSION}.json`;
+  try {
+    await reportBucket().put(key, JSON.stringify({
+      createdAt: new Date().toISOString(),
+      structureVersion: PDF_STRUCTURE_VERSION,
+      dictionaryVersion: DICTIONARY_VERSION,
+      selectorVersion: CANDIDATE_SELECTOR_VERSION,
+      structure,
+      candidates: selection.candidates,
+      unselected: selection.unselected,
+    }), { httpMetadata: { contentType: "application/json; charset=utf-8" } });
+    return key;
+  } catch (error) {
+    console.error("[analyze] kapsam denetim kaydı R2'ye yazılamadı", error);
+    return undefined;
+  }
 }
 
 export async function POST(request: Request) {
@@ -266,8 +235,6 @@ export async function POST(request: Request) {
       { status: 429, headers: { "Retry-After": String(permit.retryAfterSeconds) } },
     );
   }
-  let uploadedGeminiFileName = "";
-  let cleanupApiKey = "";
   // Uçuş içi kaydın her çıkış yolunda (hata dahil) temizlenmesi için dıştaki
   // finally kullanılır; başarıda söz zaten çözülmüştür, ikinci çözüm işlemsizdir.
   // Kayıt açılmadıysa işlemsiz fonksiyon çağrılır ve hiçbir etkisi olmaz.
@@ -286,7 +253,6 @@ export async function POST(request: Request) {
     if (!apiKey.startsWith("AIza")) {
       console.warn("[gemini] GEMINI_API_KEY beklenen 'AIza' ön ekiyle başlamıyor; Gemini API bu kimlik türünü reddedebilir.");
     }
-    cleanupApiKey = apiKey;
 
     const formData = await request.formData();
     const file = formData.get("file");
@@ -299,23 +265,21 @@ export async function POST(request: Request) {
     if (file.size > MAX_PDF_BYTES) {
       return Response.json({ error: "Bu sürümde doğrudan analiz sınırı 18 MB. Daha büyük kaynak belgeler için dosya akışı desteği etkinleştirilmelidir." }, { status: 413 });
     }
-    const rawPageCount = Number(formData.get("pageCount"));
-    const clientPageCount = Number.isFinite(rawPageCount) ? Math.min(1_000, Math.max(0, Math.round(rawPageCount))) : 0;
     const pdfBytes = await file.arrayBuffer();
     const sourceIntegrityError = pdfIntegrityError(pdfBytes);
     if (sourceIntegrityError) return Response.json({ error: sourceIntegrityError }, { status: 422 });
-    // Sayfa sayısı yalnızca bilgi değil, kaynak sayfa DOĞRULAMASININ üst sınırıdır.
-    // İstemci değeri eksik/hatalı geldiğinde (form alanı düşerse 0 → eski kodda 1)
-    // bütün kriterlerin kaynak sayfası "aralık dışı" sayılıp siliniyordu; bu yüzden
-    // sınır belgenin kendisinden okunur ve iki ölçümün büyüğü alınır.
-    const { limit: pageCount, server: serverPages } = sourcePageLimit(pdfBytes, clientPageCount);
-    if (!serverPages.trusted && !clientPageCount) {
-      console.warn("[analyze] sayfa sayısı kesin belirlenemedi; kaynak sayfa sınırı tahmini.", { pageCount });
+    const structure = await extractPdfStructure(pdfBytes);
+    const pageCount = structure.pageCount;
+    const selection = selectCriteriaCandidates(structure.blocks);
+    if (!selection.candidates.length) {
+      return Response.json({
+        error: "Belgede kriter adayı oluşturacak açık bir rapor kuralı bulunamadı. PDF metin katmanını ve şartname içeriğini kontrol edin.",
+      }, { status: 422 });
     }
 
     // Aynı belge ve aynı talimat daha önce işlendiğinde modeli hiç çağırma.
     // Önbellek isabetinde `apiCalls: 0` yazılır; sayı uydurulmaz.
-    const docHash = await documentHash(pdfBytes);
+    const docHash = structure.pdfHash;
     const cacheContext = JSON.stringify({
       promptVersion: EXTRACTION_PROMPT_VERSION,
       document: docHash,
@@ -323,13 +287,17 @@ export async function POST(request: Request) {
       // Çözünürlük, düşünme bütçesi ve çıktı tavanı sonucu değiştirir; ayar
       // değişince eski önbellek kaydı geçersiz olmalı, aksi hâlde yeni ayar
       // hiç denenmez ve eski (hatalı) sonuç kalıcı hâle gelir.
-      mediaResolution: MEDIA_RESOLUTION,
+      structureVersion: PDF_STRUCTURE_VERSION,
+      dictionaryVersion: DICTIONARY_VERSION,
+      selectorVersion: CANDIDATE_SELECTOR_VERSION,
+      candidateSourceIds: selection.candidates.map((candidate) => candidate.block.sourceId),
       thinking: thinkingLevelFor(pageCount),
       maxOutputTokens: MAX_OUTPUT_TOKENS,
       temperature: 0,
       pageCount,
     });
     const cacheKey = await documentHash(new TextEncoder().encode(cacheContext).buffer);
+    const coverageArtifactKey = await saveCoverageArtifact(docHash, structure, selection);
 
     /*
      * YENİDEN ANALİZ (madde 1)
@@ -356,8 +324,8 @@ export async function POST(request: Request) {
       if (store === "memory") await touchStoredAnalysis(cacheKey).catch(() => undefined);
       const cachedResult = buildResult(extraction, {
         totalMs, modelMs: 0, promptTokens: 0, outputTokens: 0, cached: true, apiCalls: 0, documentTransfers: 0,
-        cacheStore: store, firstAnalyzedAt: extraction.analyzedAt,
-      });
+        cacheStore: store, firstAnalyzedAt: extraction.analyzedAt, coverageArtifactKey,
+      }, structure, selection);
       await saveCriteriaExtractionRun(cachedResult, file.name, auth.account)
         .catch((historyError) => console.error("[workflow] analiz geçmişi kaydedilemedi", historyError));
       return Response.json(cachedResult);
@@ -387,7 +355,7 @@ export async function POST(request: Request) {
       }
       // Kayıt hem okunabilir hem kullanılabilir olmalı: 0 kriter üreten eski
       // bir satır isabet sayılmaz, belge yeniden analiz edilip üzerine yazılır.
-      if (storedExtraction && cacheableExtraction(storedExtraction)) {
+      if (storedExtraction && cacheableExtraction(storedExtraction, structure, selection)) {
         rememberExtraction(cacheKey, storedExtraction);
         return await respondFromCache(storedExtraction, "database");
       }
@@ -408,23 +376,21 @@ export async function POST(request: Request) {
     inflightKey = cacheKey;
     inflightAnalyses().set(cacheKey, new Promise((resolve) => { settleInflight = resolve; }));
 
-    const uploadStartedAt = Date.now();
-    const uploadedFile = pdfBytes.byteLength <= INLINE_PDF_FAST_PATH_BYTES
-      ? null
-      : await uploadPdfOnce(apiKey, pdfBytes, file.name);
-    const fileUri = uploadedFile?.uri ?? null;
-    uploadedGeminiFileName = uploadedFile?.name ?? "";
-    const uploadMs = Date.now() - uploadStartedAt;
-    const documentPart = fileUri
-      ? { fileData: { mimeType: "application/pdf", fileUri }, ...mediaResolutionPart() }
-      : { inlineData: { mimeType: "application/pdf", data: Buffer.from(pdfBytes).toString("base64") }, ...mediaResolutionPart() };
+    const candidatesText = formatCandidatesForLlm(selection.candidates);
+    const prompt = buildExtractionPrompt({
+      pageCount,
+      totalBlocks: structure.blocks.length,
+      candidateCount: selection.candidates.length,
+      documentContext: documentContextOf(structure),
+      candidatesText,
+    });
 
-    /** TEK üretim çağrısının gövdesi: bütün belge, dört aşamalı şema. */
+    /** TEK üretim çağrısının gövdesi: PDF yerine doğrulanmış aday metinleri. */
     const body = JSON.stringify({
       systemInstruction: { parts: [{ text: EXTRACTION_SYSTEM_INSTRUCTION }] },
       contents: [{
         role: "user",
-        parts: [documentPart, { text: buildExtractionPrompt({ pageCount }) }],
+        parts: [{ text: prompt }],
       }],
       generationConfig: {
         // Kural çıkarımı yaratıcı bir görev değil: sıcaklık 0 hem kararlı çıktı
@@ -483,7 +449,7 @@ export async function POST(request: Request) {
     }
 
     const extraction: CachedExtraction = { raw, model: modelUsed, pageCount, analyzedAt: new Date().toISOString() };
-    if (cacheableExtraction(extraction)) {
+    if (cacheableExtraction(extraction, structure, selection)) {
       rememberExtraction(cacheKey, extraction);
       // Taze sonuç kalıcı kayda da yazılır; yazılamazsa analiz sonucu yine döner.
       await saveStoredAnalysis({
@@ -521,16 +487,20 @@ export async function POST(request: Request) {
       promptTokens: usage.prompt,
       outputTokens: usage.output,
       cached: false,
-      uploadMs: fileUri ? uploadMs : 0,
+      uploadMs: 0,
       // Gerçek istek sayısı; "1 dedik ama 6 gönderdik" durumu yaşanmaz.
       apiCalls,
-      documentTransfers: 1,
-      documentDelivery: fileUri ? "file_uri" : "inline",
-    });
+      documentTransfers: 0,
+      documentDelivery: "structured_text",
+      coverageArtifactKey,
+    }, structure, selection);
     await saveCriteriaExtractionRun(result, file.name, auth.account)
       .catch((historyError) => console.error("[workflow] analiz geçmişi kaydedilemedi", historyError));
     return Response.json(result);
   } catch (error) {
+    if (error instanceof PdfTextLayerError) {
+      return Response.json({ error: error.message, code: "OCR_REQUIRED" }, { status: 422 });
+    }
     console.error("Beklenmeyen analiz hatası:", error);
     recordUsage({ model: PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls: 0 });
     return Response.json({ error: "Belge analizi sırasında beklenmeyen bir hata oluştu." }, { status: 500 });
@@ -539,9 +509,6 @@ export async function POST(request: Request) {
     // çözüldüğü için buradaki null çözümü işlemsizdir.
     settleInflight(null);
     if (inflightKey) inflightAnalyses().delete(inflightKey);
-    if (cleanupApiKey && uploadedGeminiFileName) {
-      await deleteGeminiFile(cleanupApiKey, uploadedGeminiFileName);
-    }
     permit.release();
   }
 }

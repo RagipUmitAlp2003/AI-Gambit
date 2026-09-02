@@ -256,8 +256,8 @@ test("şartname analizi ayrı rapor şablonu kabul etmez", () => {
 test("kaynak sayfa sınırı sunucuda belgeden okunur, istemciye bırakılmaz", () => {
   assert.match(
     ANALYZE_ROUTE,
-    /sourcePageLimit\(pdfBytes, clientPageCount\)/,
-    "Sayfa sınırı belgenin kendisinden okunmalıdır.",
+    /extractPdfStructure\(pdfBytes\)/,
+    "Sayfa sayısı ve kaynak sınırı PDF'nin yapısal ayrıştırmasından okunmalıdır.",
   );
   assert.ok(
     !/const pageCount = Number\.isFinite\(rawPageCount\)/.test(ANALYZE_ROUTE),
@@ -274,9 +274,9 @@ test("üretim ayarları kararlı ve token bütçesi sınırlı", () => {
 test("çıkarım şeması sourcePage'i zorunlu tutar, gereksiz bölüm istemez", () => {
   const extraction = readFileSync("app/lib/criteria-extraction.ts", "utf8");
   assert.match(extraction, /sourcePage: \{\s*type: "integer",\s*minimum: 1/, "sourcePage minimum 1 olmalıdır.");
-  assert.match(extraction, /required: \["documentProfile", "criteria"\]/, "Şema yalnızca profil ve kriter istemelidir.");
+  assert.match(extraction, /required: \["documentProfile", "decisions"\]/, "Şema profil ve aday kararlarını istemelidir.");
   assert.ok(!/excludedRules/.test(extraction), "Kapsam dışı madde listesi şemadan çıkarılmalıdır.");
-  assert.match(extraction, /ZORUNLU/, "Sistem istemi kaynak sayfayı zorunlu kılmalıdır.");
+  assert.match(extraction, /sourcePage ve sourceId'yi değiştirme/, "Sistem istemi doğrulanmış kaynak kimliğini korumalıdır.");
 });
 
 /* --------------------------------------------------------------------- *

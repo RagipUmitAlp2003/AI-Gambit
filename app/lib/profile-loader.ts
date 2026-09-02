@@ -1,4 +1,4 @@
-import { isCheckStage, isCriterionVerifiability, type CheckStage, type Criterion, type CriterionVerifiability, type ProfileExport, type SetupData, type TemplateProfile } from "./types";
+import { isCheckStage, isControlTypeCompatible, isCriterionControlType, isCriterionVerifiability, type CheckStage, type Criterion, type CriterionVerifiability, type ProfileExport, type SetupData, type TemplateProfile } from "./types";
 
 export const LAST_PROFILE_KEY = "kriter-atolyesi:last-profile";
 
@@ -50,6 +50,11 @@ export function upgradeLegacyCriterion(raw: Record<string, unknown>, index: numb
     required,
     description: stringOr(raw.description, stringOr(raw.aiInterpretation, "Kuralın nasıl kontrol edileceğini açıklayın.")),
     violationOutcome: stringOr(raw.violationOutcome, "Belgede belirtilmemiş"),
+    ...(typeof raw.sourceId === "string" || raw.sourceId === null ? { sourceId: raw.sourceId as string | null } : {}),
+    ...(Array.isArray(raw.sourceIds)
+      ? { sourceIds: raw.sourceIds.filter((item): item is string => typeof item === "string") }
+      : {}),
+    ...(isCriterionControlType(raw.controlType) ? { controlType: raw.controlType } : {}),
     sourcePage: Number.isInteger(page) && page > 0 ? page : null,
     sourceText: stringOr(raw.sourceText, ""),
     // Alan eski profillerde yoktur. Eski modelin "PDF aşaması dışı" saydığı
@@ -120,6 +125,12 @@ export function validateProfileExport(value: unknown): { profile: ProfileExport 
     || (!legacy && (
       !isCheckStage((item as Record<string, unknown>).stage)
       || typeof (item as Record<string, unknown>).required !== "boolean"
+      || ((item as Record<string, unknown>).controlType !== undefined
+        && isCheckStage((item as Record<string, unknown>).stage)
+        && !isControlTypeCompatible(
+          (item as Record<string, unknown>).stage as CheckStage,
+          (item as Record<string, unknown>).controlType,
+        ))
     ))
   ));
   if (invalid) {

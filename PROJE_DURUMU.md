@@ -1,6 +1,6 @@
 # AI-Gambit — Proje Durumu ve Yapılacaklar
 
-**Tarih:** 27 Ağustos 2026 · **Dal:** `son_merge_deneme_2` · **Temel işleme:** `abe1c4d`
+**Tarih:** 3 Eylül 2026 · **Dal:** `faruk_finalsonrasi_main1` · **Temel işleme:** `ac3b3fc`
 
 Bu belge projenin **güncel durumunu** tutar: neyin çalıştığı, neyin eksik olduğu ve
 neyin düzeltilmesi gerektiği. Aşağıdaki her madde bugün kod üzerinde veya gerçek
@@ -19,6 +19,38 @@ neyin düzeltilmesi gerektiği. Aşağıdaki her madde bugün kod üzerinde veya
 | `TESLIM_RAPORU_NIHAI_HAKEM_AKISI.md` | Nihai hakem akışı + benzerlik teslim raporu (26 Ağustos) |
 | `SIMULASYON_RAPORU_CELIKKUBBE.md` | Canlı uçtan uca Çelikkubbe simülasyonu — 13 maddelik nihai rapor (27 Ağustos) |
 | `PROJE_DURUMU.md` (bu belge) | Durum, ölçüm, eksik iş listesi |
+
+---
+
+## Güncel çalışma — Yapısal şartname taraması ve güvenli kriter yayımı (3 Eylül)
+
+GÖREV 1/3 kapsamında şartname analizi, PDF'nin tamamını doğrudan LLM'ye gönderen
+akımdan açıklanabilir bir aday-tarama akışına geçirildi:
+
+1. Sunucu PDF metnini sayfa, başlık, numaralı madde, paragraf, liste ve tablo satırı
+   düzeyinde çıkarır; her parçaya kararlı bir `sourceId` verir. Metin katmanı yoksa
+   uydurma sonuç üretmek yerine OCR gerektiğini açıkça bildirir.
+2. Sürümlü Türkçe sözlük; normalizasyon, bağlayıcı/yasaklayıcı ifadeler, sayı-birim,
+   başlık ve tablo sinyalleriyle güçlü adayları deterministik olarak seçer. Seçilmeyen
+   parçalar ve kapsam dışı karar gerekçeleri denetim kaydında korunur.
+3. Tek LLM çağrısı yalnızca seçilmiş özgün metinleri ve yakın bağlamlarını alır;
+   PDF dosyası modele tekrar verilmez. Her aday `KRITER` veya `KAPSAM_DISI` olur.
+   Aynı adayda birden fazla bağımsız kural varsa ayrı kriterler üretilebilir.
+4. Kaynak kimliği, sayfası ve birebir alıntısı sunucuda doğrulanamayan sonuçlar
+   yayımlanabilir kriter setine alınmaz. Tekrarlar birleştirilir ve cevaplanmayan
+   adaylar tanılarda görünür.
+5. Kriter modeli `Kuralın önemi` (mutlaka karşılanmalı / iyileştirme bekleniyor)
+   ve kontrol türüyle sadeleştirildi; aktif akıştan ihlal/eleme sonucu kaldırıldı.
+   Kaynak sayfa ve alıntı değiştirilemez olmaya devam eder.
+6. Profil sahipliği R2 yazımından önce doğrulanır. Yeniden yayımda mevcut kaynak
+   dosyası korunur, yeni dosya sürümlü anahtarla hazırlanır ve başarısız veri tabanı
+   işleminde yalnızca o isteğin yeni nesnesi temizlenir. Çalışma ve profil taslakları
+   kapsamlı anahtarlarla birbirinden ayrılır.
+
+Doğrulama: tür kontrolü ve lint temiz; **118/118** birim testi ile bütün regresyon
+paketleri geçti. Gerçek bir resmî şartnameyle kararlı kaynak kimliği testi yapıldı.
+Ücretli/canlı Gemini çağrısı yapılmadı. Değişiklikler henüz commit, push veya merge
+edilmedi.
 
 ---
 

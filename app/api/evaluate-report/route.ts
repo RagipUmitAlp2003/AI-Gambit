@@ -418,7 +418,7 @@ function buildPrompt(profile: ProfileExport, pageCount: number): string {
       stage: item.stage,
       required: item.required,
       description: item.description,
-      violationOutcome: item.violationOutcome,
+      controlType: item.controlType,
       sourcePage: item.sourcePage,
       sourceText: item.sourceText,
     }));
@@ -493,7 +493,7 @@ function buildEvaluation(input: {
       ? {
         ...current,
         verdict: rule.required ? "KRITIK_HATA" : "REVIZYON",
-        rationale: `Rapor ${pageCount} sayfa; kural en fazla ${limit} sayfaya izin veriyor (sunucu sayımı). İhlal sonucu: ${rule.violationOutcome}`,
+        rationale: `Rapor ${pageCount} sayfa; kural en fazla ${limit} sayfaya izin veriyor (sunucu sayımı).`,
         evidence: [],
         evidenceMissing: false,
       }

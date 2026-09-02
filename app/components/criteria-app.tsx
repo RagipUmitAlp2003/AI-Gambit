@@ -21,9 +21,11 @@ import { resolveVerifiability } from "../lib/criteria-extraction";
 import {
   CHECK_STAGES,
   checkStageOf,
+  criterionControlTypesForStage,
   type AnalysisResult,
   type CheckStage,
   type Criterion,
+  type CriterionControlType,
   type ProfileExport,
   type SetupData,
   type Step,
@@ -71,10 +73,8 @@ type CriterionDraft = {
   kind: CriterionKind;
   name: string;
   stage: CheckStage;
+  controlType: CriterionControlType;
   description: string;
-  violationOutcome: string;
-  sourcePage: string;
-  sourceText: string;
 };
 
 function emptyDraft(kind: CriterionKind): CriterionDraft {
@@ -82,12 +82,23 @@ function emptyDraft(kind: CriterionKind): CriterionDraft {
     kind,
     name: "",
     stage: "criteria_evidence",
+    controlType: "KANIT_KONTROLU",
     description: "",
-    violationOutcome: "Belgede belirtilmemiş",
-    sourcePage: "",
-    sourceText: "",
   };
 }
+
+function controlTypeForStage(stage: CheckStage): CriterionControlType {
+  if (stage === "category_similarity") return "ANLAMSAL_UYGUNLUK";
+  if (stage === "criteria_evidence") return "KANIT_KONTROLU";
+  return stage === "headings_content" ? "ICERIK_VARLIGI" : "KANIT_KONTROLU";
+}
+
+const CONTROL_TYPE_LABELS: Record<CriterionControlType, string> = {
+  BIREBIR_BASLIK: "Birebir başlık",
+  ICERIK_VARLIGI: "İçerik varlığı",
+  ANLAMSAL_UYGUNLUK: "Anlamsal uygunluk",
+  KANIT_KONTROLU: "Teknik kanıt kontrolü",
+};
 
 function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -468,22 +479,18 @@ function CriteriaReview({
     const description = draft.description.trim();
     if (!name) { setDraftError("Kriter adı zorunludur."); return; }
     if (!description) { setDraftError("Kural açıklaması zorunludur; hakem bu metne göre değerlendirir."); return; }
-    const page = draft.sourcePage.trim() ? Math.round(Number(draft.sourcePage)) : null;
-    if (draft.sourcePage.trim() && (!Number.isInteger(page) || (page as number) < 1 || (page as number) > pageCount)) {
-      setDraftError(`Kaynak sayfa 1 ile ${pageCount} arasında bir sayı olmalıdır.`);
-      return;
-    }
     const added: Criterion = {
       id: `manual-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       name: name.slice(0, 200),
       stage: draft.stage,
       required: draft.kind === "required",
       description: description.slice(0, 1200),
-      violationOutcome: draft.violationOutcome.trim().slice(0, 240) || "Belgede belirtilmemiş",
-      sourcePage: page,
-      sourceText: draft.sourceText.trim().slice(0, 900),
-      // Kullanıcıya sorulmaz: kriter metninden otomatik belirlenir (madde 1).
-      verifiability: resolveVerifiability(undefined, name, draft.sourceText.trim(), description),
+      sourceId: null,
+      sourceIds: [],
+      controlType: draft.controlType,
+      sourcePage: null,
+      sourceText: "",
+      verifiability: resolveVerifiability(undefined, name, "", description),
       active: true,
       origin: "manager",
     };
@@ -653,8 +660,16 @@ function CriteriaReview({
                   />
                 </Field>
                 <Field label="Kontrol aşaması" hint={checkStageOf(draft.stage).detail}>
-                  <select value={draft.stage} onChange={(event) => setDraft({ ...draft, stage: event.target.value as CheckStage })}>
+                  <select value={draft.stage} onChange={(event) => {
+                    const stage = event.target.value as CheckStage;
+                    setDraft({ ...draft, stage, controlType: controlTypeForStage(stage) });
+                  }}>
                     {CHECK_STAGES.map((stage) => <option key={stage.id} value={stage.id}>{stage.order}. {stage.title}</option>)}
+                  </select>
+                </Field>
+                <Field label="Kontrol biçimi">
+                  <select value={draft.controlType} onChange={(event) => setDraft({ ...draft, controlType: event.target.value as CriterionControlType })}>
+                    {criterionControlTypesForStage(draft.stage).map((value) => <option key={value} value={value}>{CONTROL_TYPE_LABELS[value]}</option>)}
                   </select>
                 </Field>
               </div>
@@ -665,24 +680,7 @@ function CriteriaReview({
                   placeholder="Örn. Rapor Türkçe yazılmalıdır; başka dilde yazılan rapor değerlendirmeye alınmaz."
                 />
               </Field>
-              <div className="form-grid two-col">
-                <Field label="İhlal sonucunda">
-                  <input value={draft.violationOutcome} maxLength={240} onChange={(event) => setDraft({ ...draft, violationOutcome: event.target.value })} />
-                </Field>
-                <Field label="Kaynak PDF sayfası (isteğe bağlı)" hint={`1–${pageCount} arası. Şartnamede dayanağı varsa yazın.`}>
-                  <input
-                    type="number"
-                    min={1}
-                    max={pageCount}
-                    value={draft.sourcePage}
-                    placeholder="Örn. 12"
-                    onChange={(event) => setDraft({ ...draft, sourcePage: event.target.value })}
-                  />
-                </Field>
-              </div>
-              <Field label="Kaynak alıntı (isteğe bağlı)" hint="Kuralı kanıtlayan cümle, belgeden birebir.">
-                <textarea value={draft.sourceText} onChange={(event) => setDraft({ ...draft, sourceText: event.target.value })} />
-              </Field>
+              <p className="page-note">Yönetici tarafından eklenen kriter manuel olarak işaretlenir; sistem sahte kaynak sayfası veya alıntı üretmez.</p>
               {draftError ? <p className="approval-error" role="alert">{draftError}</p> : null}
               <div className="criterion-draft-actions">
                 <button type="button" className="text-button" onClick={() => { setDraft(null); setDraftError(""); }}>Vazgeç</button>
@@ -738,14 +736,17 @@ function CriteriaReview({
                   <input value={selected.name} onChange={(event) => update({ name: event.target.value })} />
                 </Field>
                 <Field label="Kontrol aşaması" hint={checkStageOf(selected.stage).detail}>
-                  <select value={selected.stage} onChange={(event) => update({ stage: event.target.value as CheckStage })}>
+                  <select value={selected.stage} onChange={(event) => {
+                    const stage = event.target.value as CheckStage;
+                    update({ stage, controlType: controlTypeForStage(stage) });
+                  }}>
                     {CHECK_STAGES.map((stage) => <option key={stage.id} value={stage.id}>{stage.order}. {stage.title}</option>)}
                   </select>
                 </Field>
-                <Field label="Zorunluluk" hint="Kriter değerlendirmede ya zorunludur ya da zorunlu tutulmaz.">
+                <Field label="Kuralın önemi" hint="Bağlayıcı kurallar mutlaka karşılanmalı; tavsiye ve beklentiler iyileştirme olarak izlenir.">
                   <select value={selected.required ? "required" : "other"} onChange={(event) => update({ required: event.target.value === "required" })}>
-                    <option value="required">Zorunlu</option>
-                    <option value="other">Zorunlu olmayan</option>
+                    <option value="required">Mutlaka karşılanmalı</option>
+                    <option value="other">İyileştirme bekleniyor</option>
                   </select>
                 </Field>
                 {/*
@@ -754,11 +755,13 @@ function CriteriaReview({
                   dışı kuralların hakem rapor analizine gönderilmesini
                   engellemek için kullanır. Kullanıcı seçemez ve düzenleyemez.
                 */}
-                <Field label="İhlal sonucunda">
-                  <input value={selected.violationOutcome} onChange={(event) => update({ violationOutcome: event.target.value })} />
+                <Field label="Kontrol biçimi">
+                  <select value={selected.controlType ?? controlTypeForStage(selected.stage)} onChange={(event) => update({ controlType: event.target.value as CriterionControlType })}>
+                    {criterionControlTypesForStage(selected.stage).map((value) => <option key={value} value={value}>{CONTROL_TYPE_LABELS[value]}</option>)}
+                  </select>
                 </Field>
               </div>
-              <Field label="Kural açıklaması" hint="Koşul, raporda ne aranacağı ve karşılanmadığında ne olacağı tek anlamlı yazılmalı; rapor değerlendirmesinde bu metin kullanılır.">
+              <Field label="Kural açıklaması" hint="Koşul ve raporda ne aranacağı tek anlamlı yazılmalı; rapor değerlendirmesinde bu metin kullanılır.">
                 <textarea value={selected.description} onChange={(event) => update({ description: event.target.value })} />
               </Field>
             </div>
@@ -1009,6 +1012,7 @@ export default function CriteriaApp() {
    * kimliği korunur, bu yüzden D1'de ikinci bir "yürürlükte" satır oluşmaz.
    */
   const [editedProfile, setEditedProfile] = useState<ProfileExport | null>(null);
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("");
   const [error, setError] = useState("");
@@ -1024,6 +1028,7 @@ export default function CriteriaApp() {
     created: boolean;
     sourceLockWarning: string;
   } | null>(null);
+  const draftScope = editingProfileId ? `profile:${editingProfileId}` : "workspace";
 
   const backgroundLabel = useMemo(
     () => result || editedProfile ? `${setup.competition} · ${setup.reportType}` : "Organizatör PDF'si bekleniyor",
@@ -1061,12 +1066,13 @@ export default function CriteriaApp() {
     async function restoreDraft() {
       const profileId = new URLSearchParams(window.location.search).get("profile");
       if (profileId) {
+        setEditingProfileId(profileId);
         await restorePublishedProfile(profileId);
         if (active) setDraftReady(true);
         return;
       }
-      const snapshot = loadDraftSnapshot();
-      const storedFile = await loadDraftFile();
+      const snapshot = loadDraftSnapshot("workspace");
+      const storedFile = await loadDraftFile("workspace");
       // Eski sürümde saklanmış rapor şablonu artık kullanılmıyor; tarayıcıdan silinir.
       clearLegacyTemplateFile().catch(() => undefined);
       if (!active) return;
@@ -1097,13 +1103,13 @@ export default function CriteriaApp() {
   useEffect(() => {
     // Geçmişten açılan yayımlanmış profil yerel taslağın üstüne yazılmaz.
     if (!draftReady || editedProfile) return;
-    saveDraftSnapshot({ step, setup, result, criteria, profile });
-  }, [criteria, draftReady, editedProfile, profile, result, setup, step]);
+    saveDraftSnapshot({ step, setup, result, criteria, profile }, draftScope);
+  }, [criteria, draftReady, draftScope, editedProfile, profile, result, setup, step]);
 
   useEffect(() => {
     if (!draftReady || editedProfile) return;
-    saveDraftFile(file).catch(() => undefined);
-  }, [draftReady, editedProfile, file]);
+    saveDraftFile(file, draftScope).catch(() => undefined);
+  }, [draftReady, draftScope, editedProfile, file]);
 
   function chooseFile(nextFile: File) {
     setError("");
@@ -1123,6 +1129,7 @@ export default function CriteriaApp() {
     setCriteria([]);
     setProfile(null);
     setEditedProfile(null);
+    setEditingProfileId(null);
     setCacheNotice("");
   }
 
@@ -1141,7 +1148,7 @@ export default function CriteriaApp() {
       const pageCount = await getPdfPageCount(file);
       setLoadingMessage(forceRefresh
         ? "Kayıtlı sonuç atlanıyor; belge baştan analiz ediliyor…"
-        : "Belgenin tamamı tek AI çağrısıyla dört aşamaya göre okunuyor…");
+        : "Belge yapısal olarak taranıyor; güçlü adaylar tek AI çağrısıyla sınıflandırılıyor…");
       // Sunucu tek `generateContent` isteği yapar; burada da yeniden deneme yoktur.
       const analysis = await analyzeWithGemini(file, pageCount, forceRefresh);
       setLoadingMessage("Kriterler kaynak sayfalarıyla eşleştiriliyor…");
@@ -1231,7 +1238,14 @@ export default function CriteriaApp() {
       profileId: profile?.profileId ?? editedProfile?.profileId
         ?? `profil-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       setup,
-      sourceDocument: { name: source.name, pages: source.pages, analyzedAt: source.analyzedAt },
+      sourceDocument: {
+        name: source.name,
+        pages: source.pages,
+        analyzedAt: source.analyzedAt,
+        ...((profile ?? editedProfile)?.sourceDocument.fileKey
+          ? { fileKey: (profile ?? editedProfile)?.sourceDocument.fileKey }
+          : {}),
+      },
       templateProfile: result?.templateProfile ?? editedProfile?.templateProfile,
       // Pasif kriter yayımlanmaz: listedeki her kriter etkin olarak kaydedilir.
       criteria: criteria.map((item) => ({ ...item, active: true })),
@@ -1273,8 +1287,9 @@ export default function CriteriaApp() {
     setCacheNotice("");
     setApprovalError("");
     setPublishSummary(null);
-    clearDraftSnapshot();
-    saveDraftFile(null).catch(() => undefined);
+    clearDraftSnapshot(draftScope);
+    saveDraftFile(null, draftScope).catch(() => undefined);
+    setEditingProfileId(null);
     // Geçmiş profil düzenleme adresinden çıkılır; yenilemede taslak geri gelmesin.
     if (new URLSearchParams(window.location.search).has("profile")) {
       window.history.replaceState(null, "", "/kriter-atolyesi");

@@ -236,17 +236,19 @@ console.log("Source page regression tests: PASS");
     "Belge parçası yapılandırılan çözünürlüğü kullanmalıdır.",
   );
 
-  for (const file of ["app/api/analyze/route.ts", "app/api/evaluate-report/route.ts"]) {
-    const source = readFileSync(file, "utf8");
-    assert(
-      !/MEDIA_RESOLUTION_MEDIUM/.test(source),
-      `${file} çözünürlüğü sabit MEDIUM'a bağlamamalıdır.`,
-    );
-    assert(/mediaResolutionPart\(\)/.test(source), `${file} ortak çözünürlük ayarını kullanmalıdır.`);
-    // Ayar çıktıyı değiştirir; önbellek anahtarı ayarı içermezse yeni ayar hiç denenmez.
-    assert(/MEDIA_RESOLUTION/.test(source.slice(source.indexOf("cacheContext") - 400, source.indexOf("cacheContext") + 400)),
-      `${file} önbellek anahtarına çözünürlüğü eklemelidir.`);
-  }
+  const analyzeSource = readFileSync("app/api/analyze/route.ts", "utf8");
+  assert(/documentDelivery: "structured_text"/.test(analyzeSource),
+    "Şartname analizinde PDF Gemini'ye yeniden gönderilmemeli; yapısal aday metinleri kullanılmalıdır.");
+  assert(!/parts: \[documentPart/.test(analyzeSource),
+    "Şartname analiz gövdesinde PDF belge parçası kalmamalıdır.");
+
+  const evaluationSource = readFileSync("app/api/evaluate-report/route.ts", "utf8");
+  assert(!/MEDIA_RESOLUTION_MEDIUM/.test(evaluationSource),
+    "Rapor analizi çözünürlüğü sabit MEDIUM'a bağlamamalıdır.");
+  assert(/mediaResolutionPart\(\)/.test(evaluationSource),
+    "Rapor analizi ortak çözünürlük ayarını kullanmalıdır.");
+  assert(/MEDIA_RESOLUTION/.test(evaluationSource.slice(evaluationSource.indexOf("cacheContext") - 400, evaluationSource.indexOf("cacheContext") + 400)),
+    "Rapor analizi önbellek anahtarına çözünürlüğü eklemelidir.");
 
   // 503 mesajı, aynı belgede tekrarlanan hatanın kapasite değil AYAR sorunu
   // olabileceğini söylemeli; aksi hâlde kullanıcı boşuna "yeniden dene" der.
