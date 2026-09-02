@@ -1613,7 +1613,7 @@ async function autoAssignJudge(
     database.prepare(
       `INSERT INTO application_assignments
         (id, application_id, judge_id, judge_name, assigned_by, assigned_by_name, reason, active, assigned_at)
-       VALUES (?, ?, ?, ?, NULL, ?, ?, 1, ?)`,
+       VALUES (?, ?, ?, ?, 'system', ?, ?, 1, ?)`,
     ).bind(
       crypto.randomUUID(), applicationId, row.id, row.full_name, "sistem",
       candidate.competition_files > 0

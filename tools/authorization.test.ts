@@ -327,6 +327,16 @@ test("otomatik atama başarısız olursa başvuru düşmez", () => {
   );
 });
 
+test("otomatik atama denetim kaydında sistem kimliği boş bırakılmaz", () => {
+  const start = WORKFLOW_DB.indexOf("async function autoAssignJudge");
+  const body = WORKFLOW_DB.slice(start, WORKFLOW_DB.indexOf("\n/**", start + 10));
+  assert.match(
+    body,
+    /VALUES \(\?, \?, \?, \?, 'system', \?, \?, 1, \?\)/,
+    "application_assignments.assigned_by zorunlu olduğundan otomatik atama sistem kimliği yazmalıdır.",
+  );
+});
+
 test("otomatik atama hakemin dosya seçmesine izin vermez", () => {
   // Görünürlük ve self-assign kuralları değişmedi; yalnızca atamayı sistem yapıyor.
   const judge = account("02", "hakem-1");
