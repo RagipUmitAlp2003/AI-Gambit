@@ -46,12 +46,18 @@ const MAX_MULTIPART_BYTES = MAX_PDF_BYTES + 768 * 1024;
 const GENERATION_TIMEOUT_MS = 150_000;
 
 /**
- * Çıktı token tavanı. Eskiden 65536'ydı; şema sıkılaştıktan sonra (şablon ve
- * kapsam-dışı listesi çıkarıldı, açıklamalar tek cümleye indi) en yoğun
- * şartname bile bunun çok altında kalıyor. Düşük tavan modelin uzun, dolambaçlı
- * metin üretmesini de caydırır ve yanıt süresini kısaltır.
+ * Çıktı token tavanı.
+ *
+ * 24 576'ya indirilmişti; ölçüm bunun YETMEDİĞİNİ gösterdi. Model her güçlü
+ * aday için bir karar satırı üretir: 129 adaylı 29 sayfalık bir şartnamede
+ * yanıt tavana dayanıp JSON'un ortasında kesiliyor ve uç "şemaya uygun JSON
+ * olarak okunamadı" diyerek 502 döndürüyordu. Tavan, aday sayısıyla birlikte
+ * büyüyen cevabı taşıyacak şekilde geri yükseltildi.
+ *
+ * Tavan yine sonsuz değildir; kesilme olursa `finishReason` okunup kullanıcıya
+ * ne olduğu ve ne yapabileceği açıkça söylenir (sessiz veri kaybı yok).
  */
-const MAX_OUTPUT_TOKENS = 24_576;
+const MAX_OUTPUT_TOKENS = 65_536;
 
 /**
  * Modelin "düşünme" bütçesi — analiz süresinin en büyük belirleyicisi.
@@ -71,6 +77,24 @@ function extractGeminiText(payload: unknown) {
   const candidates = (payload as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }).candidates;
   return candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
 }
+
+/**
+ * Model cevabı çıktı tavanına dayanıp KESİLDİ mi?
+ *
+ * Kesilmiş cevap geçersiz JSON olarak geliyor ve kullanıcı "şemaya uygun JSON
+ * olarak okunamadı" gibi sebebi anlaşılmayan bir hata görüyordu. Gerçek sebep
+ * belgenin tek cevaba sığmayacak kadar çok kural adayı içermesidir; mesaj bunu
+ * söylemeli ve yöneticiye ne yapacağını anlatmalıdır.
+ */
+function truncatedByTokenLimit(payload: unknown): boolean {
+  const candidates = (payload as { candidates?: Array<{ finishReason?: string }> })?.candidates;
+  return candidates?.[0]?.finishReason === "MAX_TOKENS";
+}
+
+const TRUNCATED_OUTPUT_MESSAGE =
+  "Belge tek analiz cevabına sığmadı: model çıktısı token sınırına ulaştığı için kesildi ve "
+  + "sonuç kaydedilmedi. Şartname çok sayıda kural adayı içeriyor. Belgeyi bölümler hâlinde "
+  + "(ör. yalnızca rapor kuralları içeren bölümler) yükleyerek yeniden deneyin.";
 
 /**
  * Aynı belgenin yeniden analizini önleyen İKİ KATLI önbellek.
@@ -435,6 +459,9 @@ export async function POST(request: Request) {
     modelUsed = outcome.model;
 
     const responseText = extractGeminiText(outcome.payload);
+    // Kesilme, boş yanıttan ve bozuk JSON'dan ÖNCE kontrol edilir: sebebi bilinen
+    // bir başarısızlığı "geçersiz çıktı" diye raporlamak yanıltıcıydı.
+    if (truncatedByTokenLimit(outcome.payload)) return failWith(502, TRUNCATED_OUTPUT_MESSAGE);
     if (!responseText) return failWith(502, "Belge analizi için geçerli yapılandırılmış çıktı alınamadı.");
     let raw: RawExtraction;
     try {

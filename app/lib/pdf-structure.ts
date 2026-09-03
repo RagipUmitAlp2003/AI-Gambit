@@ -1,6 +1,7 @@
+import { loadPdfJs } from "./pdfjs-runtime";
 import { letterRatio, normalizeForSearch, normalizeUnicode } from "./turkish-text";
 
-export const PDF_STRUCTURE_VERSION = "pdf-structure-v1";
+export const PDF_STRUCTURE_VERSION = "pdf-structure-v2-wrapped-lines";
 
 export type PdfBlockType =
   | "HEADING"
@@ -127,6 +128,14 @@ function linesFromItems(rawItems: unknown[]): PositionedLine[] {
     .filter((line) => line.text.length > 0);
 }
 
+/**
+ * Kaydırılmış bir madde/bent en fazla kaç görsel satır ve karakter birleştirir.
+ * Sınır, hatalı sınıflandırılmış bir satır yüzünden sayfanın yarısının tek
+ * bloğa erimesini engeller.
+ */
+const MAX_WRAPPED_LINES = 8;
+const MAX_WRAPPED_CHARS = 700;
+
 function clauseNumberOf(text: string): string | null {
   return text.match(/^\s*(\d+(?:\.\d+){0,5})(?:[.)])?(?=\s|$)/)?.[1] ?? null;
 }
@@ -235,18 +244,56 @@ function buildPageBlocks(
     paragraph = null;
   };
 
-  normalizedLines.forEach((line, index) => {
+  for (let index = 0; index < normalizedLines.length; index += 1) {
+    const line = normalizedLines[index];
     const type = classifyLine(line, bodyFont);
     if (type === "PARAGRAPH") {
       if (!paragraph) paragraph = { lines: [], start: index };
       paragraph.lines.push(line);
       const length = paragraph.lines.reduce((total, item) => total + item.text.length, 0);
       if (/[.!?;:]$/.test(line.text) || length >= 700) flushParagraph();
-      return;
+      continue;
     }
     flushParagraph();
-    emit([line], type, index);
-  });
+    /*
+     * KAYDIRILMIŞ MADDE/BENT SATIRLARI BİRLEŞTİRİLİR.
+     *
+     * NEDEN: madde işaretli bir kural PDF'te birden fazla görsel satıra
+     * taşındığında her satır ayrı blok oluyordu. Sonuç:
+     *
+     *   blok A: "• ... her boyutu (E x B x D) 100cm' den"
+     *   blok B: "küçük olacaktır."
+     *
+     * Yani KURALIN KENDİSİ hiçbir blokta tam değildi. Bu iki soruna yol
+     * açıyordu: (1) modele yarım cümleler aday olarak gidiyor, model bunlarda
+     * uygulanabilir bir kural göremeyip "kapsam dışı" diyordu; (2) model
+     * cümleyi yakın bağlamdan tamamlayıp alıntıladığında, alıntı tek bloğun
+     * içinde bulunamadığı için doğrulama onu reddediyordu. 25 sayfalık bir
+     * şartnameden 5 kriter çıkmasının başlıca nedeni buydu.
+     *
+     * BİRLEŞTİRME ÖLÇÜTÜ TEMKİNLİDİR: yalnızca madde/bent SÖZDİZİMSEL OLARAK
+     * BİTMEMİŞKEN (sonunda . ! ? : ; yok) ve sonraki satır yeni bir yapı
+     * başlatmıyorken (düz metin, yeni madde işareti/numarası yok) devam satırı
+     * eklenir. Böylece maddeden sonra gelen gerçek bir paragraf yutulmaz.
+     */
+    const merged = [line];
+    if (type === "LIST_ITEM" || type === "NUMBERED_CLAUSE") {
+      while (index + 1 < normalizedLines.length && merged.length < MAX_WRAPPED_LINES) {
+        const tail = merged.at(-1)!.text.trim();
+        // Cümle bitmişse devam satırı aranmaz.
+        if (/[.!?;:]$/.test(tail)) break;
+        const next = normalizedLines[index + 1];
+        if (classifyLine(next, bodyFont) !== "PARAGRAPH") break;
+        // Yeni bir madde işareti veya madde numarası: devam değil, yeni kural.
+        if (isListItem(next.text) || clauseNumberOf(next.text)) break;
+        const total = merged.reduce((sum, item) => sum + item.text.length, 0);
+        if (total + next.text.length > MAX_WRAPPED_CHARS) break;
+        merged.push(next);
+        index += 1;
+      }
+    }
+    emit(merged, type, index - (merged.length - 1));
+  }
   flushParagraph();
   return blocks;
 }
@@ -258,9 +305,16 @@ function buildPageBlocks(
  */
 export async function extractPdfStructure(bytes: ArrayBuffer): Promise<StructuredPdf> {
   const pdfHash = await sha256(bytes);
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  // Sunucuda DOMMatrix/Path2D globalleri yok; PDF.js bunları modül gövdesinde
+  // kullandığı için yükleme `loadPdfJs` üzerinden yapılır.
+  const pdfjs = await loadPdfJs();
+  // PDF.js verilen tamponu çözümleyiciye AKTARIR (transfer) ve özgün
+  // `ArrayBuffer` çağıranın elinde boş kalır. Bu fonksiyonun imzası böyle bir
+  // yan etkiyi düşündürmediği için kopya üzerinde çalışılır: çağıran aynı
+  // baytları analizden sonra (ör. arşivleme, bütünlük kontrolü) yeniden
+  // kullanabilir.
   const loadingTask = pdfjs.getDocument({
-    data: new Uint8Array(bytes),
+    data: new Uint8Array(bytes.slice(0)),
   });
   const blocks: PdfStructureBlock[] = [];
   let pageCount = 0;

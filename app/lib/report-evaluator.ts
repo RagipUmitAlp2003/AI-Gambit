@@ -21,11 +21,17 @@ export class ReportEngineError extends Error {
   retryable: boolean;
   /** Motor bu ortamda hiç yapılandırılmamış (anahtar yok). */
   engineUnavailable: boolean;
-  constructor(message: string, retryable = false, engineUnavailable = false) {
+  /**
+   * Sunucunun makine okunur hata kodu; `OCR_REQUIRED` katılımcı belgesinin
+   * metin katmanı olmadığını söyler. Ekran mesajı metin ayrıştırmadan seçer.
+   */
+  code: string;
+  constructor(message: string, retryable = false, engineUnavailable = false, code = "") {
     super(message);
     this.name = "ReportEngineError";
     this.retryable = retryable;
     this.engineUnavailable = engineUnavailable;
+    this.code = code;
   }
 }
 
@@ -47,6 +53,27 @@ function evidenceNeedle(value: string) {
  * onlara dokunmaz.
  */
 function verifyEvidenceQuotes(evaluation: ReportEvaluation, pages: string[]): ReportEvaluation {
+  /*
+   * METİN KATMANI YETERSİZSE HİÇ DOĞRULAMA YAPILMAZ (madde 8)
+   *
+   * İstemci metin çıkarımı bazı ortamlarda boş dönebiliyor (PDF.js çalışanı
+   * yüklenemedi, belge şifreli). Böyle bir durumda bu kontrol bütün alıntıları
+   * "sayfada bulunamadı" sayıp SESSİZCE siliyor ve hakem kanıtsız bir analiz
+   * görüyordu. Artık istemci metni güvenilmezse doğrulama atlanır: sunucu
+   * taranmış belgeyi zaten OCR hatasıyla reddeder, sunucudaki kanıt zinciri
+   * korunur ve alıntılar olduğu gibi gösterilir.
+   */
+  const usableText = pages.reduce((total, page) => total + page.trim().length, 0);
+  if (usableText < Math.max(200, pages.length * 40)) {
+    return {
+      ...evaluation,
+      analysisWarnings: [
+        ...evaluation.analysisWarnings,
+        "Tarayıcıda rapor metni okunamadığı için alıntılar istemcide doğrulanmadı; "
+        + "kanıtlar sunucunun okuduğu belgeden gelmektedir.",
+      ],
+    };
+  }
   let removed = 0;
   const validEvidence = (evidence: EvidenceRef[]) => evidence.filter((item) => {
     if (!item.page || !pages[item.page - 1]) { removed += 1; return false; }
@@ -117,7 +144,7 @@ export async function evaluateReport(input: {
   const contentType = response.headers.get("content-type") || "";
   // Gövde en fazla bir kez okunur; ikinci okuma her zaman başarısız olurdu.
   const payload = contentType.includes("application/json")
-    ? await response.json().catch(() => null) as (Partial<ReportEvaluation> & { error?: string; retryable?: boolean; engineUnavailable?: boolean }) | null
+    ? await response.json().catch(() => null) as (Partial<ReportEvaluation> & { error?: string; retryable?: boolean; engineUnavailable?: boolean; code?: string }) | null
     : null;
 
   if (response.ok && payload && !payload.error && payload.version === "2.0"
@@ -129,5 +156,6 @@ export async function evaluateReport(input: {
     payload?.error || `Analiz motoru beklenmedik bir cevap döndürdü (HTTP ${response.status}).`,
     payload?.retryable === true,
     payload?.engineUnavailable === true,
+    typeof payload?.code === "string" ? payload.code : "",
   );
 }

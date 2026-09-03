@@ -2,9 +2,12 @@ import {
   CHECK_STAGE_IDS,
   RULE_VERDICT_LABELS,
   checkStageOf,
+  verifiedOutsidePdf,
+  type CategoryFit,
   type CheckStage,
   type CheckStatus,
   type Criterion,
+  type CriterionControlType,
   type CriterionFinding,
   type HeadingCheck,
   type ParticipantFeedback,
@@ -144,33 +147,112 @@ export function gateBlocksUpload(checks: PreCheck[]): boolean {
 
 /* ------------------------------ Dil tespiti ----------------------------- */
 
-const TURKISH_STOPWORDS = ["ve", "bir", "bu", "için", "ile", "olarak", "olan", "gibi", "daha", "sistem"];
-const ENGLISH_STOPWORDS = ["the", "and", "of", "to", "in", "is", "for", "with", "this", "system"];
+const TURKISH_STOPWORDS = new Set([
+  "ve", "bir", "bu", "için", "ile", "olarak", "olan", "gibi", "daha", "sistem",
+  "ise", "ancak", "veya", "ya", "da", "de", "ki", "her", "tüm", "bütün",
+  "ayrıca", "böylece", "çünkü", "ile", "kadar", "sonra", "önce", "üzerine",
+  "göre", "birlikte", "değil", "yani", "hem", "olup", "olmak", "vardır",
+  "bulunmaktadır", "edilmiştir", "yapılmıştır", "kullanılmıştır", "aşağıda",
+  "yukarıda", "tarafından", "amacıyla", "şekilde", "durumda", "bunun", "şu",
+]);
+
+const ENGLISH_STOPWORDS = new Set([
+  "the", "and", "of", "to", "in", "is", "for", "with", "this", "system",
+  "are", "was", "were", "that", "which", "from", "have", "has", "been",
+  "will", "shall", "not", "but", "also", "these", "those", "their", "there",
+  "can", "should", "would", "between", "during", "after", "before", "such",
+  "each", "other", "than", "then", "when", "where", "while", "however",
+]);
+
+/**
+ * Türkçeye ÖZGÜ yaygın ek/son ek kalıpları. Şartname diliyle yazılmış teknik
+ * bir raporda durak sözcükler az geçse bile bu ekler yoğun görülür; dil kararı
+ * artık tek bir sinyale bağlı değildir.
+ */
+const TURKISH_SUFFIXES = [
+  "lar", "ler", "ları", "leri", "ların", "lerin", "larla", "lerle",
+  "dır", "dir", "dur", "dür", "tır", "tir", "tur", "tür",
+  "mış", "miş", "muş", "müş", "acak", "ecek", "makta", "mekte",
+  "ması", "mesi", "mak", "mek", "nın", "nin", "nun", "nün",
+  "ında", "inde", "unda", "ünde", "dan", "den", "tan", "ten",
+  "sal", "sel", "lık", "lik", "luk", "lük", "siz", "sız",
+];
+
+/** İngilizceye özgü yaygın son ekler; Türkçe metinde neredeyse hiç görülmez. */
+const ENGLISH_SUFFIXES = ["tion", "tions", "ing", "ment", "ness", "able", "ible", "ously", "ical"];
 
 export type LanguageCode = "tr" | "en" | "unknown";
 
+/** Dil tespitinin ölçülebilir gerekçesi; hem karar hem ekran metni buradan üretilir. */
+export type LanguageSignals = {
+  code: LanguageCode;
+  /** Karşılaştırmaya giren kelime sayısı. */
+  words: number;
+  /** 100 kelime başına Türkçe sinyal yoğunluğu (durak sözcük + ek + özel harf). */
+  turkishRate: number;
+  /** 100 kelime başına İngilizce sinyal yoğunluğu. */
+  englishRate: number;
+};
+
+/** Kelime, listedeki eklerden biriyle bitiyor mu? Kök en az 3 harf kalmalıdır. */
+function endsWithAny(word: string, suffixes: string[]): boolean {
+  return suffixes.some((suffix) => word.length >= suffix.length + 3 && word.endsWith(suffix));
+}
+
 /**
- * Sayfa metinlerinden rapor dilini kestirir; kısa metinlerde "unknown" döner.
- * İngilizce sinyalleri kök yerelde küçültülmüş kopyadan sayılır: tr-TR
- * küçültmesi büyük "I" harfini noktasız "ı"ya çevirdiği için hem İngilizce
- * durak sözcüklerini bozar hem de Türkçe harf sayımını şişirir.
+ * Rapor dilini ÇOK SİNYALLİ olarak ölçer.
+ *
+ * NEDEN: eski sürüm yalnızca 10 sabit durak sözcüğü sayıyordu. Teknik bir
+ * Türkçe rapor bu on kelimeyi az kullandığında (tablolar, kısaltmalar, madde
+ * listeleri) dil "tespit edilemedi" görünüyor ve hakem ekranı gerçek bir
+ * uyuşmazlık yokken uyarı basıyordu. Artık dört sinyal birlikte değerlendirilir:
+ *
+ *   1. Durak sözcükler (genişletilmiş liste)
+ *   2. Türkçeye özgü ekler (-lar/-ler, -dır, -mış, -ması, -nın …)
+ *   3. Türkçeye özgü harfler (ç, ğ, ı, ö, ş, ü)
+ *   4. Yeterli metin miktarı ve kelime dağılımı
+ *
+ * "unknown" yalnızca metin gerçekten yetersizken veya İKİ dilin sinyalleri de
+ * zayıf/başa başken döner. İngilizce sinyalleri kök yerelde küçültülmüş
+ * kopyadan sayılır: tr-TR küçültmesi büyük "I" harfini noktasız "ı"ya çevirip
+ * hem İngilizce durak sözcüklerini bozar hem Türkçe harf sayımını şişirir.
  */
-export function detectLanguage(pages: string[]): LanguageCode {
+export function languageSignals(pages: string[]): LanguageSignals {
   const raw = pages.join(" ");
   const turkishText = lower(raw);
   const englishText = raw.toLowerCase();
   const turkishWords = turkishText.split(WORD_SPLIT).filter(Boolean);
   const englishWords = englishText.split(WORD_SPLIT).filter(Boolean);
-  if (turkishWords.length < 40) return "unknown";
-  const turkishChars = (englishText.match(/[çğıöşü]/g) ?? []).length;
-  const turkishHits = turkishWords.filter((word) => TURKISH_STOPWORDS.includes(word)).length;
-  const englishHits = englishWords.filter((word) => ENGLISH_STOPWORDS.includes(word)).length;
-  // Harf ipucu tek başına dil kararı vermez; yalnızca durak sözcük sinyalini güçlendirir.
-  const charBonus = turkishHits === 0 ? 0 : Math.min(turkishChars / 40, turkishHits + 5);
-  const turkishScore = turkishHits + charBonus;
-  if (turkishScore > englishHits) return "tr";
-  if (englishHits > turkishScore) return "en";
-  return "unknown";
+  const words = turkishWords.length;
+  // Çok kısa metinde hiçbir oran anlamlı değildir (taranmış PDF, kapak sayfası).
+  if (words < 25) return { code: "unknown", words, turkishRate: 0, englishRate: 0 };
+
+  const turkishStopHits = turkishWords.filter((word) => TURKISH_STOPWORDS.has(word)).length;
+  const turkishSuffixHits = turkishWords.filter((word) => endsWithAny(word, TURKISH_SUFFIXES)).length;
+  // Özgün harfler kelime değil karakter sinyalidir; kelime ölçeğine indirilir.
+  const turkishCharWords = turkishWords.filter((word) => /[çğıöşü]/.test(word)).length;
+  const englishStopHits = englishWords.filter((word) => ENGLISH_STOPWORDS.has(word)).length;
+  const englishSuffixHits = englishWords.filter((word) => endsWithAny(word, ENGLISH_SUFFIXES)).length;
+
+  const per100 = (count: number) => (count / words) * 100;
+  const turkishRate = per100(turkishStopHits) + per100(turkishSuffixHits) + per100(turkishCharWords) * 0.5;
+  const englishRate = per100(englishStopHits) + per100(englishSuffixHits);
+
+  // Eşik: baskın dilin yoğunluğu hem anlamlı (≥ 4/100) hem diğerinin 1,5 katı olmalı.
+  const MIN_RATE = 4;
+  const DOMINANCE = 1.5;
+  if (turkishRate >= MIN_RATE && turkishRate >= englishRate * DOMINANCE) {
+    return { code: "tr", words, turkishRate, englishRate };
+  }
+  if (englishRate >= MIN_RATE && englishRate >= turkishRate * DOMINANCE) {
+    return { code: "en", words, turkishRate, englishRate };
+  }
+  return { code: "unknown", words, turkishRate, englishRate };
+}
+
+/** Sayfa metinlerinden rapor dilini kestirir; kararsız kalırsa "unknown" döner. */
+export function detectLanguage(pages: string[]): LanguageCode {
+  return languageSignals(pages).code;
 }
 
 /** Dil kodunun ekranda gösterilen adı; tespit edilemediyse null. */
@@ -199,23 +281,38 @@ export function languageMismatch(detected: LanguageCode, expected: string | null
   return expectedCode !== null && detected !== "unknown" && detected !== expectedCode;
 }
 
+/**
+ * 1. aşama kartında gösterilen TEK CÜMLELİK dil sonucu (madde 3).
+ *
+ * Teknik ayrıntı (oran, kelime sayısı, model tahmini) kullanıcıya basılmaz;
+ * hakem üç durumdan birini görür:
+ *
+ *   "Rapor dili Türkçe ve beklenen dille uyumlu."
+ *   "Rapor dili İngilizce algılandı; beklenen dil Türkçe."
+ *   "Rapor dili güvenilir biçimde belirlenemedi."
+ */
+export function languageSentence(detected: LanguageCode, expected: string | null | undefined): string {
+  const detectedLabel = languageLabel(detected);
+  if (!detectedLabel) return "Rapor dili güvenilir biçimde belirlenemedi.";
+  const expectedCode = expectedLanguageCode(expected);
+  const expectedLabel = expectedCode ? languageLabel(expectedCode) : null;
+  if (!expectedLabel) return `Rapor dili ${detectedLabel} algılandı; şartname beklenen dili belirtmiyor.`;
+  return detected === expectedCode
+    ? `Rapor dili ${detectedLabel} ve beklenen dille uyumlu.`
+    : `Rapor dili ${detectedLabel} algılandı; beklenen dil ${expectedLabel}.`;
+}
+
 export function buildLanguageCheck(pages: string[], expectedLanguage?: string | null): PreCheck {
   const detected = detectLanguage(pages);
   const mismatch = languageMismatch(detected, expectedLanguage);
   const status: CheckStatus = detected === "unknown" ? "warning" : mismatch ? "flagged" : "passed";
-  const detectedLabel = languageLabel(detected);
-  const expectedNote = expectedLanguage ? ` Şartnamenin beklediği dil: ${expectedLanguage}.` : " Şartname rapor dilini açıkça belirtmiyor.";
   return {
     id: "precheck-language",
     kind: "language",
     name: "Rapor dili",
     status,
     method: "deterministic",
-    detail: detected === "unknown"
-      ? `Rapor dili güvenilir biçimde tespit edilemedi; metin çok kısa veya taranmış görüntü olabilir.${expectedNote}`
-      : mismatch
-        ? `Rapor dili ${detectedLabel} olarak tespit edildi; şartname ${expectedLanguage} bekliyor. Dil uyuşmazlığı hakem incelemesi için işaretlendi.`
-        : `Rapor dili ${detectedLabel} olarak tespit edildi.${expectedNote}`,
+    detail: languageSentence(detected, expectedLanguage),
     evidence: [],
   };
 }
@@ -287,24 +384,106 @@ export type CriterionMatch = {
   totalKeywords: number;
   /** Eşleşen noktadan sayfa sonuna kadar kalan karakter sayısı; içerik doluluğu kestirimi. */
   contentLength: number;
+  /**
+   * Tek eşleşme İÇİNDEKİLER tablosundan, üstbilgiden veya altbilgiden geldi.
+   * Böyle bir eşleşme başlığın GERÇEK bölümünün var/dolu olduğunu KANITLAMAZ.
+   */
+  tableOfContentsOnly: boolean;
 };
 
 /** Eşleşmenin altında en az bu kadar metin varsa başlık içeriği dolu sayılır. */
 const FILLED_CONTENT_CHARS = 200;
 
 /**
+ * Satır bir İÇİNDEKİLER girdisi mi? Nokta öncüsü ("Giriş .......... 4") veya
+ * başlıktan hemen sonra gelen yalın sayfa numarası bu kalıbı verir.
+ */
+function isTableOfContentsLine(line: string): boolean {
+  const text = line.trim();
+  if (/\.{3,}\s*\d{1,3}$/.test(text)) return true;
+  if (/[·•–—-]{2,}\s*\d{1,3}$/.test(text)) return true;
+  // "3.2 Mekanik Tasarım 12" — kısa satır + sonda yalın sayfa numarası.
+  return text.length <= 90 && /^\s*\d+(?:\.\d+)*\s+\S.*\s+\d{1,3}$/.test(text);
+}
+
+/** Metin bloğunun satırları; PDF çıkarımı satır sonlarını korumazsa tek satır sayılır. */
+function linesOf(pageText: string): string[] {
+  return pageText.split(/\r?\n/);
+}
+
+/**
+ * Raporun yapısal haritası: içindekiler sayfaları ve her sayfada tekrar eden
+ * üstbilgi/altbilgi satırları. Bir başlık ifadesinin YALNIZCA bu bölgelerde
+ * geçmesi, ilgili bölümün raporda gerçekten bulunduğunu göstermez (madde 3).
+ */
+export type ReportLayout = {
+  /** 1 tabanlı içindekiler sayfa numaraları. */
+  tableOfContentsPages: Set<number>;
+  /** Sayfaların çoğunda tekrar ettiği için üstbilgi/altbilgi sayılan normalize satırlar. */
+  runningLines: Set<string>;
+};
+
+export function analyzeReportLayout(pages: string[]): ReportLayout {
+  const tableOfContentsPages = new Set<number>();
+  const linePages = new Map<string, Set<number>>();
+  pages.forEach((pageText, index) => {
+    const pageNumber = index + 1;
+    const lines = linesOf(pageText);
+    const head = lower(pageText.slice(0, 400));
+    const leaderLines = lines.filter(isTableOfContentsLine).length;
+    // İçindekiler sayfası: başlığı geçiyor VEYA sayfa nokta öncülü satırlardan oluşuyor.
+    if (/i̇çindekiler|icindekiler|contents|tablo listesi|şekil listesi|sekil listesi/.test(head) || leaderLines >= 4) {
+      tableOfContentsPages.add(pageNumber);
+    }
+    for (const line of lines) {
+      const key = wordsOf(line).join(" ");
+      // Çok kısa satırlar (sayfa numarası) ve çok uzun satırlar (gövde) üstbilgi olamaz.
+      if (!key || key.length < 8 || key.length > 120) continue;
+      if (!linePages.has(key)) linePages.set(key, new Set());
+      linePages.get(key)!.add(pageNumber);
+    }
+  });
+  const runningLines = new Set<string>();
+  // Tek sayfalık belgede "her sayfada tekrar" ölçütü anlamsızdır.
+  const threshold = Math.max(3, Math.ceil(pages.length * 0.6));
+  if (pages.length >= 4) {
+    for (const [key, seenPages] of linePages) if (seenPages.size >= threshold) runningLines.add(key);
+  }
+  return { tableOfContentsPages, runningLines };
+}
+
+/**
  * Kriter (veya başlık) adındaki anahtar kelimeleri sayfa metinlerinde arar.
  * Anahtarların en az yarısı aynı sayfada geçiyorsa "bulundu" sayılır ve kanıt
  * alıntısı döner. Sunucu tarafında model başlık listesi vermediğinde 2. aşama
  * başlık tablosunun yedeği olarak da kullanılır.
+ *
+ * KONUM FARKINDALIĞI (madde 3): içindekiler tablosundaki, üstbilgideki veya
+ * altbilgideki eşleşme GERÇEK BÖLÜM sayılmaz. Böyle bir eşleşme bulunursa
+ * arama devam eder; gövdede karşılığı yoksa sonuç `tableOfContentsOnly` ile
+ * işaretlenir ve içerik ASLA "dolu" gösterilmez. İçerik doluluğu, eşleşmenin
+ * bulunduğu NOKTADAN SONRAKİ metinden ölçülür; başlığın önündeki gövde
+ * doluluk sayılmaz.
  */
-export function matchCriterionInPages(criterion: Pick<Criterion, "name">, pages: string[]): CriterionMatch {
+export function matchCriterionInPages(
+  criterion: Pick<Criterion, "name">,
+  pages: string[],
+  layout: ReportLayout = analyzeReportLayout(pages),
+): CriterionMatch {
   const keywords = keywordsOf(criterion.name);
-  const empty: CriterionMatch = { found: false, searchable: false, page: null, snippet: "", matchedKeywords: 0, totalKeywords: 0, contentLength: 0 };
+  const empty: CriterionMatch = {
+    found: false, searchable: false, page: null, snippet: "",
+    matchedKeywords: 0, totalKeywords: 0, contentLength: 0, tableOfContentsOnly: false,
+  };
   if (!keywords.length) return empty;
 
-  let best: CriterionMatch = { ...empty, searchable: true, totalKeywords: keywords.length };
+  const base: CriterionMatch = { ...empty, searchable: true, totalKeywords: keywords.length };
+  let best = base;
+  /** Yalnızca içindekiler/üstbilgi bölgesinde bulunan en iyi eşleşme. */
+  let bestDecorative = base;
+
   pages.forEach((pageText, index) => {
+    const pageNumber = index + 1;
     const loweredPage = lower(pageText);
     const pageWords = loweredPage.split(WORD_SPLIT).filter((word) => word.length >= 3);
     const hits: string[] = [];
@@ -312,25 +491,71 @@ export function matchCriterionInPages(criterion: Pick<Criterion, "name">, pages:
       const hit = pageWords.find((word) => wordsMatch(keyword, word));
       if (hit) hits.push(hit);
     }
-    if (hits.length > best.matchedKeywords) {
-      // Alıntı, eşleşen gerçek kelimenin bulunduğu yerden çıkarılır.
-      const anchor = loweredPage.indexOf(hits[0]);
-      const start = anchor >= 0 ? Math.max(0, anchor - 60) : -1;
-      best = {
-        found: hits.length * 2 >= keywords.length,
-        searchable: true,
-        page: index + 1,
-        snippet: start >= 0 ? `…${pageText.slice(start, start + 180).trim()}…` : "",
-        matchedKeywords: hits.length,
-        totalKeywords: keywords.length,
-        contentLength: anchor >= 0 ? pageText.length - anchor : 0,
-      };
+    if (!hits.length) return;
+    const anchor = loweredPage.indexOf(hits[0]);
+    // Eşleşmenin bulunduğu satır: içindekiler girdisi veya tekrar eden üstbilgi mi?
+    const lineStart = anchor >= 0 ? loweredPage.lastIndexOf("\n", anchor) + 1 : 0;
+    const lineEnd = anchor >= 0 ? (loweredPage.indexOf("\n", anchor) + 1 || pageText.length) : pageText.length;
+    const matchedLine = pageText.slice(lineStart, lineEnd);
+    const decorative = layout.tableOfContentsPages.has(pageNumber)
+      || isTableOfContentsLine(matchedLine)
+      || layout.runningLines.has(wordsOf(matchedLine).join(" "));
+    const start = anchor >= 0 ? Math.max(0, anchor - 60) : -1;
+    const candidate: CriterionMatch = {
+      found: hits.length * 2 >= keywords.length,
+      searchable: true,
+      page: pageNumber,
+      snippet: start >= 0 ? `…${pageText.slice(start, start + 180).trim()}…` : "",
+      matchedKeywords: hits.length,
+      totalKeywords: keywords.length,
+      // Doluluk yalnızca eşleşme NOKTASINDAN SONRAKİ metinden ölçülür.
+      contentLength: anchor >= 0 ? Math.max(0, pageText.length - anchor) : 0,
+      tableOfContentsOnly: false,
+    };
+    if (decorative) {
+      if (hits.length > bestDecorative.matchedKeywords) bestDecorative = { ...candidate, contentLength: 0 };
+      return;
     }
+    if (hits.length > best.matchedKeywords) best = candidate;
   });
+
+  /*
+   * İçindekiler/üstbilgi eşleşmesi gövdedekinden GÜÇLÜ ve gövdede bölüm
+   * bulunamadıysa sonuç "yalnızca içindekilerde" olarak işaretlenir.
+   *
+   * Yalnızca "gövdede sıfır eşleşme" koşuluna bakmak yetmez: içindekilerde
+   * başlığın tamamı geçerken gövdede tek bir genel kelimenin ("sonuçları")
+   * rastgele bulunması, bölümün raporda var olduğunu göstermez ama işareti
+   * düşürüyordu. Gövde eşleşmesi bölümü KANITLIYORSA (found=true) bu yol hiç
+   * çalışmaz; gerçek bölüm her zaman içindekiler satırına yeğ tutulur.
+   */
+  if (!best.found && bestDecorative.matchedKeywords > best.matchedKeywords) {
+    return { ...bestDecorative, found: false, contentLength: 0, tableOfContentsOnly: true };
+  }
   return best;
 }
 
-/** Aktif 2. aşama kriterleri + şablon başlıkları; aynı başlık bir kez listelenir. */
+/**
+ * Kriterin kontrol türü; eski kayıtlarda alan bulunmadığında aşamaya göre
+ * makul varsayılan seçilir (2. aşama → içerik varlığı).
+ */
+export function controlTypeOf(criterion: Pick<Criterion, "stage" | "controlType">): CriterionControlType {
+  if (criterion.controlType) return criterion.controlType;
+  if (criterion.stage === "category_similarity") return "ANLAMSAL_UYGUNLUK";
+  if (criterion.stage === "headings_content") return "ICERIK_VARLIGI";
+  return "KANIT_KONTROLU";
+}
+
+/**
+ * GERÇEK ZORUNLU BAŞLIKLAR (madde 3).
+ *
+ * Her içerik kriteri zorunlu başlık DEĞİLDİR. Yalnızca `BIREBIR_BASLIK`
+ * kontrol türündeki kriterler ve resmî şablonun istediği başlıklar "raporda
+ * şu başlık bulunmalı" anlamına gelir. `ICERIK_VARLIGI`, `ANLAMSAL_UYGUNLUK`
+ * ve `KANIT_KONTROLU` kriterleri BİLGİNİN varlığını arar; adları rapora
+ * başlık olarak yazılmak zorunda değildir ve bu listeye alınmaz — aksi hâlde
+ * "12 zorunlu başlıktan 9'u eksik" gibi yanlış bir tablo doğuyordu.
+ */
 export function requiredHeadingsOf(profile: ProfileExport): string[] {
   const seen = new Set<string>();
   const headings: string[] = [];
@@ -340,35 +565,76 @@ export function requiredHeadingsOf(profile: ProfileExport): string[] {
     seen.add(key);
     headings.push(heading.trim());
   };
-  for (const item of profile.criteria) if (item.active && item.stage === "headings_content") push(item.name);
+  for (const item of profile.criteria) {
+    if (item.active && item.stage === "headings_content" && controlTypeOf(item) === "BIREBIR_BASLIK") push(item.name);
+  }
   for (const heading of profile.templateProfile?.requiredHeadings ?? []) push(heading);
   return headings;
 }
 
+/** 2. aşama içerik kriterleri: başlık konumunda değil, bilgi düzeyinde aranır. */
+export function contentPresenceCriteria(profile: ProfileExport): Criterion[] {
+  return profile.criteria.filter((item) => item.active
+    && item.stage === "headings_content"
+    && controlTypeOf(item) !== "BIREBIR_BASLIK");
+}
+
 /**
- * Zorunlu başlıkların raporda varlığı ve altındaki içeriğin doluluğu için
- * kelime eşleşmesine dayalı tahmin. Model başlık tablosu üretemediğinde ve
- * çevrimdışı yedekte kullanılır; notu bunun bir tahmin olduğunu söyler.
+ * Tek bir aranan ifadenin (başlık ya da içerik) rapordaki durumu.
+ *
+ * KONUM KURALI (madde 3): eşleşme yalnızca içindekiler tablosunda, üstbilgide
+ * veya altbilgide bulunduysa bölüm VAR sayılmaz ve içerik ASLA "dolu"
+ * gösterilmez; not bunu açıkça söyler. İçerik doluluğu, eşleşmenin bulunduğu
+ * NOKTADAN SONRAKİ metinden ölçülür.
+ */
+function headingCheckOf(
+  heading: string,
+  controlType: CriterionControlType,
+  pages: string[],
+  layout: ReportLayout,
+): HeadingCheck {
+  const match = matchCriterionInPages({ name: heading }, pages, layout);
+  const label = controlType === "BIREBIR_BASLIK" ? "Başlık" : "Beklenen içerik";
+  if (!match.searchable) {
+    return {
+      heading, controlType, present: false, contentFilled: false, page: null,
+      note: `${label} adından arama anahtarı çıkmadı; hakem kontrol etmeli.`,
+    };
+  }
+  if (match.tableOfContentsOnly) {
+    return {
+      heading, controlType, present: false, contentFilled: false,
+      page: match.page, tableOfContentsOnly: true,
+      note: `Bu ifade yalnızca içindekiler tablosunda veya üstbilgide geçiyor (s. ${match.page}); `
+        + "raporda karşılık gelen dolu bir bölüm bulunamadı. Hakem doğrulamalı.",
+    };
+  }
+  const contentFilled = match.found && match.contentLength >= FILLED_CONTENT_CHARS;
+  return {
+    heading,
+    controlType,
+    present: match.found,
+    contentFilled,
+    page: match.found ? match.page : null,
+    note: match.found
+      ? contentFilled
+        ? `${label} ${match.page}. sayfada bulundu (${match.matchedKeywords}/${match.totalKeywords} anahtar); eşleşmeden sonra içerik var.`
+        : `${label} ${match.page}. sayfada bulundu; eşleşmeden sonraki içerik kısa görünüyor, hakem doğrulamalı.`
+      : `${label} kelime aramasıyla bulunamadı; hakem doğrulamalı.`,
+  };
+}
+
+/**
+ * 2. aşama kontrol tablosu: `BIREBIR_BASLIK` kriterleri ve şablon başlıkları
+ * başlık konumunda, diğer içerik kriterleri bilgi düzeyinde aranır. Model
+ * başlık tablosu üretemediğinde ve çevrimdışı yedekte kullanılır.
  */
 export function buildHeadingChecks(profile: ProfileExport, pages: string[]): HeadingCheck[] {
-  return requiredHeadingsOf(profile).map((heading) => {
-    const match = matchCriterionInPages({ name: heading }, pages);
-    if (!match.searchable) {
-      return { heading, present: false, contentFilled: false, page: null, note: "Başlık adından arama anahtarı çıkmadı; hakem kontrol etmeli." };
-    }
-    const contentFilled = match.found && match.contentLength >= FILLED_CONTENT_CHARS;
-    return {
-      heading,
-      present: match.found,
-      contentFilled,
-      page: match.found ? match.page : null,
-      note: match.found
-        ? contentFilled
-          ? `Kelime eşleşmesiyle ${match.page}. sayfada bulundu (${match.matchedKeywords}/${match.totalKeywords} anahtar); altında içerik var.`
-          : `Kelime eşleşmesiyle ${match.page}. sayfada bulundu; altındaki içerik kısa görünüyor, hakem doğrulamalı.`
-        : "Başlıkla eşleşen bölüm kelime aramasıyla bulunamadı; hakem doğrulamalı.",
-    };
-  });
+  const layout = analyzeReportLayout(pages);
+  return [
+    ...requiredHeadingsOf(profile).map((heading) => headingCheckOf(heading, "BIREBIR_BASLIK", pages, layout)),
+    ...contentPresenceCriteria(profile).map((item) => headingCheckOf(item.name, controlTypeOf(item), pages, layout)),
+  ];
 }
 
 /** Aktif 2. aşama kriterlerinin kaçının raporda bulunduğunu özetleyen ön kontrol. */
@@ -385,7 +651,8 @@ export function buildHeadingsCheck(profile: ProfileExport, pages: string[]): Pre
       evidence: [],
     };
   }
-  const matches = mandatory.map((item) => ({ item, match: matchCriterionInPages(item, pages) }));
+  const layout = analyzeReportLayout(pages);
+  const matches = mandatory.map((item) => ({ item, match: matchCriterionInPages(item, pages, layout) }));
   const unsearchable = matches.filter((entry) => !entry.match.searchable);
   const missing = matches.filter((entry) => entry.match.searchable && !entry.match.found);
   const searchableCount = mandatory.length - unsearchable.length;
@@ -571,10 +838,80 @@ export function summarizeFindings(findings: CriterionFinding[], stages: StageRes
   };
 }
 
+/**
+ * YAYIMLI kriter kümesinin kapsam sayaçları (madde 2).
+ *
+ * Hakem ekranı "12 yayımlı kriterden 9'u katılımcı PDF'si üzerinden
+ * değerlendirildi; 3 kriter video, portal veya fiziksel aşama gerektirdiği
+ * için rapor analizine katılmadı" cümlesini bu sayılardan kurar.
+ */
+export function criteriaScopeOf(profile: ProfileExport): {
+  published: number;
+  pdfEvaluable: number;
+  outsidePdf: number;
+  outsideNames: string[];
+} {
+  const active = profile.criteria.filter((item) => item.active);
+  const outside = active.filter((item) => verifiedOutsidePdf(item.verifiability));
+  return {
+    published: active.length,
+    pdfEvaluable: active.length - outside.length,
+    outsidePdf: outside.length,
+    outsideNames: outside.map((item) => item.name),
+  };
+}
+
+/**
+ * Kategori uygunluğunun kullanıcıya gösterilen durumu (madde 3).
+ *
+ * Modelin ham skoru YAPAY bir kesinliktir ("%100 uyumlu" gibi bir ifade
+ * hakemi yanıltır); bu yüzden skor yalnızca bant seçmek için okunur ve ekranda
+ * hiçbir yüzde gösterilmez. Skor yoksa ya da o aşamada hiç kanıt üretilmediyse
+ * sonuç "Yeterli kanıt bulunamadı"dır — "uyumsuz" DEĞİLDİR.
+ */
+export function categoryFitOf(score: number | null | undefined): CategoryFit {
+  if (score === null || score === undefined || !Number.isFinite(score)) return "KANIT_YOK";
+  if (score >= 70) return "UYUMLU";
+  if (score >= 40) return "KISMEN_UYUMLU";
+  return "UYUMSUZ";
+}
+
+/**
+ * 2. aşama özeti (madde 3): sade sayı, uzun başlık listesi değil.
+ * Başlık kriterleri ile içerik kriterleri ayrı sayılır çünkü ikisi aynı şey
+ * değildir: biri başlığın kendisini, diğeri bilginin varlığını arar.
+ */
+export function headingsStageSummary(checks: HeadingCheck[]): string {
+  if (!checks.length) return "Profilde başlık veya içerik kriteri tanımlı değil.";
+  const headings = checks.filter((item) => (item.controlType ?? "BIREBIR_BASLIK") === "BIREBIR_BASLIK");
+  const contents = checks.filter((item) => (item.controlType ?? "BIREBIR_BASLIK") !== "BIREBIR_BASLIK");
+  const filled = (list: HeadingCheck[]) => list.filter((item) => item.present && item.contentFilled).length;
+  const parts: string[] = [];
+  if (headings.length) parts.push(`${filled(headings)}/${headings.length} zorunlu başlık yerinde ve dolu`);
+  if (contents.length) parts.push(`${filled(contents)}/${contents.length} beklenen içerik bulundu`);
+  const decorative = checks.filter((item) => item.tableOfContentsOnly).length;
+  if (decorative) parts.push(`${decorative} ifade yalnızca içindekilerde geçiyor`);
+  return parts.join(" · ");
+}
+
+/**
+ * 4. aşama özeti (madde 3): hakem iki durumlu ön değerlendirmeyi okur.
+ * "9 kriter incelendi · 8 uygun · 1 olumsuz" — uzun kriter adı veya teknik
+ * açıklama özet satırına sıkıştırılmaz.
+ */
+export function evidenceStageSummary(findings: CriterionFinding[]): string {
+  const own = findings.filter((item) => !isOutsidePdfFinding(item));
+  if (!own.length) return "Katılımcı PDF'si üzerinden değerlendirilebilen kriter yok.";
+  const uygun = own.filter((item) => item.verdict === "BASARILI").length;
+  return `${own.length} kriter incelendi · ${uygun} uygun · ${own.length - uygun} olumsuz`;
+}
+
 /** Bir aşamanın bulgularından kısa, sayısal özet cümlesi. */
 export function stageSummaryOf(stage: CheckStage, findings: CriterionFinding[]): string {
   const own = findings.filter((item) => item.stage === stage);
   if (!own.length) return `${checkStageOf(stage).title}: bu aşamaya bağlı aktif kriter yok.`;
+  // 4. aşama hakemin karar verdiği aşamadır: özet iki durumlu okunur.
+  if (stage === "criteria_evidence") return evidenceStageSummary(own);
   const counts = summarizeFindings(own);
   const outside = counts.disiKanit ?? 0;
   return `${own.length} kural kontrol edildi: ${counts.basarili} ${RULE_VERDICT_LABELS.BASARILI}, ${counts.revizyon} ${RULE_VERDICT_LABELS.REVIZYON}, ${counts.kritikHata} ${RULE_VERDICT_LABELS.KRITIK_HATA}`
@@ -592,7 +929,7 @@ export function deriveStageResult(stage: CheckStage, findings: CriterionFinding[
     verdict: capStageVerdict(stage, worstVerdict(own.map((item) => item.verdict)), findings),
     summary: stageSummaryOf(stage, findings),
     evidence: [],
-    ...(stage === "category_similarity" ? { categoryScore: null, similarity: null } : {}),
+    ...(stage === "category_similarity" ? { categoryScore: null, categoryFit: "KANIT_YOK" as const, similarity: null } : {}),
   };
 }
 
@@ -616,6 +953,8 @@ export function orderStages(provided: StageResult[], findings: CriterionFinding[
     const result: StageResult = { ...existing, verdict: capStageVerdict(stage, existing.verdict, findings) };
     if (stage === "category_similarity") {
       result.categoryScore = existing.categoryScore ?? null;
+      // Etiket her zaman skordan yeniden türetilir; eski kayıt da doğru okunur.
+      result.categoryFit = existing.categoryFit ?? categoryFitOf(result.categoryScore);
       result.similarity = existing.similarity ?? null;
     }
     return result;

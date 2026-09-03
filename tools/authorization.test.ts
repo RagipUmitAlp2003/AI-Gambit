@@ -464,9 +464,39 @@ test("geri bildirim kartları PRD başlıklarını kullanır", async () => {
   }
 });
 
-test("hakem ekranında kaynak satıra git düğmesi ve aşama ikonları var", () => {
+/*
+ * Eski ad "Kaynak Satıra Git"ti ve PDF'i `#page=` adres parçasıyla yeni sekmede
+ * açıyordu; tarayıcıların yerleşik PDF görüntüleyicileri bu parçayı güvenilir
+ * biçimde uygulamadığı için düğme sessizce yanlış sayfayı açıyordu. Kanıt artık
+ * uygulama içi panelde gösterilir (madde 6). Bu test yeni davranışı korur:
+ * düğme adı, uygulama içi görüntüleyicinin bağlanmış olması ve benzerlik
+ * işaretinin (dört aşamadan çıkarıldıktan sonra) kendi notunda durması.
+ */
+test("hakem ekranında kanıtı PDF'de gösteren uygulama içi panel ve aşama ikonları var", () => {
   const evaluation = readFileSync("app/components/evaluation-app.tsx", "utf8");
-  assert.match(evaluation, /Kaynak Satıra Git/, "Kanıta gitme düğmesi bulunmalıdır.");
+  assert.match(evaluation, /Kanıtı PDF&apos;de göster/, "Kanıt düğmesi bulunmalıdır.");
+  assert.match(evaluation, /<PdfEvidenceViewer/, "Kanıt uygulama içi panelde açılmalıdır.");
   assert.match(evaluation, /function StageIcon/, "Aşamalar yeşil/sarı/kırmızı ikonla gösterilmelidir.");
   assert.match(evaluation, /ŞÜPHELİ/, "Benzerlik taraması Şüpheli/Normal olarak işaretlenmelidir.");
+
+  const viewer = readFileSync("app/components/pdf-evidence-viewer.tsx", "utf8");
+  // Adres parçasına güvenilmez: sayfa doğrudan çizilir.
+  assert.match(viewer, /renderPage/, "Görüntüleyici ilgili sayfayı kendisi çizmelidir.");
+  assert.match(viewer, /pdf-viewer-highlight/, "Alıntı vurgulanmalıdır.");
+  assert.match(viewer, /vurgulama yapılamadı/i, "Vurgulama yapılamadığında kullanıcıya söylenmelidir.");
+  assert.match(viewer, /Kanıt PDF&apos;i gösterilemedi/, "PDF açılamazsa açık hata gösterilmelidir.");
+});
+
+/*
+ * Benzerlik, dört aşamalı özet kartlarından ÇIKARILDI (madde 3): kategori
+ * kartı yalnızca kategori uygunluğunu gösterir. Bu test, benzerlik satırının
+ * aşama şeridine geri sızmasını engeller.
+ */
+test("dört aşamalı özet kartlarında benzerlik satırı ve yapay yüzde yoktur", () => {
+  const evaluation = readFileSync("app/components/evaluation-app.tsx", "utf8");
+  const strip = evaluation.slice(evaluation.indexOf("function StageStrip"), evaluation.indexOf("type RejectDraft"));
+  assert.ok(strip.length > 0, "StageStrip bulunmalıdır.");
+  assert.doesNotMatch(strip, /Benzerlik taraması/, "Benzerlik aşama kartında gösterilmemelidir.");
+  assert.doesNotMatch(strip, /categoryScore/, "Kategori kartı ham skoru okumamalıdır.");
+  assert.match(strip, /CATEGORY_FIT_LABELS/, "Kategori uygunluğu etiketle gösterilmelidir.");
 });

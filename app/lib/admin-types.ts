@@ -81,6 +81,8 @@ export type WorkflowEventName =
   | "application_submitted"
   | "application_assigned"
   | "application_reassigned"
+  /** Hakem pasife alındı ama atanacak aktif hakem yok; dosya kuyrukta bekliyor. */
+  | "application_reassignment_queued"
   | "judge_reminder_sent"
   | "analysis_requeued"
   | "document_reupload_requested"
