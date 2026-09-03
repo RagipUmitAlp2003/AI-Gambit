@@ -42,15 +42,17 @@ test("merkezî sözlük bağlayıcı, olumsuz ve sayı-birim ifadelerini ayrı k
   assert.equal(selectCriteriaCandidates([block("SAYFA-01-MADDE-1", "Tasarım yaklaşımı açıklanır.")]).candidates.length, 0);
 });
 
-test("aday seçimi fiziksel ve haricî ifadeleri silmez, LLM kapsam kararına taşır", () => {
+test("aday seçimi teknik/fiziksel kuralları dışarıda bırakır, rapor içeriğini taşır", () => {
   const blocks = [
     block("SAYFA-02-MADDE-3-2", "Takım yarışma günü parkur görevini tamamlamalıdır."),
     block("SAYFA-03-MADDE-4-1", "Test sonuçları raporda tablo halinde sunulmalıdır.", 3),
   ];
   const selected = selectCriteriaCandidates(blocks);
-  assert.equal(selected.candidates.length, 2);
-  assert.ok(selected.candidates[0].signals.includes("PHYSICAL_STAGE_TERM"));
-  assert.ok(selected.candidates[1].signals.includes("HEADING_CONTENT_TERM"));
+  assert.equal(selected.candidates.length, 1);
+  assert.equal(selected.candidates[0].block.sourceId, "SAYFA-03-MADDE-4-1");
+  assert.ok(selected.candidates[0].signals.includes("HEADING_CONTENT_TERM"));
+  assert.equal(selected.unselected[0].block.sourceId, "SAYFA-02-MADDE-3-2");
+  assert.ok(selected.unselected[0].signals.includes("PHYSICAL_STAGE_TERM"));
 });
 
 test("modern LLM sonucu yalnızca mevcut kaynak ve birebir alıntıyla kriter olur", () => {

@@ -18,7 +18,7 @@ import { deleteStoredAnalysis, findStoredAnalysis, reportBucket, saveCriteriaExt
 import type { AnalysisDiagnostics, AnalysisResult } from "../../lib/types";
 
 /**
- * Şartname analizi ucu — dört aşamalı prensip, TEK LLM çağrısı.
+ * Şartname analizi ucu — üç temel rapor kontrolü, TEK LLM çağrısı.
  *
  * Yarışma Yöneticisi YALNIZCA şartname PDF'sini yükler; ayrı bir resmî rapor
  * şablonu alanı yoktur. PDF sunucuda yapısal bloklara ayrılır; sürümlü sözlük

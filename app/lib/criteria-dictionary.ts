@@ -22,7 +22,7 @@
 import { isNegated, isWordBoundary, normalizeForSearch } from "./turkish-text";
 
 /** İçerik her değiştiğinde artırılır. Analiz kayıtlarına bu değer yazılır. */
-export const DICTIONARY_VERSION = "sozluk-v2";
+export const DICTIONARY_VERSION = "sozluk-v3-core-report-checks";
 
 export type DictionaryCategory =
   | "obligation"
@@ -191,6 +191,10 @@ const LANGUAGE_TEMPLATE = group("language_template", "Dil ve sablon", "language_
   { key: "dosya-turu", label: "dosya turu / format", source: "dosya tur(?:u|leri)|format(?:inda|lari|i)?" },
   { key: "pdf", label: "PDF", source: "pdf" },
   { key: "sablon", label: "sablon", source: "sablon(?:una|dan|u)?" },
+  { key: "a4", label: "A4 sayfa", source: "a4" },
+  { key: "kaynakca", label: "kaynakca / referanslar", source: "kaynakca|referans(?:lar|lar bolumu)?" },
+  { key: "ust-alt-bilgi", label: "ustbilgi / altbilgi / sayfa numarasi", source: "ustbilgi|altbilgi|sayfa numara(?:si|landirma)" },
+  { key: "paragraf-hizalama", label: "paragraf / hizalama / girinti", source: "paragraf duzeni|hizalama|girinti" },
 ]);
 
 /* ------------------------------------------------------------------ *
@@ -206,6 +210,9 @@ const HEADING_CONTENT = group("heading_content", "Baslik ve icerik", "heading_co
   { key: "tablo-cizim", label: "tablo / cizim / sema / diyagram / gorsel", source: "tablo(?:lari|sunda|su|lar)?|cizim(?:leri|ler|i)?|sema(?:lari|si|lar)?|diyagram(?:lari|lar|i)?|gorsel(?:leri|ler|i)?" },
   { key: "yontem-sonuc", label: "yontem / sonuc / test / dogrulama", source: "yontem(?:leri|ler|i)?|sonuc(?:lari|lar|u)?|test(?:leri|ler|i)?|dogrulama(?:si)?" },
   { key: "tasarim-basliklari", label: "mekanik / elektronik tasarim, yazilim, guvenlik", source: "mekanik tasarim|elektronik tasarim|yazilim(?:lari|lar|i)?" },
+  { key: "rapor-turleri", label: "teknik yeterlilik / kritik tasarim / on tasarim raporu", source: "teknik yeterlilik raporu|kritik tasarim raporu|on tasarim raporu|final degerlendirme raporu|proje raporu" },
+  { key: "rapor-icerigi", label: "rapor icerigi / raporda aciklanacaklar", source: "rapor icerigi|raporda (?:aciklan|anlatil|belirtil|sunul|gosteril|yer al)" },
+  { key: "hesap-gerekce", label: "hesap / gerekce / analiz raporu", source: "hesap(?:lari|lama)?|gerekce(?:si|lendirme)?|analiz(?:leri|i)?" },
 ]);
 
 /* ------------------------------------------------------------------ *
@@ -222,6 +229,9 @@ const CATEGORY = group("category", "Kategori ve kapsam", "category", [
   { key: "proje-konusu", label: "proje konusu / cozum alani", source: "proje konusu|cozum alani" },
   { key: "hedef-kullanim", label: "hedef kullanim / kullanim senaryosu", source: "hedef kullanim|kullanim senaryosu" },
   { key: "uygunluk", label: "yarismaya uygunluk / beklenen sistem", source: "yarismaya uygun(?:lugu|luk)?|beklenen sistem" },
+  { key: "tematik-alan", label: "tematik alan / teknoloji alani / alt kategori", source: "tematik alan|teknoloji alani|proje alani|alt kategori" },
+  { key: "hedef-problem", label: "hedef problem / cozulmesi beklenen problem", source: "hedef problem|cozulmesi beklenen problem|problem alani" },
+  { key: "proje-turu", label: "kabul edilen / beklenen proje turu", source: "kabul edilen proje turu|beklenen proje turu|proje turu" },
 ]);
 
 /* ------------------------------------------------------------------ *

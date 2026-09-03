@@ -17,7 +17,7 @@ import type { PdfStructureBlock } from "./pdf-structure";
 import { normalizeUnicode } from "./turkish-text";
 
 /**
- * Şartname → dört aşamalı kriter çıkarımı (tek LLM çağrısı).
+ * Şartname → üç temel rapor kontrolü çıkarımı (tek LLM çağrısı).
  *
  * Bu modül sağlayıcıdan bağımsızdır: modele gönderilecek şemayı ve talimatı
  * tanımlar, modelden dönen ham JSON'u doğrulayıp `Criterion` listesine çevirir.
@@ -28,13 +28,28 @@ import { normalizeUnicode } from "./turkish-text";
  *   - Bütün PDF tek geçişte okunur; sayfa aralığı, denetim turu veya puan planı yoktur.
  *   - Yalnızca yarışmanın PDF (rapor) aşamasında kontrol edilebilen kurallar çıkarılır.
  *     Fiziksel/saha aşaması, puan tabloları ve puanlama sistemleri kriter yapılmaz.
- *   - Her kriter dört aşamadan birine bağlanır ve Zorunlu / Diğer olarak ayrılır.
+ *   - Yeni kriter yalnızca dil/şablon, başlık/içerik veya kategori kapsamına bağlanır.
  *   - Güven seviyesi, "emin değilim" durumu veya otomatik pasifleştirme yoktur;
  *     manuel değişiklik yöneticiye bırakılır.
  */
 
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
-export const EXTRACTION_PROMPT_VERSION = "v34-prescreen-scope-and-coverage";
+export const EXTRACTION_PROMPT_VERSION = "v35-core-report-checks-only";
+
+/**
+ * Yeni şartname çıkarımı yalnızca ürünün doğrudan üstlendiği üç ön kontrolü
+ * üretir. `criteria_evidence` ortak veri modelinde geriye uyumluluk ve elle
+ * oluşturulmuş/eski profiller için kalır; bu LLM ucunun çıktı alanı değildir.
+ */
+export const EXTRACTION_STAGE_IDS = [
+  "language_template",
+  "headings_content",
+  "category_similarity",
+] as const satisfies readonly CheckStage[];
+
+function isExtractionStage(value: unknown): value is (typeof EXTRACTION_STAGE_IDS)[number] {
+  return typeof value === "string" && EXTRACTION_STAGE_IDS.some((stage) => stage === value);
+}
 
 /**
  * Kural açıklaması için üst sınır. Model dolambaçlı paragraflar üretince hem
@@ -83,7 +98,7 @@ export const EXTRACTION_SCHEMA = {
           result: { type: "string", enum: ["KRITER", "KAPSAM_DISI"] },
           classificationReason: { type: "string" },
           name: { type: "string", description: "KRITER ise en fazla 6 kelimelik ad; aksi halde boş dizge." },
-          stage: { type: "string", enum: CHECK_STAGE_IDS },
+          stage: { type: "string", enum: EXTRACTION_STAGE_IDS },
           required: { type: "boolean" },
           description: { type: "string", description: `KRITER ise tek cümle ve en fazla ${MAX_DESCRIPTION_CHARS} karakter.` },
           controlType: { type: "string", enum: CRITERION_CONTROL_TYPES },
@@ -232,9 +247,11 @@ void LEGACY_EXTRACTION_SYSTEM_INSTRUCTION;
 
 export const EXTRACTION_SYSTEM_INSTRUCTION = `
 Sen TEKNOFEST'te ön eleme aşamasında görevli, deneyimli bir Proje Yöneticisisin.
-Amacın, sana verilen şartname maddelerinden katılımcının PDF raporunu değerlendirmekte
-kullanılacak açık, uygulanabilir ve kaynaklı kriterler oluşturmaktır. Nihai yarışma
-kararı vermezsin; yarışma günü hakemliği, saha performansı ve ceza uygulaması yapmazsın.
+Amacın, sana verilen şartname maddelerinden yalnızca katılımcının PDF raporunun
+(1) dil ve şablon uygunluğunu, (2) zorunlu başlık ve içeriğini, (3) yarışma
+kategorisiyle konu/kapsam uygunluğunu değerlendirecek açık ve kaynaklı kriterler
+oluşturmaktır. Teknik tasarım yeterliliği, donanım kuralları ve yarışma performansı
+bu çıkarım görevinin konusu değildir.
 
 Sunucu bir yarışma şartnamesinden yapısal olarak çıkardığı metin adaylarını sana verir.
 Sana PDF dosyası verilmez. Yalnızca kaynak kimliği, sayfa, başlık, madde, metin, yakın bağlam ve deterministik tarama sinyalleri verilir.
@@ -244,197 +261,93 @@ Her ADAY için en az bir karar üret: KRITER veya KAPSAM_DISI. Aday atlama ve ye
 Çıktı yalnızca kabul ettiğin kriterlerin özeti değildir: sana verilen TÜM sourceId'ler
 decisions içinde en az bir kez bulunmalıdır. Bir maddeyi kriter yapmıyorsan onu sessizce
 atlama; aynı sourceId ile KAPSAM_DISI kararı ve kısa, maddeye özgü gerekçe döndür.
-Bir aday metni birden fazla bağımsız kural içeriyorsa aynı sourceId ile her kural için ayrı KRITER satırı üret.
+Bir aday metni birden fazla bağımsız ve kapsam içi kural içeriyorsa aynı sourceId
+ile her kural için ayrı KRITER satırı üret.
 
-ANA AMAÇ — HER TEKNOFEST ŞARTNAMESİNDE AYNI KAPSAM:
-Bu sistem şartnamedeki bütün yarışma kurallarını envanterlemez. Yalnızca
-katılımcının bu yarışma için teslim ettiği PDF RAPORUN içeriğinden adil biçimde
-değerlendirilebilecek gereklilikleri aktif kriter yapar. Yarışmanın alanı hava,
-kara, deniz, uzay, tarım, sağlık, yazılım veya başka bir teknoloji alanı olabilir;
-belirli bir yarışmaya ait sabit kriter, sayı, parça veya cihaz uydurma.
+YALNIZCA ÜÇ KAPSAM — başka hiçbir türde kriter üretme:
+1. language_template
+   Rapor dili; sayfa sınırı; yazı tipi/punto; A4 ve sayfa düzeni; kenar boşluğu;
+   satır aralığı; kapak, içindekiler, kaynakça gibi şablon parçaları; yalnızca
+   rapor PDF'sine ait dosya adı, türü, boyutu ve biçim kuralları.
+2. headings_content
+   Raporda açıkça bulunması istenen ana/alt başlıklar ve bu bölümlerin altında
+   anlatılması, açıklanması, hesaplanması, gerekçelendirilmesi veya gösterilmesi
+   açıkça istenen içerikler. Bir içerik listesinde birden fazla bağımsız bölüm
+   varsa her birini ayrı değerlendir. İçindekiler tablosundaki sayfa referanslarını
+   tek başına zorunlu başlık sanma; asıl kuralı ve yakın bağlamı kullan.
+3. category_similarity
+   Yarışmanın kabul ettiği proje türü, çözmek istediği problem, hedef teknoloji
+   alanı ve açık konu/kapsam sınırı. Bu, katılımcı projesinin doğru yarışmaya
+   başvurup başvurmadığını daha sonra rapordan değerlendirmek içindir. Salt tanıtım,
+   tarihçe ve motivasyon metnini kriter yapma. Raporlar arası benzerlik kriteri
+   üretme; benzerlik ayrı sistem tarafından hesaplanır.
 
-KAPSAM KARARI — ÖN ELEMEDE RAPORDA NE ARANABİLİR?
-Bir adayı değerlendirirken şu üç soruyu sırayla sor:
-1. Bu metin raporun dili/biçimi/içeriği için bir gereklilik, projenin tasarımına
-   ait bir teknik koşul veya yarışmanın proje kapsamını tanımlayan somut bir
-   sınır getiriyor mu?
-2. Katılımcının bu maddeye uygunluğunu raporunda açıklaması, beyan etmesi,
-   hesaplaması, çizmesi, tabloya dökmesi veya teknik kanıtla göstermesi makul
-   olarak beklenebilir mi?
-3. Hakem, fiziksel gerçeği kesin olarak kanıtlamasa bile, PDF'teki bu beyan ve
-   kanıtlardan ön değerlendirme yapabilir mi?
+MUTLAK SINIR:
+- Motor, malzeme, boyut, ağırlık, batarya, gerilim, haberleşme, güvenlik donanımı,
+  yazılım özelliği, performans değeri ve benzeri teknik/tasarım kurallarını
+  criteria_evidence veya başka bir aşamayla ÜRETME. Bunlar bu görevin dışında.
+- Bir teknik konu yalnızca raporda belirli bir BAŞLIK veya bölüm altında açıklanması
+  açıkça istendiğinde headings_content olabilir. Bu durumda teknik limitin doğru
+  olup olmadığını değil, istenen açıklama/bölümün raporda bulunmasını kriter yap.
+- Yarışma günü/sırasında/esnasında yapılacak parkur, uçuş, sürüş, canlı görev,
+  fiziksel test/ölçüm, sunum, brifing, hakem talimatı ve yarışma sonrası işlemler
+  daima KAPSAM_DISI.
+- Video içeriği/süresi/formatı/yüklemesi; portal/KYS; ayrı veri veya belge teslimi;
+  ıslak imza ve çevrim içi form daima KAPSAM_DISI.
+- Puan, baraj, sıralama, ödül, ceza; kurul/jüri/hakem kararı; takım üyeliği,
+  başvuru, yaş/okul/danışman, iletişim ve duyuru takibi daima KAPSAM_DISI.
+- Bir cümlenin "zorunludur", "olmalıdır", "yasaktır", "en az" veya "en fazla"
+  demesi onu bu üç kapsamdan birine sokmaz.
 
-1. ve 2. soruya "evet" ve 3. soruya "ön değerlendirme yapılabilir" cevabı
-veriliyorsa KRITER üret. PDF'in gerçek dünyadaki ağırlığı, performansı veya
-dayanıklılığı kesin olarak ispatlayamaması kriteri eleme sebebi değildir; sistem
-rapordaki tasarım beyanını ve kanıtını değerlendirir. Bir ifadenin yalnızca
-"zorunludur", "olmalıdır", "sorumludur", "yasaktır", "aşamaz", "en az" veya
-"en fazla" demesi ise tek başına onu bu sistem için kriter yapmaz.
+KAPSAM TESTİ:
+Bir KRITER üretmeden önce şunların üçünü de doğrula:
+A. Kural doğrudan katılımcının PDF RAPORUNUN dili/biçimi, zorunlu başlık-içeriği
+   veya proje-kategori konu uygunluğuyla mı ilgili?
+B. Hakem bunu yalnızca katılımcı PDF'ini okuyarak değerlendirebilir mi?
+C. Çıktı aşaması language_template, headings_content veya category_similarity mi?
+Üçünden biri hayırsa KAPSAM_DISI yap. Emin değilsen KRITER üretme.
 
-KATEGORİ UYGUNLUĞU İSTİSNASI:
-category_similarity kriteri için şartnamenin "zorunludur" demesi gerekmez.
-Yarışmanın çözmek istediği problem, kabul ettiği proje türü, hedeflediği teknoloji
-alanı veya açık kapsam sınırı somut biçimde anlatılıyorsa, katılımcı projesinin
-bu kapsama uygunluğunu rapordan değerlendirecek az sayıda, tekrarsız kriter üret.
-Salt tanıtım, tarihçe ve genel motivasyon cümlelerini kriter yapma.
-
-KRITER örnek sınıfları:
-- Rapor dili, dosya/şablon/sayfa ve yazım biçimi.
-- Raporda bulunması zorunlu başlıklar ve bu başlıklarda beklenen içerikler.
-- Rapor metninden değerlendirilebilen yarışma kategorisi ve proje kapsamı.
-- Raporda beyan edilmesi veya kanıtıyla gösterilmesi beklenen motor, malzeme,
-  boyut, ağırlık, enerji, elektronik, yazılım, haberleşme, güvenlik, analiz,
-  hesap, çizim ve test sonucu gibi proje/tasarım gereklilikleri.
-
-PUAN VE BARAJ — MUTLAK KAPSAM DIŞI (bu kural diğer her şeyin ÜSTÜNDEDİR):
-Puan tablosu, puan ağırlığı, bonus/ceza puanı, geçiş barajı, minimum puan,
-sıralama, derece ve ödül ile ilgili her ifade KAPSAM_DISI'dır. Bu sistem PUAN
-ÜRETMEZ ve puan eşiğini denetlemez. Cümlede "zorunludur", "şarttır" veya
-"olmalıdır" geçse bile, kuralın konusu puan/baraj/sıralama ise KRITER YAPMA.
-(Ör. "Bir üst aşamaya geçebilmek için en az 60 puan alınması zorunludur" →
-KAPSAM_DISI.)
-
-RAPOR DEĞERLENDİRMESİ DIŞI — bağlayıcı olsa bile KAPSAM_DISI yap:
-KAPSAM_DISI, maddenin önemsiz olduğu anlamına gelmez; yalnızca bu PDF raporu
-üzerinden yürütülen ön elemede değerlendirilemeyeceği anlamına gelir.
-- Yarışma günü/sırasında/esnasında yapılan parkur, uçuş, sürüş, canlı görev,
-  kurulum, bakım, fiziksel test veya ölçüm; canlı performans, hakem talimatı,
-  yarışma anındaki hata ve yarışma sonrasındaki işlemler.
-- Katılımcının ayrıca teslim edeceği videonun içeriği, süresi, formatı, çözünürlüğü,
-  dosya boyutu, adı, bağlantısı, platformu veya yüklenme/gönderilme yöntemi; ayrıca
-  portal/KYS işlemi, ayrı belge/fiziksel teslim, ıslak imza ve çevrim içi form.
-- Takımın iletişim sorumluluğu, duyuruları takip etmesi, zamanında alanda olması,
-  itiraz ve benzeri operasyonel/idari sorumluluklar.
-- Kurul, komite, jüri veya hakem takdiri/onayı gerektiren kararlar.
-- Takım kurma ve üyelik koşulları; başvuru/kimlik/yaş/okul/danışman işlemleri.
-- Yarışmanın tarihçesi, tanıtımı, genel motivasyonu ve tek başına terim tanımları.
-- Örnek, tavsiye, temenni ve kendi içinde PDF'ten denetlenecek sonuç bırakmayan
-  genel bilgilendirmeler.
-- Yalnızca organizasyonun iç işleyişi, duyuru ve görevlendirme usulleri.
-- Salt takvim/tarih bilgisi; raporun içeriği veya biçimi için bir koşul değilse.
-
-ZAMANSAL İFADE VE VİDEO AYRIMI — KÖR ANAHTAR KELİME FİLTRESİ UYGULAMA:
-- "Yarışma sırasında" benzeri bir ifade, kuralın konusu canlı görev/operasyon ise
-  KAPSAM_DISI'dır. Ancak aynı cümlede aracın tasarımına ait sürekli bir teknik sınır
-  (ör. azami gerilim, güvenlik donanımı, haberleşme protokolü) veriliyor ve bu değer
-  PDF raporunda beyan edilebiliyorsa yalnızca teknik sınırı KRITER yap.
-- "Video" katılımcının teslim edeceği ayrı bir çıktıysa; videoda nelerin bulunacağı,
-  kaç dakika olacağı, formatı, çözünürlüğü, dosya boyutu ve nereye yükleneceği dahil
-  bütün teslim kuralları KAPSAM_DISI'dır. Katılımcı PDF'inde video bulunmadığı için
-  bunları rapor eksikliği olarak değerlendirme.
-- Buna karşılık video, tasarlanan sistemin teknik girdisi/çıktısı veya işleme yeteneğiyse
-  (ör. kamera akışını işleme, görüntü çözünürlüğü, video kodlama) sırf "video" kelimesi
-  geçtiği için eleme; rapordan beyan/kanıt kontrolü yapılabiliyorsa KRITER üret.
-- Video dışındaki ayrı veri teslimleri de aynı kurala tabidir: telemetri/kamera/sensör
-  kaydının CSV, MP4, bağlantı veya ayrı dosya olarak teslim edilmesi PDF raporu kriteri
-  değildir. Buna karşılık sistemin bu veriyi üretme/kaydetme yeteneği teknik tasarım
-  gereksinimi olarak raporda açıklanabiliyorsa, yalnızca bu teknik yeteneği kriter yap.
-- "Gösterilecektir", "gösterimi", "parkurda yapılacaktır" gibi ifadeler canlı görev,
-  teknik kontrol veya saha performansı anlatıyorsa KAPSAM_DISI yap. Bir algoritmanın
-  navigasyon, algılama ya da engelden kaçınma yeteneği raporda açıklanmalıdır diye açık
-  bir rapor içeriği isteniyorsa bu ayrı rapor gereksinimini kriter yapabilirsin.
-- Sunum, brifing ve hakem karşısındaki sözlü gösterim PDF raporu değildir; sunumun
-  içeriği, süresi veya icrası KAPSAM_DISI'dır.
-- Ayrı teslim edilen kaynak kod, çalıştırılabilir yazılım, veri seti veya yazılım ürünü
-  doğrudan PDF raporu değildir. Yalnızca bunların raporda açıklanması zorunlu mimari,
-  yöntem ya da tasarım içeriği açıkça isteniyorsa o rapor içeriğini kriter yap.
-- Saha/parkur nesnelerinin rengi, boyutu, konumu ve organizatörün sağladığı çevre
-  bilgileri tek başına katılımcı tasarım kuralı değildir. Metin katılımcı sistemine
-  açık bir algılama/tasarım yükümlülüğü getirmiyorsa bu çevre bilgisinden yeni
-  "sistem algılamalıdır" zorunluluğu UYDURMA ve KAPSAM_DISI yap.
-- Bir üst başlık veya genel cümle yalnızca "asgari şartları sağlamayan elenir" diyorsa
-  fakat somut şartları alt maddelerde veriyorsa, bu şemsiye cümleyi ayrıca kriter yapma;
-  somut ve bağımsız alt maddeleri ayrı ayrı değerlendir.
-- Şartname birden fazla rapor/teslim türü bulunduğunu söylüyorsa bunu belge profiline
-  yazabilirsin; fakat başka bir raporun varlığını mevcut katılımcı PDF'inin içerik
-  kriteri yapma. Her rapora ait biçim ve içerik şartlarını kendi bağlamında çıkar.
-- Ayrı veri teslimi bölümündeki alt satırlar (kayıt frekansı, zaman etiketi, CSV/MP4
-  biçimi, dosya adlandırma) üst cümleden kopuk görünse bile aynı dış teslim paketinin
-  parçasıdır; bunları katılımcı PDF raporu kriterine dönüştürme.
-- Organizatörün takıma kanal/frekans/alan/ekipman tahsis etmesi katılımcı tasarım
-  yükümlülüğü değildir. Ancak katılımcı cihazının açıkça seçilebilir frekans kanalı
-  gibi bir teknik yeteneğe sahip olması isteniyorsa bu teknik yeteneği kriter yap.
-
-KANIT YERİ (verifiability):
-- KRITER sonucunda verifiability daima PDF_DENETLENEBILIR olmalıdır.
-- Kanıt HARICI_KANIT_GEREKLI veya HAKEM_KONTROLU_GEREKLI olacaksa sonuç KRITER
-  değil KAPSAM_DISI olmalıdır. Bu maddeler aktif kriter listesine taşınmaz.
-- KAPSAM_DISI kararında diğer zorunlu şema alanlarını güvenli varsayımlarla
-  doldur; name, description ve sourceText boş olabilir.
-
-TASARIM KISITLARINDA RAPOR BAĞINI KANITLA — 4. AŞAMANIN ANAHTARI:
-Bir fiziksel/teknik sınırı sırf projeyle ilgili olduğu için kriter yapma. Projenin
-tasarlanmış hâline ait motor, malzeme, ölçü, ağırlık, enerji, güvenlik veya
-yazılım özelliği PDF'te bir beyan, hesap, tablo ya da çizim üzerinden makul
-biçimde kontrol edilebiliyorsa KRITER üret; maddede ayrıca "raporda yazılmalıdır"
-denmesi şart değildir. Buna karşılık kural yalnızca yarışma günü yapılacak eylem,
-fiziksel ölçüm, parkur başarısı veya canlı performansla doğrulanabiliyorsa
-KAPSAM_DISI yap. Raporda karşılığı olan şu türleri atlama:
-  - Boyut kısıtları (en × boy × yükseklik, çap, açıklık, gabari).
-  - Ağırlık sınırları (azami kalkış, kuru ağırlık, faydalı yük).
-  - Elektriksel limitler (batarya kimyası/kapasitesi, gerilim, akım, hücre, izolasyon).
-  - Malzeme/madde yasakları (patlayıcı, yanıcı, basınçlı kap, yasaklı kimyasal).
-  - Güvenlik donanımı (acil durdurma, kill-switch, yedekli fren, koruma kafesi).
-- Zorunlu analiz/hesap/test sonucu veya planı (raporda sunulması isteniyorsa).
-  - Teslim edilecek görsel (teknik çizim, blok şema, devre şeması, CAD, tablo).
-  - Yazılım/haberleşme kuralları (telemetri, frekans, protokol, otonomi seviyesi).
-
-AŞAMA DENGESİ: teknik kurallara odaklanmak diğer aşamaları boşaltmamalıdır.
-Dil/biçim/sayfa kuralları 1., zorunlu rapor başlıkları ve bölüm içerikleri 2.,
-kategori/kapsam uygunluğu 3., teknik gereksinimler 4. aşamaya yazılır.
-
-KAPSAM — EKSİKSİZ AMA SEÇİCİ OL: kriter sayısını yapay olarak sınırlama; ancak
-yukarıdaki kapsam kararından geçen bütün bağımsız RAPOR kriterlerini çıkar.
-Belgedeki her bağlayıcı ifadeyi kriter yapma. Aynı rapor kuralı farklı yerlerde
-tekrarlanıyorsa bir kez yaz; bağımsız rapor gerekliliklerini birleştirip kaybetme.
-
-DÖRT AŞAMA — KURALIN NEYİ KISITLADIĞINA GÖRE SEÇ:
-- language_template: raporun DİLİ, BİÇİMİ ve PDF DOSYA ÖZELLİKLERİ. Sayfa sınırı,
-  yazı tipi, kapak, dosya türü/adı/boyutu buraya girer. Portal/KYS kanalı,
-  takvim ve teslim zamanı aktif rapor kriteri değildir.
-- headings_content: raporda bulunması gereken BAŞLIK veya bir bölümde beklenen İÇERİK.
-- category_similarity: YALNIZCA projenin konusunun, seviyesinin ve kapsamının
-  yarışma kategorisine uygunluğu. Bu aşama DARDIR: takım büyüklüğü, üyelik,
-  başvuru usulü, iletişim, portal kullanımı, video teslimi veya güvenlik onayı
-  BURAYA GİRMEZ. Raporlar arası benzerlik kriteri de üretme; onu sistem yapar.
-- criteria_evidence: PDF raporunda beyanı veya kanıtı aranacak teknik/tasarım
-  gereksinimleri (boyut, ağırlık, elektrik, malzeme, güvenlik, analiz, çizim,
-  yazılım vb.). Takım şartı, üyelik sınırı, onay belgesi, portal, video, saha ve
-  diğer PDF dışı yükümlülükleri bu aşamaya doldurma; KAPSAM_DISI yap.
-Bir kuralı yalnızca EN UYGUN aşamaya yaz. AŞAMA seçiminde emin değilsen
-criteria_evidence seç; ama asla category_similarity'yi "başka yere sığmadı" diye
-kullanma. Bu yönlendirme YALNIZCA aşama seçimi içindir: bir metnin kural olup
-olmadığına karar verirken yukarıdaki KAPSAM_DISI kuralları geçerlidir ve puan/
-baraj yasağı her durumda önce gelir.
+EKSİKSİZLİK:
+- Bu üç kapsamdaki kriter sayısını yapay olarak sınırlama ve aynı liste içindeki
+  bağımsız başlık/içerikleri birleştirerek kaybetme.
+- Aynı kural farklı yerde tekrarlanıyorsa bir kez kriterleştir; sourceIds birleştirme
+  işini sunucu yapar.
+- category_similarity için açık bir "zorunludur" fiili aranmaz; somut yarışma
+  konusu/kapsamı yeterlidir. Ancak genel tanıtımdan uydurma şart üretme.
 
 Kontrol türü:
-- headings_content için BIREBIR_BASLIK, ICERIK_VARLIGI veya ANLAMSAL_UYGUNLUK seç.
-- category_similarity için ANLAMSAL_UYGUNLUK seç.
-- teknik kanıt için KANIT_KONTROLU seç.
-- language_template için uygun olan BIREBIR_BASLIK, ICERIK_VARLIGI veya KANIT_KONTROLU seç.
+- headings_content: gerçek başlık adı aynen zorunluysa BIREBIR_BASLIK; belirli
+  içeriğin bulunması isteniyorsa ICERIK_VARLIGI; anlam düzeyinde içerik aranıyorsa
+  ANLAMSAL_UYGUNLUK.
+- category_similarity: ANLAMSAL_UYGUNLUK.
+- language_template: uygun olan BIREBIR_BASLIK, ICERIK_VARLIGI veya KANIT_KONTROLU.
+- KRITER sonucunda verifiability daima PDF_DENETLENEBILIR. Harici kanıt veya insan
+  kararı gerekiyorsa KAPSAM_DISI yap.
 
-required=true yalnızca şartnamenin rapor değerlendirmesi açısından kesinlikle
-zorunlu tuttuğu maddeler içindir. Raporda bulunması beklenen fakat ihlali açıkça
-zorunlu/eleme şartı yapılmayan yararlı içeriklerde false kullan.
+required=true yalnızca şartname bu rapor koşulunu açıkça zorunlu tutuyorsa kullan.
+Tavsiye edilen, isteğe bağlı, yardımcı veya yalnızca örnek olarak sunulan başlık ve
+içerikleri required=false ile de olsa KRITER yapma; KAPSAM_DISI yap. required=false
+yalnızca category_similarity kapsam tanımı gibi zorunluluk fiili gerektirmeyen,
+fakat sonraki kategori uygunluğu analizinde gerçekten kullanılacak kayıtlar içindir.
 
-KISA KARAR ÖRNEKLERİ — bunları sabit yarışma kriteri olarak değil kapsam örneği olarak kullan:
-- "Rapor Türkçe ve en fazla 20 sayfa olmalıdır." → KRITER / PDF_DENETLENEBILIR.
-- "Batarya gerilimi en fazla 50 V olmalıdır." → Tasarım değeri raporda beyan
-  edilebiliyorsa KRITER / PDF_DENETLENEBILIR.
-- "Motor seçimi ve güç hesabı raporda açıklanmalıdır." → KRITER / PDF_DENETLENEBILIR.
-- "Yarışma, su altında otonom algılama ve görev icra eden sistemlere yöneliktir."
-  → Projenin kategori kapsamı için tek, somut KRITER / PDF_DENETLENEBILIR.
-- "Yarışma günü parkur üç dakikada tamamlanmalıdır." → KAPSAM_DISI.
-- "Yarışma sırasında batarya gerilimi 50 V'u aşmamalıdır." → Canlı performansı değil,
-  raporda beyan edilebilen tasarım limitini anlatıyorsa teknik KRITER.
-- "İletişim aksaklıklarını takip etmek takımın sorumluluğundadır." → KAPSAM_DISI.
-- "Tanıtım videosu KYS'ye yüklenmelidir." → KAPSAM_DISI.
-- "Tanıtım videosu en fazla 2 dakika, MP4 ve 100 MB olmalıdır." → KAPSAM_DISI.
-- "Sistem 1080p kamera akışını gerçek zamanlı işleyebilmelidir." → Projenin teknik
-  özelliği raporda açıklanabiliyorsa KRITER.
-- "Telemetri verileri CSV dosyası olarak teslim edilecektir." → KAPSAM_DISI.
-- "Navigasyon kabiliyeti parkurda gösterilecektir." → KAPSAM_DISI.
-- "Bir sonraki aşamaya geçmek için 60 puan alınmalıdır." → KAPSAM_DISI.
+KISA ÖRNEKLER:
+- "Rapor Türkçe, A4 ve en fazla 20 sayfa olmalıdır." → language_template / KRITER.
+- "Raporda Mekanik Tasarım ve Yazılım Mimarisi bölümleri bulunmalıdır." → Her başlık
+  için ayrı headings_content / KRITER.
+- "Motor seçimi ve güç hesabı raporda açıklanmalıdır." → Teknik değer kriteri değil;
+  istenen rapor içeriği olarak headings_content / KRITER.
+- "Yarışma, tarımda otonom yabancı ot tespiti çözümlerine yöneliktir." → Somut
+  kategori kapsamı olarak category_similarity / KRITER.
+- "Araç 50 kg'dan ağır olmamalıdır." → Teknik/tasarım kuralı; KAPSAM_DISI.
+- "Yarışma sırasında batarya 50 V'u aşmamalıdır." → Teknik ve canlı aşama; KAPSAM_DISI.
+- "Tanıtım videosu iki dakika olmalıdır." → KAPSAM_DISI.
+- "Takım en az üç üyeden oluşmalıdır." → KAPSAM_DISI.
+- "60 puanın altında kalan takım elenir." → KAPSAM_DISI.
+
+KAPSAM_DISI kararında şemanın diğer alanlarını güvenli değerlerle doldur; name,
+description ve sourceText boş olabilir. stage alanında üç geçerli aşamadan bağlama
+en yakın olanı kullan; bu yalnızca şema gereğidir ve aktif kriter oluşturmaz.
+
 sourceText verilen aday veya yakın bağlam metninden alınmış TEK PARÇA, KESİNTİSİZ,
 BİREBİR ve kısa bir alıntı olmalıdır. Asla "..." veya "…" ekleme; ayrı cümleleri
 birleştirme, özetleme, yazımı düzeltme ya da kelime değiştirme. Kural uzunsa,
@@ -663,6 +576,44 @@ function clearlyOutsideParticipantPdfScope(name: string, sourceText: string, des
   return eventOperation && !explicitReportRequest;
 }
 
+/**
+ * LLM'nin teknik bir kuralı izin verilen üç aşamadan birine yanlış ad vererek
+ * sızdırmasına karşı kaynak-temelli son kapı. Modelin ürettiği ad/açıklama değil,
+ * yalnızca PDF'den doğrulanmış kaynak penceresi değerlendirilir.
+ */
+function sourceSupportsExtractionStage(
+  stage: (typeof EXTRACTION_STAGE_IDS)[number],
+  source: PdfStructureBlock,
+  sourceContext: string,
+): boolean {
+  const value = foldKey(sourceContext);
+  const own = foldKey(source.originalText);
+  if (stage !== "category_similarity" && /\b(?:onerilir|tavsiye|istege bagli|opsiyonel|zorunlu degil)\w*\b/.test(own)) {
+    return false;
+  }
+  if (stage === "language_template") {
+    const directLanguageOrLayout = /\b(?:rapor dili|yazim dili|turkce|ingilizce|font|yazi tipi|punto|a4|kenar bosluk|satir aralik|sayfa duzeni|sablon|kapak|icindekiler|kaynakca)\w*\b/.test(value);
+    const fileRule = /\b(?:rapor|pdf|dosya)\w*\b/.test(value)
+      && /\b(?:sayfa|format|uzanti|adlandir|dosya adi|boyut|mb|gb)\w*\b/.test(value);
+    return directLanguageOrLayout || fileRule;
+  }
+  if (stage === "headings_content") {
+    const reportContext = /\b(?:rapor|pdf|tyr|ktr|on tasarim|kritik tasarim|final degerlendirme|proje dosya)\w*\b/.test(value);
+    const requestedContent = /\b(?:baslik|bolum|icerik|yer al|bulun|icerm|olustur|anlat|tanimla|acikla|belirt|beyan|hesapla|gerekcelendir|goster|sunul|cizim|sema|tablo)\w*\b/.test(value);
+    const ownHasRequirement = /\b(?:yer al|bulun|icerm|anlat|tanimla|acikla|belirt|beyan|hesapla|gerekcelendir|goster|sunul)\w*\b/.test(own);
+    const bareStructuralLabel = ["HEADING", "NUMBERED_CLAUSE"].includes(source.blockType)
+      && own.split(/\s+/).length <= 12
+      && !ownHasRequirement;
+    const introducedAsRequiredList = /\b(?:asagidaki|su)\s+(?:ana |alt )?(?:baslik|bolum|icerik)\w*.{0,140}\b(?:yer al|bulun|icerm|olustur)\w*\b/.test(value)
+      || /\b(?:rapor|pdf)\w*.{0,80}\b(?:asagidaki|su)\w*.{0,100}\b(?:yer al|bulun|icerm|olustur)\w*\b/.test(value);
+    if (bareStructuralLabel && !introducedAsRequiredList) return false;
+    return reportContext && requestedContent;
+  }
+  const competitionContext = /\b(?:yarisma|kategori|proje|cozum|sistem)\w*\b/.test(value);
+  const scopeContext = /\b(?:amac|kapsam|konu|alan|hedef|problem|yonelik|uygun|beklenen|cozum)\w*\b/.test(value);
+  return competitionContext && scopeContext;
+}
+
 function defaultControlType(stage: CheckStage): CriterionControlType {
   if (stage === "category_similarity") return "ANLAMSAL_UYGUNLUK";
   if (stage === "criteria_evidence") return "KANIT_KONTROLU";
@@ -774,6 +725,17 @@ function quoteHaystackOf(source: PdfStructureBlock, blocks: readonly PdfStructur
   return comparableQuote([before, source.originalText, after].filter(Boolean).join(" "));
 }
 
+/** Zorunlu başlık listelerinde giriş cümlesi birkaç satır yukarıda kalabilir. */
+function scopeContextOf(source: PdfStructureBlock, blocks: readonly PdfStructureBlock[]): string {
+  const index = blocks.indexOf(source);
+  if (index < 0) return source.originalText;
+  return blocks
+    .slice(Math.max(0, index - 4), Math.min(blocks.length, index + 2))
+    .filter((block) => block.pageNumber === source.pageNumber)
+    .map((block) => block.originalText)
+    .join(" ");
+}
+
 function stableCriterionId(sourceId: string, name: string): string {
   const namePart = foldKey(name).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "kural";
   return `criterion-${sourceId.toLocaleLowerCase("tr-TR")}-${namePart}`.slice(0, 180);
@@ -818,12 +780,17 @@ function normalizeCandidateDecisions(
       rejectedSources += 1;
       continue;
     }
-    const stage: CheckStage = isCheckStage(entry.stage) ? entry.stage : "criteria_evidence";
+    if (!isExtractionStage(entry.stage)) {
+      excludedCandidates += 1;
+      outsidePdfScope += 1;
+      continue;
+    }
+    const stage = entry.stage;
     const verifiability = resolveVerifiability(entry, name, sourceText, description);
     // Bu uç yalnızca katılımcı PDF'inden değerlendirilebilecek aktif kriterler
     // üretir. Model isteme rağmen video/portal/saha veya insan takdiri isteyen
     // bir kuralı KRITER diye döndürürse savunma katmanı onu profile taşımaz.
-    if (verifiability !== "PDF_DENETLENEBILIR" || clearlyOutsideParticipantPdfScope(
+    if (verifiability !== "PDF_DENETLENEBILIR" || !sourceSupportsExtractionStage(stage, source, scopeContextOf(source, sourceBlocks)) || clearlyOutsideParticipantPdfScope(
       name,
       sourceText,
       description,

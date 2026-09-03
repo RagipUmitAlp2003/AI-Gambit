@@ -427,7 +427,7 @@ test("öncelik sütunu eklemeli ve geriye uyumludur", () => {
 });
 
 /* --------------------------------------------------------------------- *
- * Problem 4 · 4. prensip (teknik kriter) hassasiyeti
+ * Şartname çıkarımı · üç temel rapor kontrolü
  * --------------------------------------------------------------------- */
 
 test("çıkarım istemi zorunluluk kipi ifadelerini tarar", () => {
@@ -440,15 +440,16 @@ test("çıkarım istemi zorunluluk kipi ifadelerini tarar", () => {
   }
 });
 
-test("çıkarım istemi somut teknik gereksinim türlerini sayar", () => {
+test("çıkarım istemi teknik ve yarışma-anı kurallarını aktif kriter yapmaz", () => {
   const extraction = readFileSync("app/lib/criteria-extraction.ts", "utf8");
-  for (const topic of ["Boyut kısıtları", "Ağırlık sınırları", "Elektriksel limitler", "acil durdurma", "patlayıcı"]) {
-    assert.ok(extraction.includes(topic), `Sistem istemi "${topic}" başlığını içermelidir.`);
+  for (const topic of ["language_template", "headings_content", "category_similarity"]) {
+    assert.ok(extraction.includes(topic), `Sistem istemi "${topic}" aşamasını içermelidir.`);
   }
+  assert.match(extraction, /Teknik\/tasarım kuralı; KAPSAM_DISI/);
+  assert.match(extraction, /yarışma sonrası işlemler\s+daima KAPSAM_DISI/);
+  assert.doesNotMatch(extraction, /enum: CHECK_STAGE_IDS/);
   // Sürüm etiketi artırılınca eski önbellek kayıtları geçersiz olur.
   assert.match(extraction, /EXTRACTION_PROMPT_VERSION = "v(?:2[3-9]|[3-9]\d)/, "İstem sürümü v23 veya üzeri olmalıdır.");
-  // Teknik odak diğer aşamaları boşaltmamalı.
-  assert.match(extraction, /AŞAMA DENGESİ/, "Aşamalar arası denge kuralı bulunmalıdır.");
 });
 
 /* --------------------------------------------------------------------- *
