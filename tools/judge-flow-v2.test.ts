@@ -643,3 +643,73 @@ test("4. aşama özeti sade sayaçtır; uzun kriter adı sıkıştırılmaz", ()
   );
   assert.equal(evidenceStageSummary([]), "Katılımcı PDF'si üzerinden değerlendirilebilen kriter yok.");
 });
+
+/* ------------- Hakem düzenleme formu ve taslak kaydı (madde 5–6) ------------- */
+
+test("radyo düğmeleri genel input kuralından KURTARILIR; ölçüler bu forma kapsamlıdır", () => {
+  const css = readFileSync("app/evaluation.css", "utf8");
+  const globals = readFileSync("app/globals.css", "utf8");
+  // Sorunun kaynağı duruyor mu? (genel kural hâlâ input'ları 43px yapıyor)
+  assert.match(globals, /input, select \{ min-height: 43px/,
+    "Genel kural değişmedi; sıfırlama forma kapsamlı olmalıdır.");
+  assert.match(css, /\.eval-choice-options input\[type="radio"\][^}]*width: 15px/,
+    "Radyo genişliği sıfırlanmalıdır (dev yuvarlak sorunu).");
+  assert.match(css, /\.eval-choice-options input\[type="radio"\][^}]*min-height: 15px/,
+    "Radyo yüksekliği sıfırlanmalıdır.");
+  assert.ok(!/\.eval-reject-form \{[^}]*background: #fff8f7/.test(css),
+    "Düzenleme yüzeyi kırmızı olmamalıdır: yalnız açıklama düzeltmek reddetmek gibi görünmemeli.");
+  assert.match(css, /\.eval-reject-quote, \.eval-reject-reason \{ grid-column: 1 \/ -1/,
+    "Alıntı ve gerekçe tam genişlikte olmalıdır (160px dar kolona düşmemeli).");
+  assert.match(css, /:focus-within \{ outline/, "Klavye odağı görünür kalmalıdır.");
+});
+
+test("iki AYRI soru: kriter sonucu ve dayanak; kaydet birincil eylemdir", () => {
+  assert.match(EVALUATION_APP, /<legend className="field-label">Kriter sonucu<\/legend>/,
+    "Kriter sonucu kendi sorusu olmalıdır.");
+  assert.match(EVALUATION_APP, /<legend className="field-label">Dayanak<\/legend>/,
+    "Dayanak kendi sorusu olmalıdır.");
+  assert.match(EVALUATION_APP, /PDF&apos;de bulunan bilgi/, "Dayanak seçeneği açık adlandırılmalıdır.");
+  assert.match(EVALUATION_APP, /Raporda bulunmayan içerik/, "İkinci dayanak seçeneği açık adlandırılmalıdır.");
+  assert.match(EVALUATION_APP, /className="primary-button" onClick=\{onConfirmReject\}/,
+    "Kaydet normal birincil eylemdir; tehlike düğmesi değildir.");
+  assert.match(EVALUATION_APP, /aria-describedby=\{rejectFieldErrors\.page/, "Alan hatası alana bağlanmalıdır.");
+});
+
+test("sayfa numarası tam sayı ve belge aralığında olmalıdır; ondalık sessizce yuvarlanmaz", () => {
+  const body = EVALUATION_APP.slice(EVALUATION_APP.indexOf("function rejectFieldErrorsOf"));
+  const scoped = body.slice(0, body.indexOf("\n  function confirmReject"));
+  assert.match(scoped, /\/\^\\d\+\$\//, "Ondalık girdi tam sayı denetiminden geçmemelidir.");
+  assert.match(scoped, /reportPages > 0 && Number\(raw\) > reportPages/, "Sayfa belge aralığında olmalıdır.");
+  assert.ok(!/Math\.round\(Number\(rejectDraft/.test(EVALUATION_APP),
+    "Ondalık sayfa numarası sessizce yuvarlanmamalıdır.");
+});
+
+test("kriter kararı SUNUCUYA taslak olarak yazılır; 'kaydedildi' yalnız kalıcılaşınca söylenir", () => {
+  assert.match(EVALUATION_APP, /async function persistDraft/, "Taslak kaydı bulunmalıdır.");
+  const draft = EVALUATION_APP.slice(EVALUATION_APP.indexOf("async function persistDraft"));
+  const scoped = draft.slice(0, draft.indexOf("\n  async function patchDecision"));
+  assert.match(scoped, /"save_review"/, "Taslak sunucuya yazılmalıdır.");
+  assert.match(scoped, /status: "in_progress"/, "Taslak NİHAİ karar üretmemelidir.");
+  assert.match(scoped, /outcome: "pending"/, "Taslak yarışmacıya sonuç göndermemelidir.");
+  assert.match(scoped, /draftScope: \{[\s\S]*analyzedAt[\s\S]*pdfHash[\s\S]*criteriaVersion/,
+    "Taslak; analiz, PDF sürümü ve kriter sürümüyle kapsamlanmalıdır.");
+  assert.match(EVALUATION_APP, /draftMatchesAnalysis \? storedReview\?\.criterionDecisions : \[\]/,
+    "Yeni analizden sonra eski taslak otomatik uygulanmamalıdır.");
+  assert.match(EVALUATION_APP, /Karar sunucuya kaydedilemedi; form açık bırakıldı/,
+    "Kaydetme başarısızsa form kapanıp başarı göstermemelidir.");
+  // Katılımcıya bildirim yalnızca tamamlanmış kararda gider.
+  const route = readFileSync("app/api/applications/[id]/route.ts", "utf8");
+  const notify = route.slice(route.indexOf("async function notifyOutcome"));
+  assert.match(notify.slice(0, 400), /review\.status !== "completed"[\s\S]{0,60}return/,
+    "Taslak kaydı katılımcıya bildirim göndermemelidir.");
+});
+
+test("iki sekmede yapılan taslak düzenlemesi birbirini SESSİZCE ezemez", () => {
+  const db = readFileSync("app/lib/workflow-db.ts", "utf8");
+  const save = db.slice(db.indexOf("export async function saveApplicationReview"));
+  const body = save.slice(0, save.indexOf("\nexport "));
+  assert.match(body, /storedStamp && \(review\.draftSavedAt \?\? null\) !== storedStamp/,
+    "Sunucu, taslak damgası uyuşmazsa yazmayı reddetmelidir.");
+  assert.match(body, /başka bir sekmede veya oturumda güncellendi/, "Çakışma anlaşılır biçimde bildirilmelidir.");
+  assert.match(body, /draftSavedAt: completed \? null : timestamp/, "Damga SUNUCUDA atılmalıdır.");
+});

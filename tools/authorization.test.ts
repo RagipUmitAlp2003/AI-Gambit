@@ -499,9 +499,11 @@ test("hakem ekranında kanıtı PDF'de gösteren uygulama içi panel ve aşama i
   // şeridindeki "ŞÜPHELİ/Normal" satırı kaldırıldı, bağımsız kart gösterir.
   assert.match(evaluation, /Raporlar arası benzerlik/, "Bağımsız benzerlik kartı bulunmalıdır.");
   // Şüpheli/Normal işareti kaybolmaz; yalnızca kendi notunda (bağımsız kartta) durur.
-  assert.match(evaluation, /ŞÜPHELİ/, "Benzerlik işareti kendi notunda Şüpheli/Normal olarak gösterilmelidir.");
+  // "ŞÜPHELİ" suçlayıcı ifadesi kaldırıldı (madde 3): işaret kendi notunda
+  // "inceleme önerilir" olarak, karar hakemde kalacak biçimde gösterilir.
+  assert.match(evaluation, /inceleme önerilir/, "Benzerlik işareti kendi notunda gösterilmelidir.");
   const strip = evaluation.slice(evaluation.indexOf("function StageStrip"), evaluation.indexOf("type RejectDraft"));
-  assert.doesNotMatch(strip, /ŞÜPHELİ/, "Şüpheli/Normal işareti aşama şeridine geri sızmamalıdır.");
+  assert.doesNotMatch(strip, /inceleme önerilir|ŞÜPHELİ/, "Benzerlik işareti aşama şeridine geri sızmamalıdır.");
 
   const viewer = readFileSync("app/components/pdf-evidence-viewer.tsx", "utf8");
   // Adres parçasına güvenilmez: sayfa doğrudan çizilir.
