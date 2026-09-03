@@ -9,8 +9,9 @@ import {
 } from "./criteria-dictionary";
 import type { PdfStructureBlock } from "./pdf-structure";
 import type { UnselectedBlocksReview } from "./types";
+import { normalizeForSearch } from "./turkish-text";
 
-export const CANDIDATE_SELECTOR_VERSION = "candidate-selector-v2-technical-restored";
+export const CANDIDATE_SELECTOR_VERSION = "candidate-selector-v4-local-context-hints";
 
 export type CandidateSignal =
   | "OBLIGATION_TERM"
@@ -36,6 +37,8 @@ export type CriteriaCandidate = {
   selectionReason: string;
   contextBefore: string;
   contextAfter: string;
+  /** Yalnızca anlam bağlamıdır; bu metinden başka sayfaya alıntı bağlanamaz. */
+  listContext?: string;
   dictionaryVersion: string;
   selectorVersion: string;
 };
@@ -107,7 +110,7 @@ function selectionDecision(block: PdfStructureBlock, matches: DictionaryMatch[],
   const meaningfulNumber = numbers.some((match) => match.kind !== "sayi");
   const explicitRule = obligation || prohibition || limit;
   const reportContext = /\b(?:rapor|pdf|dosya|tyr|ktr|on tasarim|kritik tasarim)\w*\b/i.test(block.normalizedText)
-    || /\b(?:rapor|pdf|tyr|ktr|on tasarim|kritik tasarim)\w*\b/i.test(block.sectionTitle ?? "");
+    || /\b(?:rapor|pdf|tyr|ktr|on tasarim|kritik tasarim)\w*\b/i.test(normalizeForSearch(block.sectionTitle ?? ""));
 
   if (language && (explicitRule || meaningfulNumber || reportContext || heading)) {
     return { selected: true, reason: "Raporun dil, dosya veya şablon düzenine ilişkin sinyal bulundu." };
@@ -115,18 +118,41 @@ function selectionDecision(block: PdfStructureBlock, matches: DictionaryMatch[],
   if (heading && (explicitRule || reportContext || ["HEADING", "LIST_ITEM", "NUMBERED_CLAUSE"].includes(block.blockType))) {
     return { selected: true, reason: "Raporun başlık veya içerik yapısına ilişkin ifade bulundu." };
   }
-  if (category && /uygun|kapsam|beklenen|ait|yonelik/i.test(block.normalizedText)) {
+  if (category && /uygun|kapsam|beklenen|ait|yonelik|amac|cozulmesi|hedef problem/i.test(block.normalizedText)
+    && block.originalText.length > 40) {
     return { selected: true, reason: "Projenin yarışma kapsamına uygunluğuna ilişkin ifade bulundu." };
   }
   // Dördüncü aşama (criteria_evidence): teknik/fiziksel kurallar da aday olur.
   // Aday seçimi kapsam kararı DEĞİLDİR; fiziksel veya haricî ifadeler silinmez,
-  // sinyalleriyle birlikte LLM kapsam kararına ve sunucu kapılarına taşınır.
+  // sinyalleriyle birlikte LLM kapsam kararına taşınır.
   if (explicitRule) return { selected: true, reason: "Açık zorunluluk, yasak veya sınır ifadesi bulundu." };
+  if (technical && /beklen(?:ir|mektedir)|bulundur|saglama|sahip ol|tavsiye|oneril|istege bagli|opsiyonel/.test(block.normalizedText)) {
+    return { selected: true, reason: "Teknik özellik için beklenti veya isteğe bağlı gereksinim bulundu." };
+  }
   if (meaningfulNumber && technical) return { selected: true, reason: "Teknik terim ile sayısal değer/birim birlikte bulundu." };
   if ((block.blockType === "TABLE_ROW" || Boolean(block.clauseNumber)) && meaningfulNumber && (technical || language)) {
     return { selected: true, reason: "Yapısal kural satırında ölçülebilir bir gereksinim bulundu." };
   }
   return { selected: false, reason: "Kriter adaylığı için yeterli ve açıklanabilir sinyal birleşimi bulunmadı." };
+}
+
+/** Listedeki kısa maddeler kendi başlarına zorunluluk fiili taşımayabilir. */
+function reportListContext(blocks: readonly PdfStructureBlock[], index: number): string {
+  const current = blocks[index];
+  if (current.originalText.length > 240) return "";
+  for (let previous = index - 1; previous >= Math.max(0, index - 16); previous -= 1) {
+    const item = blocks[previous];
+    if (item.pageNumber !== current.pageNumber) break;
+    const value = item.normalizedText;
+    if (/[:：]\s*$/.test(item.originalText)
+      && /\b(?:rapor|pdf|ktr|tyr)\w*\b/.test(value)
+      && /icer|bulun|yer al|bolum|baslik/.test(value)) {
+      return item.originalText;
+    }
+    if (item.originalText.length > 240
+      || !["LIST_ITEM", "HEADING", "TABLE_ROW", "NUMBERED_CLAUSE"].includes(item.blockType)) break;
+  }
+  return "";
 }
 
 export function selectCriteriaCandidates(
@@ -139,7 +165,10 @@ export function selectCriteriaCandidates(
     const dictionaryMatches = scanDictionary(block.normalizedText, extraGroups);
     const numberMatches = findNumberPatterns(block.normalizedText);
     const signals = signalsFor(block, dictionaryMatches, numberMatches);
-    const decision = selectionDecision(block, dictionaryMatches, numberMatches);
+    const listContext = reportListContext(blocks, index);
+    const decision = listContext
+      ? { selected: true, reason: "Rapor içerik listesinin alt maddesi; liste girişinin bağlamı korundu." }
+      : selectionDecision(block, dictionaryMatches, numberMatches);
     if (decision.selected) {
       candidates.push({
         block,
@@ -150,6 +179,7 @@ export function selectCriteriaCandidates(
         selectionReason: decision.reason,
         contextBefore: blocks[index - 1]?.pageNumber === block.pageNumber ? blocks[index - 1].originalText : "",
         contextAfter: blocks[index + 1]?.pageNumber === block.pageNumber ? blocks[index + 1].originalText : "",
+        ...(listContext ? { listContext } : {}),
         dictionaryVersion: DICTIONARY_VERSION,
         selectorVersion: CANDIDATE_SELECTOR_VERSION,
       });
@@ -221,6 +251,18 @@ export function formatCandidatesForLlm(candidates: readonly CriteriaCandidate[])
   return candidates.map((candidate, index) => {
     const matches = candidate.dictionaryMatches.map((match) => `${match.entryId}: ${match.text}${match.negated ? " [OLUMSUZLANMIS]" : ""}`);
     const numbers = candidate.numberMatches.filter((match) => match.kind !== "sayi").map((match) => `${match.kind}: ${match.text}`);
+    // Bunlar ELEME KAPISI DEĞİLDİR: aday, alıntı ve sinyaller eksiksiz gider.
+    // Uzun girdide genel talimatın unutulmaması için ilgili metnin yanında
+    // yoruma dair uyarı verilir; kapsam kararını yine LLM verir.
+    const text = candidate.block.normalizedText;
+    const interpretationHints: string[] = [];
+    if (/sayfa/.test(text) && /dahil/.test(text) && /kapak|icindekiler|referans/.test(text)) {
+      interpretationHints.push("Sayfa hesabına dahil edilen parçalar listeleniyor. Bu liste tek başına zorunlu rapor başlığı/içeriği değildir; ayrıca açık bir içerik yükümlülüğü yoksa yalnızca sayfa sınırını çıkar.");
+    }
+    if (/asama|parkur|yarisma|gorev/.test(text)
+      && /gosterecek|gerceklestiril|tespit edecek|olculecek|olculmesi/.test(text)) {
+      interpretationHints.push("Bu adayda yarışmada yapılacak/gösterilecek/ölçülecek eylemler var. Bu eylemlerden tasarım yükümlülüğü türetme. Ayrı ve açık bir tasarım sınırı yoksa KAPSAM_DISI; sistemin özne olması yeterli değildir.");
+    }
     return [
       `ADAY ${index + 1}`,
       `sourceId: ${candidate.block.sourceId}`,
@@ -230,6 +272,8 @@ export function formatCandidatesForLlm(candidates: readonly CriteriaCandidate[])
       `clause: ${candidate.block.clauseNumber ?? "(madde numarası yok)"}`,
       `type: ${candidate.block.blockType}`,
       `text: ${candidate.block.originalText}`,
+      interpretationHints.length ? `interpretationHints (talimat; kaynak alıntısı değil): ${interpretationHints.join(" ")}` : "",
+      candidate.listContext ? `listContext (yalnızca yorumlama için, alıntı için değil): ${candidate.listContext}` : "",
       candidate.contextBefore ? `contextBefore: ${candidate.contextBefore}` : "",
       candidate.contextAfter ? `contextAfter: ${candidate.contextAfter}` : "",
       `selectionReason: ${candidate.selectionReason}`,

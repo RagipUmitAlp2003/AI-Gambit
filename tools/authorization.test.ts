@@ -440,29 +440,25 @@ test("öncelik sütunu eklemeli ve geriye uyumludur", () => {
  * Şartname çıkarımı · dört aşamalı rapor kontrolü
  * --------------------------------------------------------------------- */
 
-test("çıkarım istemi zorunluluk kipi ifadelerini tarar", () => {
-  const extraction = readFileSync("app/lib/criteria-extraction.ts", "utf8");
-  for (const phrase of [
-    "zorunludur", "içermelidir", "olmalıdır", "mecburidir",
-    "kesinlikle yasaktır", "aşamaz", "en az", "en fazla", "aşması durumunda", "kullanılamaz",
-  ]) {
-    assert.ok(extraction.includes(phrase), `Sistem istemi "${phrase}" ifadesini aramalıdır.`);
-  }
+
+test("çıkarım aday taraması zorunluluk kiplerini sözlükten okur", async () => {
+  const {scanDictionary}=await import("../app/lib/criteria-dictionary.ts");
+  const {normalizeForSearch}=await import("../app/lib/turkish-text.ts");
+  for (const phrase of ["zorunludur","içermelidir","olmalıdır","mecburidir","kesinlikle yasaktır","aşamaz","en az","en fazla","kullanılamaz"])
+    assert.ok(scanDictionary(normalizeForSearch(phrase)).length>0,phrase);
 });
 
-test("çıkarım istemi rapordan denetlenebilen teknik kuralı dördüncü aşamaya yazar, yarışma-anı kurallarını aktif kriter yapmaz", () => {
-  const extraction = readFileSync("app/lib/criteria-extraction.ts", "utf8");
-  for (const topic of ["language_template", "headings_content", "category_similarity", "criteria_evidence"]) {
-    assert.ok(extraction.includes(topic), `Sistem istemi "${topic}" aşamasını içermelidir.`);
-  }
-  assert.match(extraction, /DÖRT KAPSAM/);
-  assert.match(extraction, /Tasarım limiti; criteria_evidence \/ KRITER/);
-  assert.match(extraction, /Yarışma günü\s+performansı; KAPSAM_DISI/);
-  assert.match(extraction, /yarışma sonrası işlemler\s+daima KAPSAM_DISI/);
-  // Şema aşama listesi çıkarım aşamalarıdır; ortak CHECK_STAGE_IDS doğrudan bağlanmaz.
-  assert.doesNotMatch(extraction, /enum: CHECK_STAGE_IDS/);
-  // Sürüm etiketi artırılınca eski önbellek kayıtları geçersiz olur.
-  assert.match(extraction, /EXTRACTION_PROMPT_VERSION = "v(?:2[3-9]|[3-9]\d)/, "İstem sürümü v23 veya üzeri olmalıdır.");
+
+test("çıkarım istemi dört alanı korur; kaynak/sürüm sözleşmesi değişmez", async () => {
+  const {EXTRACTION_SYSTEM_INSTRUCTION: prompt}=await import("../app/lib/criteria-extraction.ts");
+  for (const topic of ["language_template","headings_content","category_similarity","criteria_evidence"])
+    assert.ok(prompt.includes(topic),topic);
+  assert.match(prompt,/ÖNCELİKLİ KARAR SIRASI/);
+  assert.match(prompt,/yarışma sonrası işlemler alınmaz/);
+  assert.match(prompt,/canlı testin başarı şartları/);
+  const extraction=readFileSync("app/lib/criteria-extraction.ts","utf8");
+  assert.doesNotMatch(extraction,/enum: CHECK_STAGE_IDS/);
+  assert.match(extraction,/EXTRACTION_PROMPT_VERSION = "v(?:2[3-9]|[3-9]\d)/);
 });
 
 /* --------------------------------------------------------------------- *

@@ -163,128 +163,27 @@ test("alıntı adayın yakın bağlamına taşsa da kabul edilir; uydurma alınt
   assert.equal(distant.criteria.length, 0, "İki blok öteden alıntı bu adaya bağlanamaz.");
 });
 
-/**
- * 3) AKTİF KRİTER PROFİLİ YALNIZCA KATILIMCI PDF'İNİ KAPSAR.
- *
- * Şartnamedeki her bağlayıcı madde rapor kriteri değildir. Portal, video,
- * saha veya kurul kararı gibi PDF dışı sonuçlar model yanlışlıkla KRITER
- * döndürse bile aktif profile taşınmaz. Dört aşamalı çıkarımda raporun
- * tasarım anlatımından denetlenebilen teknik gereksinim (1080p gerçek zamanlı
- * işleme) criteria_evidence olarak KALIR; parkur gösterimi, CSV teslimi ve
- * idari kurallar yine dışarıdadır.
- */
-test("PDF dışı ve insan kararına bağlı kurallar aktif kriter listesine alınmaz", () => {
-  const blocks: PdfStructureBlock[] = [
-    block("SAYFA-03-BLOK-001", "Rapor, KYS sistemine son teslim tarihine kadar yüklenmelidir.", 3),
-    block("SAYFA-03-BLOK-002", "Projenin özgünlüğü değerlendirme kurulu kararıyla belirlenir.", 3),
-    block("SAYFA-03-BLOK-003", "Raporun yöntem bölümünde motor seçimi açıklanmalıdır.", 3),
-    block("SAYFA-03-BLOK-004", "İletişim konusunda yaşanacak sorunlar takımın sorumluluğundadır.", 3),
-    block("SAYFA-03-BLOK-005", "Takım yarışma günü parkuru üç dakikada tamamlamalıdır.", 3),
-    block("SAYFA-03-BLOK-006", "Tanıtım videosu en fazla 2 dakika ve MP4 formatında olmalıdır.", 3),
-    block("SAYFA-03-BLOK-007", "Teknik Yeterlilik Raporu, Kritik Tasarım Raporu ve Otonomi Kabiliyeti videosu göndermeyen takımlar yarışmaya katılamaz.", 3),
-    block("SAYFA-03-BLOK-008", "Sistem 1080p kamera akışını gerçek zamanlı işleyebilmelidir.", 3),
-    block("SAYFA-03-BLOK-009", "Navigasyon kabiliyeti parkurda gösterilecektir.", 3),
-    block("SAYFA-03-BLOK-010", "Telemetri verileri CSV dosyası olarak teslim edilecektir.", 3),
-    block("SAYFA-03-BLOK-011", "Takımlar anlatımı kolaylaştırmak için rapor veya akış diyagramı kullanabilir; bu yöntem önerilir.", 3),
-    { ...block("SAYFA-03-MADDE-3-1", "3.1 Teknik Yeterlilik Raporu", 3), blockType: "NUMBERED_CLAUSE" },
+
+/** Kapsam kararını model verir; sunucu kaynağı doğrular ve etiketleri korur. */
+test("doğrulanmış teknik ve haricî kriter korunur; modelin dışladığı aday alınmaz", () => {
+  const blocks=[
+    block("SAYFA-03-BLOK-001","Video en fazla 2 dakika olmalıdır.",3),
+    block("SAYFA-03-BLOK-002","Motor gücü en fazla 5 kW olmalıdır.",3),
+    block("SAYFA-03-BLOK-003","Video sisteme yüklenmelidir.",3),
   ];
-  const ids = new Set(blocks.map((item) => item.sourceId));
-  const result = normalizeExtraction({
-    documentProfile: {},
-    decisions: [
-      {
-        sourceId: "SAYFA-03-BLOK-001", result: "KRITER", classificationReason: "Teslim zorunluluğu",
-        name: "Rapor Portal Teslimi", stage: "language_template", required: true,
-        description: "Rapor KYS'ye zamanında yüklenmelidir.", controlType: "KANIT_KONTROLU",
-        verifiability: "HARICI_KANIT_GEREKLI", sourcePage: 3,
-        sourceText: "Rapor, KYS sistemine son teslim tarihine kadar yüklenmelidir.",
-      },
-      {
-        // Model alanı geçersiz bıraksa bile metinden deterministik türetilir.
-        sourceId: "SAYFA-03-BLOK-002", result: "KRITER", classificationReason: "Kurul takdiri",
-        name: "Özgünlük Kurul Kararı", stage: "criteria_evidence", required: true,
-        description: "Özgünlük değerlendirme kurulu kararıyla belirlenir.", controlType: "KANIT_KONTROLU",
-        verifiability: "GECERSIZ_DEGER", sourcePage: 3,
-        sourceText: "Projenin özgünlüğü değerlendirme kurulu kararıyla belirlenir.",
-      },
-      {
-        sourceId: "SAYFA-03-BLOK-003", result: "KRITER", classificationReason: "Rapordan denetlenebilir içerik",
-        name: "Motor Seçimi Açıklaması", stage: "headings_content", required: true,
-        description: "Motor seçimi yöntem bölümünde açıklanmalıdır.", controlType: "ICERIK_VARLIGI",
-        verifiability: "PDF_DENETLENEBILIR", sourcePage: 3,
-        sourceText: "Raporun yöntem bölümünde motor seçimi açıklanmalıdır.",
-      },
-      {
-        // Model yanlışlıkla PDF denetlenebilir dese de sunucu kapsam kapısı korur.
-        sourceId: "SAYFA-03-BLOK-004", result: "KRITER", classificationReason: "Bağlayıcı sorumluluk",
-        name: "İletişim Sorumluluğu", stage: "criteria_evidence", required: true,
-        description: "İletişim sorunları takımın sorumluluğundadır.", controlType: "KANIT_KONTROLU",
-        verifiability: "PDF_DENETLENEBILIR", sourcePage: 3,
-        sourceText: "İletişim konusunda yaşanacak sorunlar takımın sorumluluğundadır.",
-      },
-      {
-        sourceId: "SAYFA-03-BLOK-005", result: "KRITER", classificationReason: "Süre sınırı",
-        name: "Parkur Süresi", stage: "criteria_evidence", required: true,
-        description: "Parkur yarışma günü üç dakikada tamamlanmalıdır.", controlType: "KANIT_KONTROLU",
-        verifiability: "PDF_DENETLENEBILIR", sourcePage: 3,
-        sourceText: "Takım yarışma günü parkuru üç dakikada tamamlamalıdır.",
-      },
-      {
-        sourceId: "SAYFA-03-BLOK-006", result: "KRITER", classificationReason: "Video biçimi",
-        name: "Video Süresi ve Formatı", stage: "language_template", required: true,
-        description: "Tanıtım videosu iki dakikayı aşmamalı ve MP4 olmalıdır.", controlType: "KANIT_KONTROLU",
-        verifiability: "PDF_DENETLENEBILIR", sourcePage: 3,
-        sourceText: "Tanıtım videosu en fazla 2 dakika ve MP4 formatında olmalıdır.",
-      },
-      {
-        sourceId: "SAYFA-03-BLOK-007", result: "KRITER", classificationReason: "Karma rapor ve video teslimi",
-        name: "Zorunlu Rapor ve Video Teslimleri", stage: "language_template", required: true,
-        description: "Teknik raporlar ve otonomi kabiliyeti videosu gönderilmelidir.", controlType: "ICERIK_VARLIGI",
-        verifiability: "PDF_DENETLENEBILIR", sourcePage: 3,
-        sourceText: "Teknik Yeterlilik Raporu, Kritik Tasarım Raporu ve Otonomi Kabiliyeti videosu göndermeyen takımlar yarışmaya katılamaz.",
-      },
-      {
-        sourceId: "SAYFA-03-BLOK-008", result: "KRITER", classificationReason: "Teknik yetenek",
-        name: "Video İşleme Yeteneği", stage: "criteria_evidence", required: true,
-        description: "Sistem 1080p kamera akışını gerçek zamanlı işlemelidir.", controlType: "KANIT_KONTROLU",
-        verifiability: "PDF_DENETLENEBILIR", sourcePage: 3,
-        sourceText: "Sistem 1080p kamera akışını gerçek zamanlı işleyebilmelidir.",
-      },
-      {
-        sourceId: "SAYFA-03-BLOK-009", result: "KRITER", classificationReason: "Canlı görev",
-        name: "Parkur Navigasyon Gösterimi", stage: "criteria_evidence", required: true,
-        description: "Navigasyon kabiliyeti parkurda gösterilmelidir.", controlType: "KANIT_KONTROLU",
-        verifiability: "PDF_DENETLENEBILIR", sourcePage: 3,
-        sourceText: "Navigasyon kabiliyeti parkurda gösterilecektir.",
-      },
-      {
-        sourceId: "SAYFA-03-BLOK-010", result: "KRITER", classificationReason: "Ayrı veri teslimi",
-        name: "Telemetri CSV Teslimi", stage: "criteria_evidence", required: true,
-        description: "Telemetri verileri CSV dosyası olarak teslim edilmelidir.", controlType: "KANIT_KONTROLU",
-        verifiability: "PDF_DENETLENEBILIR", sourcePage: 3,
-        sourceText: "Telemetri verileri CSV dosyası olarak teslim edilecektir.",
-      },
-      {
-        sourceId: "SAYFA-03-BLOK-011", result: "KRITER", classificationReason: "Yardımcı içerik",
-        name: "Yardımcı Akış Diyagramı", stage: "headings_content", required: false,
-        description: "Akış diyagramı kullanılabilir.", controlType: "ICERIK_VARLIGI",
-        verifiability: "PDF_DENETLENEBILIR", sourcePage: 3,
-        sourceText: "Takımlar anlatımı kolaylaştırmak için rapor veya akış diyagramı kullanabilir; bu yöntem önerilir.",
-      },
-      {
-        sourceId: "SAYFA-03-MADDE-3-1", result: "KRITER", classificationReason: "Şartname bölüm başlığı",
-        name: "Teknik Yeterlilik Raporu Başlığı", stage: "headings_content", required: true,
-        description: "Raporda Teknik Yeterlilik Raporu başlığı bulunmalıdır.", controlType: "BIREBIR_BASLIK",
-        verifiability: "PDF_DENETLENEBILIR", sourcePage: 3,
-        sourceText: "3.1 Teknik Yeterlilik Raporu",
-      },
-    ],
-  } as never, 5, blocks, ids);
-  assert.deepEqual(result.criteria.map((item) => item.name), ["Motor Seçimi Açıklaması", "Video İşleme Yeteneği"]);
-  assert.equal(result.criteria[1].stage, "criteria_evidence");
-  assert.equal(result.criteria[1].controlType, "KANIT_KONTROLU");
-  assert.equal(result.stats.excludedCandidates, 10);
-  assert.ok(result.warnings.some((warning) => warning.includes("katılımcı PDF'inden değerlendirilemediği")));
+  const rows=blocks.map((source,index)=>({
+    sourceId:source.sourceId,result:index===2?"KAPSAM_DISI":"KRITER",
+    classificationReason:index===2?"Teslim işlemi.":"Açık koşul.",
+    name:index===0?"Video süresi":"Motor gücü",stage:index===0?"language_template":"criteria_evidence",
+    required:true,description:source.originalText,controlType:"KANIT_KONTROLU",
+    verifiability:index===0?"HARICI_KANIT_GEREKLI":"PDF_DENETLENEBILIR",
+    sourcePage:source.pageNumber,sourceText:source.originalText,
+  }));
+  const result=normalizeExtraction({decisions:rows} as never,3,blocks,new Set(blocks.map(x=>x.sourceId)));
+  assert.equal(result.criteria.length,2);
+  assert.equal(result.criteria[0].verifiability,"HARICI_KANIT_GEREKLI");
+  assert.equal(result.stats.excludedCandidates,1);
+  assert.equal(result.stats.unansweredCandidates,0);
 });
 
 /**
@@ -309,34 +208,22 @@ test("çıktı tavanı ölçülen ihtiyacın üstündedir ve kesilme açık hata
   );
 });
 
-/**
- * 5) İSTEM SÖZLEŞMESİ: dört aşama; puan/baraj, yarışma günü, video ve portal
- * yasağı korunur.
- *
- * Kapsam genişletilirken model puan barajlarını kriter yapmaya başladı; bu
- * sistem puan üretmez ve puan eşiği denetlemez. Ayrıca idari kurallar
- * "category_similarity" aşamasına doluyordu; o aşama yalnızca projenin
- * kategoriye uygunluğu içindir. Dördüncü aşama (criteria_evidence) yalnızca
- * rapordan metinsel/sayısal olarak denetlenebilen teknik tasarım kuralıdır.
- */
-test("istem dört aşamalı rapor kontrolünü üretir; yarışma günü, video, portal ve puan yasağı korunur", async () => {
-  const { EXTRACTION_STAGE_IDS, EXTRACTION_SYSTEM_INSTRUCTION } = await import("../app/lib/criteria-extraction.ts");
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /TEKNOFEST'te ön eleme aşamasında görevli, deneyimli bir Proje Yöneticisisin/);
-  assert.deepEqual(EXTRACTION_STAGE_IDS, ["language_template", "headings_content", "category_similarity", "criteria_evidence"]);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /DÖRT KAPSAM/);
-  assert.doesNotMatch(EXTRACTION_SYSTEM_INSTRUCTION, /YALNIZCA ÜÇ KAPSAM/);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /4\. criteria_evidence/);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /Motor, malzeme, boyut, ağırlık, batarya/);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /criteria_evidence \/ KRITER/);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /Yarışma günü\/sırasında\/esnasında yapılacak parkur/);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /yarışma sonrası işlemler\s+daima KAPSAM_DISI/);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /Video içeriği\/süresi\/formatı\/yüklemesi; portal\/KYS/);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /Puan, baraj, sıralama, ödül, ceza/);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /verifiability daima PDF_DENETLENEBILIR/);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /Raporlar arası benzerlik kriteri\s+üretme/);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /Asla "\.\.\." veya "…" ekleme/);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /kriter sayısını yapay olarak sınırlama/i);
-  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /TÜM sourceId'ler/);
+
+/** Talimatın kapsam sınırları; modelin canlı kalitesi ayrı benchmark'ta ölçülür. */
+test("istem dört alanı, video dosya istisnasını ve kaynak güvenliğini açıklar", async () => {
+  const {EXTRACTION_STAGE_IDS,EXTRACTION_SYSTEM_INSTRUCTION: prompt}=await import("../app/lib/criteria-extraction.ts");
+  assert.deepEqual(EXTRACTION_STAGE_IDS,["language_template","headings_content","category_similarity","criteria_evidence"]);
+  for (const phrase of ["ÖNCELİKLİ KARAR SIRASI","HARICI_KANIT_GEREKLI","KAPSAM_DISI","required=false","BİREBİR","sourcePage ve sourceId'yi değiştirme","Her aday sourceId","puan tablosuysa","şartnamenin başlığı"])
+    assert.ok(prompt.includes(phrase),phrase);
+  assert.doesNotMatch(prompt,/Emin değilsen KRITER üretme|verifiability daima PDF_DENETLENEBILIR/);
+});
+
+test("zorunlu yenileme eski başarılı önbelleği istek başında silmez", () => {
+  const route=readFileSync("app/api/analyze/route.ts","utf8");
+  assert.doesNotMatch(route,/deleteStoredAnalysis|analysisCache\(\)\.delete\(cacheKey\)/);
+  assert.match(route,/forceRefresh \? undefined : analysisCache\(\)\.get\(cacheKey\)/);
+  assert.match(route,/forceRefresh \? null : await findStoredAnalysis/);
+  assert.ok(route.indexOf("coverageCheck.stats.unansweredCandidates > 0")<route.indexOf("const extraction: CachedExtraction"));
 });
 
 test("çok satırlı zorunlu başlık listesinde sonraki maddeler kaçırılmaz", () => {
@@ -363,6 +250,14 @@ test("çok satırlı zorunlu başlık listesinde sonraki maddeler kaçırılmaz"
     sourceText: "3.2 Mekanik Tasarım",
   }] } as never, 4, blocks, new Set([source.sourceId]));
   assert.equal(result.criteria.length, 1);
+});
+
+test("şartname üretimi beş dakika bekler ve bu bütçeyi tek çağrıya aktarır", () => {
+  const route = readFileSync("app/api/analyze/route.ts", "utf8");
+  assert.match(route, /const GENERATION_TIMEOUT_MS = 300_000;/);
+  assert.match(route, /timeoutMs: GENERATION_TIMEOUT_MS/);
+  const client = readFileSync("app/lib/gemini-analyzer.ts", "utf8");
+  assert.doesNotMatch(client, /AbortSignal\.timeout|setTimeout\(/);
 });
 
 test("çıktı şeması yalnızca gerçek aday kimliklerini kabul eder ve eksik kapsam başarı sayılmaz", async () => {

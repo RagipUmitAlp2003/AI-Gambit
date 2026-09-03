@@ -15,7 +15,7 @@ import { CANDIDATE_SELECTOR_VERSION, formatCandidatesForLlm, selectCriteriaCandi
 import { DICTIONARY_VERSION } from "../../lib/criteria-dictionary";
 import { extractPdfStructure, PDF_STRUCTURE_OCR_VERSION, PDF_STRUCTURE_VERSION, PdfTextLayerError, type StructuredPdf } from "../../lib/pdf-structure";
 import { extractPdfStructureViaOcr, OCR_PROMPT_VERSION } from "../../lib/pdf-ocr";
-import { deleteStoredAnalysis, findStoredAnalysis, reportBucket, saveCriteriaExtractionRun, saveStoredAnalysis, touchStoredAnalysis } from "../../lib/workflow-db";
+import { findStoredAnalysis, reportBucket, saveCriteriaExtractionRun, saveStoredAnalysis, touchStoredAnalysis } from "../../lib/workflow-db";
 import type { AnalysisDiagnostics, AnalysisResult } from "../../lib/types";
 
 /**
@@ -51,8 +51,9 @@ const CACHE_LIMIT = 12;
 const MAX_PDF_BYTES = 18 * 1024 * 1024;
 // Multipart sınırına dosya dışında başlıklar için küçük pay eklenir.
 const MAX_MULTIPART_BYTES = MAX_PDF_BYTES + 768 * 1024;
-// Tek çağrı bütün güçlü adayları kapsadığı için uzun belgelerde geniş zaman tanınır.
-const GENERATION_TIMEOUT_MS = 150_000;
+// HIGH düşünme düzeyinde yoğun aday listeleri 150 saniyeyi aşabilir.
+// Kaliteyi veya tek çağrı politikasını değiştirmeden en fazla 5 dakika bekle.
+const GENERATION_TIMEOUT_MS = 300_000;
 
 /**
  * Çıktı token tavanı.
@@ -81,7 +82,8 @@ const THINKING_OVERRIDE = (process.env.GEMINI_THINKING_LEVEL || "").toUpperCase(
 function thinkingLevelFor(pageCount: number): string {
   if (["LOW", "MEDIUM", "HIGH"].includes(THINKING_OVERRIDE)) return THINKING_OVERRIDE;
   if (pageCount >= 80) return "HIGH";
-  return pageCount >= 40 ? "MEDIUM" : "LOW";
+  // Orta boy şartnamelerde bile tasarım/görev ayrımı bağlam muhakemesi ister.
+  return pageCount >= 10 ? "HIGH" : "MEDIUM";
 }
 
 function extractGeminiText(payload: unknown) {
@@ -480,11 +482,9 @@ export async function POST(request: Request) {
      * sonuç sistemde sonsuza kadar kalamaz. (Bayrak, OCR akışı da okuduğu
      * için yukarıda, metin çıkarımından önce çözülür.)
      */
-    if (forceRefresh) {
-      analysisCache().delete(cacheKey);
-      await deleteStoredAnalysis(cacheKey).catch((cacheError) =>
-        console.error("[analyze] kalıcı analiz kaydı silinemedi", cacheError));
-    }
+    // Yenileme mevcut başarıyı SİLMEZ, yalnızca okumayı atlar. Yeni çağrı
+    // başarısız olursa son geçerli sonuç normal istekte hâlâ kullanılabilir.
+    // Önbellek ancak aşağıdaki başarılı üretim/doğrulama tamamlanınca değişir.
 
     /**
      * Önbellek isabeti: sınıflandırma modeline gidilmez. Sayaçlar uydurulmaz:
@@ -571,8 +571,9 @@ export async function POST(request: Request) {
         parts: [{ text: prompt }],
       }],
       generationConfig: {
-        // Kural çıkarımı yaratıcı bir görev değil: sıcaklık 0 hem kararlı çıktı
-        // verir hem örnekleme adımını kısaltır. Aynı belge aynı kriterleri üretir.
+        // Sıcaklık 0 değişkenliği azaltır; yeni model çağrıları için birebir
+        // aynı sonucu garanti etmez. Normal tekrarların tutarlılığını sürümlü
+        // önbellek sağlar; refresh yalnızca bilinçli yeni analiz içindir.
         temperature: 0,
         topP: 1,
         thinkingConfig: { thinkingLevel: thinkingLevelFor(pageCount) },
