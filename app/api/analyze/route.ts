@@ -2,9 +2,9 @@ import { requirePermission } from "../../lib/admin-guard";
 import { acquireAnalysisPermit, requestBodyTooLarge } from "../../lib/request-guard";
 import {
   EXTRACTION_PROMPT_VERSION,
-  EXTRACTION_SCHEMA,
   EXTRACTION_SYSTEM_INSTRUCTION,
   buildExtractionPrompt,
+  extractionSchemaForCandidates,
   normalizeExtraction,
   type RawExtraction,
 } from "../../lib/criteria-extraction";
@@ -424,7 +424,9 @@ export async function POST(request: Request) {
         thinkingConfig: { thinkingLevel: thinkingLevelFor(pageCount) },
         maxOutputTokens: MAX_OUTPUT_TOKENS,
         responseMimeType: "application/json",
-        responseJsonSchema: EXTRACTION_SCHEMA,
+        responseJsonSchema: extractionSchemaForCandidates(
+          selection.candidates.map((candidate) => candidate.block.sourceId),
+        ),
       },
     });
 
@@ -432,14 +434,14 @@ export async function POST(request: Request) {
     /** Gerçekten yapılan `generateContent` isteği sayısı; tanılamaya bu yazılır. */
     let apiCalls: 0 | 1 = 0;
 
-    const failWith = (status: number, detail: string) => {
+    const failWith = (status: number, detail: string, retryableOverride?: boolean) => {
       console.error("AI analiz isteği başarısız:", { status, detail, apiCalls });
       recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls });
       const failure = describeGeminiFailure(status, detail, "AI belge analizi");
       // `retryable` istemciye "Yeniden dene" düğmesini göstermesini söyler;
       // sunucu kendiliğinden ikinci bir çağrı yapmaz.
       return Response.json(
-        { error: failure.message, retryable: failure.transient, apiCalls },
+        { error: failure.message, retryable: retryableOverride ?? failure.transient, apiCalls },
         { status: failure.httpStatus },
       );
     };
@@ -473,6 +475,23 @@ export async function POST(request: Request) {
     // gövde normalizasyonda patlar ve önbelleğe girerse her isteği düşürürdü.
     if (!raw || typeof raw !== "object") {
       return failWith(502, "Belge analizi şemaya uygun JSON olarak okunamadı.");
+    }
+
+    // Geçerli JSON, eksiksiz analiz demek değildir. Gemini bazı koşularda
+    // yalnızca kabul ettiği kriterleri döndürüp adayların büyük bölümünü sessizce
+    // atlayabiliyor. Eksik kapsamı başarı diye kaydetmek 129 adaylı bir belgeyi
+    // yanıltıcı biçimde 13 kriterle tamamlanmış gösteriyordu. Tek çağrı politikası
+    // korunur: sunucu gizlice yeniden denemez; eksik sonucu kaydetmez ve kullanıcıya
+    // açık, yeniden denenebilir hata verir.
+    const candidateIds = new Set(selection.candidates.map((candidate) => candidate.block.sourceId));
+    const coverageCheck = normalizeExtraction(raw, pageCount, structure.blocks, candidateIds);
+    if (coverageCheck.stats.unansweredCandidates > 0) {
+      return failWith(
+        502,
+        `Model ${selection.candidates.length} adayın ${coverageCheck.stats.unansweredCandidates} tanesi için karar döndürmedi. `
+        + "Eksik sonuç kaydedilmedi; belgeyi yeniden analiz edin.",
+        true,
+      );
     }
 
     const extraction: CachedExtraction = { raw, model: modelUsed, pageCount, analyzedAt: new Date().toISOString() };

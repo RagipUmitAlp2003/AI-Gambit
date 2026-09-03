@@ -235,7 +235,11 @@ test("şartname analizi tek generateContent çağrısı yapar", () => {
   assert.match(ANALYZE_ROUTE, /runSingleGeneration\(/, "Tek çağrı katmanı kullanılmalı.");
   assert.ok(!/apiCalls: 1,/.test(ANALYZE_ROUTE), "Tanılamaya sabit 'apiCalls: 1' yazılmamalıdır.");
   assert.match(ANALYZE_ROUTE, /apiCalls,/, "Gerçek çağrı sayısı tanılamaya yazılmalıdır.");
-  assert.match(ANALYZE_ROUTE, /retryable: failure\.transient/, "Geçici hatada 'Yeniden dene' bayrağı dönmelidir.");
+  assert.match(
+    ANALYZE_ROUTE,
+    /retryable: retryableOverride \?\? failure\.transient/,
+    "Geçici veya eksik kapsam hatasında 'Yeniden dene' bayrağı dönmelidir.",
+  );
 });
 
 test("rapor analizi tek generateContent çağrısı yapar", () => {
@@ -442,7 +446,7 @@ test("çıkarım istemi somut teknik gereksinim türlerini sayar", () => {
     assert.ok(extraction.includes(topic), `Sistem istemi "${topic}" başlığını içermelidir.`);
   }
   // Sürüm etiketi artırılınca eski önbellek kayıtları geçersiz olur.
-  assert.match(extraction, /EXTRACTION_PROMPT_VERSION = "v2[3-9]/, "İstem sürümü v23 veya üzeri olmalıdır.");
+  assert.match(extraction, /EXTRACTION_PROMPT_VERSION = "v(?:2[3-9]|[3-9]\d)/, "İstem sürümü v23 veya üzeri olmalıdır.");
   // Teknik odak diğer aşamaları boşaltmamalı.
   assert.match(extraction, /AŞAMA DENGESİ/, "Aşamalar arası denge kuralı bulunmalıdır.");
 });
