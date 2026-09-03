@@ -19,7 +19,7 @@ import {
   saveDraftSnapshot,
   saveUnselectedReview,
 } from "../lib/draft-store";
-import { resolveVerifiability } from "../lib/criteria-extraction";
+import { EXTRACTION_PROMPT_VERSION, resolveVerifiability } from "../lib/criteria-extraction";
 import {
   CHECK_STAGES,
   checkStageOf,
@@ -1211,6 +1211,15 @@ export default function CriteriaApp() {
           : snapshot.result);
         setCriteria(snapshot.criteria);
         setProfile(snapshot.profile);
+        // Dört aşamalı teknik kapsamdan ÖNCE üretilmiş taslak sonucunda istem
+        // sürümü yoktur ya da eskidir; yönetici yeniden analiz için açıkça uyarılır.
+        const draftPromptVersion = snapshot.result?.diagnostics?.promptVersion;
+        if (snapshot.result && draftPromptVersion !== EXTRACTION_PROMPT_VERSION) {
+          setCacheNotice(
+            `Bu taslaktaki analiz sonucu eski çıkarım sürümüyle (${draftPromptVersion ?? "sürüm kaydı yok"}) üretildi; `
+            + "teknik kriter aşamasının yeni kapsamı için şartnameyi yeniden analiz edin.",
+          );
+        }
       }
       if (storedFile) {
         setFile(storedFile);
@@ -1310,6 +1319,7 @@ export default function CriteriaApp() {
       setCriteria(analysis.criteria);
       setEditedProfile(null);
       // Önbellek isabetinde model hiç çağrılmaz; yönetici bunu açıkça görür.
+      let notice = "";
       if (analysis.diagnostics?.cached) {
         let firstAnalyzed = "";
         if (analysis.diagnostics.firstAnalyzedAt) {
@@ -1318,13 +1328,18 @@ export default function CriteriaApp() {
             firstAnalyzed = parsed.toLocaleString("tr-TR", { dateStyle: "long", timeStyle: "short" });
           }
         }
-        setCacheNotice(
-          `Bu şartname daha önce analiz edilmişti${firstAnalyzed ? ` (ilk analiz: ${firstAnalyzed})` : ""}. `
-          + "Kayıtlı sonuç gösterildi; yapay zekâ yeniden çalıştırılmadı ve token harcanmadı.",
-        );
-      } else {
-        setCacheNotice("");
+        notice = `Bu şartname daha önce analiz edilmişti${firstAnalyzed ? ` (ilk analiz: ${firstAnalyzed})` : ""}. `
+          + "Kayıtlı sonuç gösterildi; yapay zekâ yeniden çalıştırılmadı ve token harcanmadı.";
       }
+      // Eski çıkarım sürümüyle üretilmiş sonuç (dört aşamalı teknik kriter
+      // kapsamından önce) gösteriliyorsa yönetici yeniden analiz için uyarılır.
+      // Sunucu her yanıta üreten istem sürümünü yazar (diagnostics.promptVersion).
+      const shownPromptVersion = analysis.diagnostics?.promptVersion;
+      if (typeof shownPromptVersion === "string" && shownPromptVersion && shownPromptVersion !== EXTRACTION_PROMPT_VERSION) {
+        notice = `${notice}${notice ? " " : ""}Bu sonuç eski çıkarım sürümüyle (${shownPromptVersion}) üretildi; `
+          + "teknik kriter aşamasının yeni kapsamı için şartnameyi yeniden analiz edin.";
+      }
+      setCacheNotice(notice);
       setStep(2);
     } catch (analysisError) {
       // Geçici model hatasında kullanıcıya "Yeniden dene" sunulur; sistem

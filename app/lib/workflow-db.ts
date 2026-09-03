@@ -7,11 +7,15 @@ import { criteriaContentHash, criteriaHash } from "./criteria-hash";
 import { applySourceLock, buildSourceLockIndex, type SourceLockIndex } from "./source-lock";
 import { validateProfileExport } from "./profile-loader";
 import { findingRejectionAuditLine, judgeDecisionCounts, validateCriterionDecisions, visibleFindingsOf } from "./judge-review";
+// Ağır PDF ayrıştırıcısı bu modülün içinde DEĞİL; `readReportTextLayer` PDF.js'i
+// yalnızca gerçekten çağrıldığında dinamik olarak yükler.
+import { quoteFoundOnPage, readReportTextLayer, type ReportTextLayer } from "./report-text-layer";
 import {
   RULE_VERDICT_LABELS,
   aiVerdictOf,
   type AnalysisResult,
   type Criterion,
+  type JudgeCriterionDecision,
   type JudgeReview,
   type ProfileExport,
   type ReportEvaluation,
@@ -375,6 +379,17 @@ const EVALUATION_RESULT_COLUMNS: Array<{ name: string; definition: string }> = [
   { name: "pdf_hash", definition: "TEXT" },
 ];
 
+/**
+ * Rapor sürümünün bütünlük alanları (göç 0010).
+ *   pdf_hash    yüklenen belgenin SHA-256 özeti; analiz bu özete bağlanır.
+ *   byte_length R2'ye yazıldığı doğrulanan nesne uzunluğu; boş/yarım nesne
+ *               yazılmasını sürüm kesinleşmeden yakalar.
+ */
+const SUBMISSION_VERSION_COLUMNS: Array<{ name: string; definition: string }> = [
+  { name: "pdf_hash", definition: "TEXT" },
+  { name: "byte_length", definition: "INTEGER" },
+];
+
 const CRITERIA_COLUMNS: Array<{ name: string; definition: string }> = [
   { name: "verifiability", definition: "TEXT NOT NULL DEFAULT 'PDF_DENETLENEBILIR'" },
 ];
@@ -471,6 +486,19 @@ async function workflowDatabase(): Promise<D1Database> {
         await addMissingColumns(database, "criteria", CRITERIA_COLUMNS);
         await addMissingColumns(database, "similarity_chunks", SIMILARITY_CHUNK_COLUMNS);
         await addMissingColumns(database, "similarity_results", SIMILARITY_RESULT_COLUMNS);
+        await addMissingColumns(database, "submission_versions", SUBMISSION_VERSION_COLUMNS);
+        /*
+         * ÇİFT BAŞVURU KORUMASI (madde 9): aynı katılımcının aynı yarışmada
+         * arşivlenmemiş tek aktif başvurusu olur. Dizin oluşturulamıyorsa
+         * (eski kurulumda mükerrer satır varsa) sistem çalışmaya devam eder;
+         * korumayı bu durumda `createApplication` içindeki kontrol sağlar.
+         */
+        await database.prepare(
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_applications_participant_competition
+             ON competition_applications (participant_id, competition_key)
+             WHERE deleted_at IS NULL`,
+        ).run().catch((indexError) =>
+          console.error("[workflow] çift başvuru dizini oluşturulamadı; mükerrer aktif başvuru olabilir", indexError));
       })
       .catch((error: unknown) => {
         workflowSchemaPromise = null;
@@ -486,6 +514,48 @@ export class ReportStorageUnavailableError extends Error {
     super("PDF saklama alanı şu anda kullanılamıyor.");
     this.name = "ReportStorageUnavailableError";
   }
+}
+
+/**
+ * Katılımcı PDF'ini R2'ye YAZAR VE YAZILDIĞINI DOĞRULAR.
+ *
+ * NEDEN: `file.stream()` ile yazıldığında R2 içerik uzunluğunu bilemiyor ve
+ * yükleme sessizce düşerek boş/yarım bir nesne bırakabiliyordu; veri tabanı
+ * ise sürümü "geçerli" olarak işaretliyordu. Sonuç: hakem PDF'i açamıyor,
+ * analiz "PDF bulunamadı" veriyordu.
+ *
+ * Bu yüzden:
+ *   1. Baytlar önce belleğe alınır (boyut sınırı zaten uçlarda uygulanır) ve
+ *      `Blob` olarak yazılır — içerik uzunluğu bilinir.
+ *   2. Yazımdan sonra nesnenin varlığı ve uzunluğu R2'den OKUNARAK doğrulanır.
+ *   3. Doğrulama başarısızsa yarım nesne silinir ve hata fırlatılır; veri
+ *      tabanı bu sürüme HİÇ geçmez.
+ *
+ * `pdfHash` çağırana döner: aynı baytlardan ölçülür, ikinci bir okuma yapılmaz.
+ */
+export async function storeReportPdf(input: {
+  key: string;
+  bytes: ArrayBuffer;
+  customMetadata: Record<string, string>;
+}): Promise<{ pdfHash: string; byteLength: number }> {
+  const bucket = reportBucket();
+  const byteLength = input.bytes.byteLength;
+  if (byteLength <= 0) throw new ConflictError("Yüklenen PDF boş; saklama alanına yazılmadı.");
+  await bucket.put(input.key, new Blob([input.bytes], { type: "application/pdf" }), {
+    httpMetadata: { contentType: "application/pdf" },
+    customMetadata: input.customMetadata,
+  });
+  const written = await bucket.head(input.key);
+  if (!written || written.size !== byteLength) {
+    await bucket.delete(input.key).catch(() => undefined);
+    throw new ConflictError(
+      `PDF saklama alanına eksiksiz yazılamadı (beklenen ${byteLength} bayt, yazılan ${written?.size ?? 0}). `
+      + "Sürüm güncellenmedi; lütfen yeniden deneyin.",
+    );
+  }
+  const digest = await crypto.subtle.digest("SHA-256", input.bytes);
+  const pdfHash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return { pdfHash, byteLength };
 }
 
 export function reportBucket(): R2Bucket {
@@ -1804,6 +1874,95 @@ export async function assignPendingApplications(): Promise<number> {
   return assignedCount;
 }
 
+export type CreateApplicationResult = CompetitionApplication | "duplicate";
+
+export type JudgeReassignment = {
+  applicationId: string;
+  /** Yeni hakem atanabildiyse künyesi; aktif hakem yoksa null (kuyruğa alındı). */
+  judgeId: string | null;
+  judgeName: string | null;
+  detail: string;
+};
+
+/**
+ * PASİFLEŞTİRİLEN HAKEMİN AÇIK DOSYALARINI GÜVENLE DEVREDER (madde 10).
+ *
+ * Bir hakem hesabı pasife alındığında (veya kalıcı silindiğinde) ona atanmış
+ * TAMAMLANMAMIŞ başvurular eskiden `assigned_judge_id` alanında o hesapta
+ * kalıyordu: hakem giriş yapamadığı için dosya hiç açılmıyor, otomatik dağıtım
+ * ise yalnızca `assigned_judge_id IS NULL` satırlara baktığı için dosyayı hiç
+ * görmüyordu. Başvuru kalıcı olarak takılı kalıyordu.
+ *
+ * Bu işlev:
+ *   - Yalnızca TAMAMLANMAMIŞ ve arşivlenmemiş dosyaları serbest bırakır;
+ *     tamamlanmış değerlendirmelerin tarihsel hakem bilgisi (judge_id,
+ *     judge_name, application_assignments geçmişi) DEĞİŞMEZ.
+ *   - Serbest bırakmayı koşullu UPDATE ile yapar: `assigned_judge_id` hâlâ
+ *     pasif hakemde ise değişir. Eşzamanlı bir işlem dosyayı çoktan başka
+ *     hakeme aldıysa üzerine YAZILMAZ, yani iki hakeme birden atanamaz.
+ *   - Ardından mevcut otomatik dağıtımı çağırır: en az yüklü aktif hakeme
+ *     gider. Aktif hakem yoksa dosya atanmamış (kuyrukta) kalır ve yeni bir
+ *     hakem açıldığında `assignPendingApplications` dağıtır.
+ *   - Her değişikliği süreç zaman çizelgesine yazar; denetim kaydı çağıranda.
+ */
+export async function reassignApplicationsFromJudge(
+  judgeId: string,
+  reason: string,
+): Promise<JudgeReassignment[]> {
+  const database = await workflowDatabase();
+  const open = await database.prepare(
+    `SELECT id, competition_key FROM competition_applications
+     WHERE assigned_judge_id = ? AND status <> 'completed' AND deleted_at IS NULL
+     ORDER BY submitted_at ASC LIMIT 200`,
+  ).bind(judgeId).all<{ id: string; competition_key: string }>();
+  const moved: JudgeReassignment[] = [];
+  for (const row of open.results ?? []) {
+    const timestamp = new Date().toISOString();
+    /*
+     * Serbest bırakma: durum da dağıtıma UYGUN hâle getirilir. `autoAssignJudge`
+     * yalnızca 'submitted'/'resubmitted' satırları atar; 'assigned',
+     * 'analyzing' veya 'awaiting_judge' durumunda takılmış bir dosya aksi
+     * hâlde yeniden dağıtılamazdı. Kaydedilmiş AI analizi ve kriter kararları
+     * SİLİNMEZ; yalnızca dosyanın sahibi değişir.
+     */
+    const released = await database.prepare(
+      `UPDATE competition_applications
+       SET assigned_judge_id = NULL, assigned_judge_name = NULL, status = 'resubmitted', updated_at = ?
+       WHERE id = ? AND assigned_judge_id = ? AND status <> 'completed' AND deleted_at IS NULL`,
+    ).bind(timestamp, row.id, judgeId).run();
+    // Eşzamanlı bir işlem dosyayı bu arada devraldıysa dokunulmaz.
+    if (!released.meta.changes) continue;
+    await database.prepare(`UPDATE application_assignments SET active = 0 WHERE application_id = ? AND active = 1`)
+      .bind(row.id).run().catch(() => undefined);
+
+    let assignment: Awaited<ReturnType<typeof autoAssignJudge>> = null;
+    try {
+      assignment = await autoAssignJudge(row.id, row.competition_key, timestamp);
+    } catch (assignError) {
+      console.error("[workflow] pasif hakemin dosyası yeniden atanamadı", assignError);
+    }
+    const detail = assignment
+      ? `Önceki hakem pasife alındı (${reason || "gerekçe yazılmadı"}); dosya ${assignment.name} hakemine`
+        + ` sistem tarafından devredildi · açık dosya: ${assignment.openFiles}`
+      : `Önceki hakem pasife alındı (${reason || "gerekçe yazılmadı"}); aktif hakem bulunmadığı için`
+        + " dosya yeniden atama kuyruğuna alındı. Yeni bir Hakem hesabı açıldığında sistem otomatik dağıtır.";
+    await recordWorkflowEvent({
+      subjectType: "application",
+      subjectId: row.id,
+      event: assignment ? "application_assigned" : "application_reassignment_queued",
+      actor: null,
+      detail,
+    }).catch((eventError) => console.error("[workflow] devir olayı kaydedilemedi", eventError));
+    moved.push({
+      applicationId: row.id,
+      judgeId: assignment?.id ?? null,
+      judgeName: assignment?.name ?? null,
+      detail,
+    });
+  }
+  return moved;
+}
+
 export async function createApplication(input: {
   participant: AdminAccount;
   applicantFullName: string;
@@ -1816,8 +1975,22 @@ export async function createApplication(input: {
   fileName: string;
   mimeType: string;
   sizeBytes: number;
-}): Promise<CompetitionApplication> {
+  /** Yüklenen PDF'in SHA-256 özeti; sürüm satırına yazılır (göç 0010). */
+  pdfHash: string | null;
+}): Promise<CreateApplicationResult> {
   const database = await workflowDatabase();
+  /*
+   * ÇİFT BAŞVURU (madde 9): aynı katılımcı aynı yarışmaya ikinci bir aktif
+   * başvuru açamaz. Asıl koruma `idx_applications_participant_competition`
+   * benzersiz dizinidir; bu okuma yalnızca kullanıcıya anlaşılır bir mesaj
+   * dönebilmek içindir. Dizin eşzamanlı ikinci isteği de reddeder, bu yüzden
+   * INSERT hatası da "duplicate" olarak yorumlanır.
+   */
+  const existing = await database.prepare(
+    `SELECT id FROM competition_applications
+     WHERE participant_id = ? AND competition_key = ? AND deleted_at IS NULL LIMIT 1`,
+  ).bind(input.participant.id, input.competitionKey).first<{ id: string }>();
+  if (existing) return "duplicate";
   const id = crypto.randomUUID();
   const versionId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
@@ -1848,14 +2021,25 @@ export async function createApplication(input: {
      VALUES (?, ?, ?, 'pending', '')`,
   ).bind(id, input.applicantFullName, input.teamName), database.prepare(
     `INSERT INTO submission_versions
-      (id, application_id, version_number, file_key, file_name, mime_type, size_bytes, submitted_by, submitted_at)
-     VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)`,
-  ).bind(versionId, id, input.fileKey, input.fileName, input.mimeType, input.sizeBytes, input.participant.id, timestamp),
+      (id, application_id, version_number, file_key, file_name, mime_type, size_bytes,
+       pdf_hash, byte_length, submitted_by, submitted_at)
+     VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    versionId, id, input.fileKey, input.fileName, input.mimeType, input.sizeBytes,
+    input.pdfHash, input.sizeBytes, input.participant.id, timestamp,
+  ),
   ...input.teamMembers.map((fullName, index) => database.prepare(
     `INSERT INTO application_team_members (id, application_id, member_order, full_name)
      VALUES (?, ?, ?, ?)`,
   ).bind(crypto.randomUUID(), id, index, fullName))];
-  await database.batch(statements);
+  try {
+    await database.batch(statements);
+  } catch (insertError) {
+    // Benzersiz dizin eşzamanlı ikinci isteği burada reddeder (çift tıklama).
+    const message = insertError instanceof Error ? insertError.message : String(insertError);
+    if (/UNIQUE constraint failed/i.test(message)) return "duplicate";
+    throw insertError;
+  }
   await recordWorkflowEvent({
     subjectType: "application",
     subjectId: id,
@@ -2122,6 +2306,8 @@ export async function addSubmissionVersion(input: {
   fileName: string;
   mimeType: string;
   sizeBytes: number;
+  /** Yeniden ölçülen PDF özeti; sürüm satırına yazılır (göç 0010). */
+  pdfHash: string | null;
 }): Promise<CompetitionApplication | "not_found" | "not_allowed"> {
   const database = await workflowDatabase();
   const current = await database.prepare(
@@ -2141,9 +2327,13 @@ export async function addSubmissionVersion(input: {
   await database.batch([
     database.prepare(
       `INSERT INTO submission_versions
-        (id, application_id, version_number, file_key, file_name, mime_type, size_bytes, submitted_by, submitted_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(versionId, input.applicationId, versionNumber, input.fileKey, input.fileName, input.mimeType, input.sizeBytes, input.participant.id, timestamp),
+        (id, application_id, version_number, file_key, file_name, mime_type, size_bytes,
+         pdf_hash, byte_length, submitted_by, submitted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      versionId, input.applicationId, versionNumber, input.fileKey, input.fileName,
+      input.mimeType, input.sizeBytes, input.pdfHash, input.sizeBytes, input.participant.id, timestamp,
+    ),
     database.prepare(
       `UPDATE competition_applications
        SET current_version_id = ?, file_key = ?, file_name = ?, mime_type = ?, size_bytes = ?,
@@ -2356,11 +2546,24 @@ export async function markApplicationAnalyzing(id: string, judge: AdminAccount):
   const current = await database.prepare(
     `SELECT competition_name, competition_key, profile_id, status, assigned_judge_id, evaluation_json FROM competition_applications WHERE id = ?`,
   ).bind(id).first<{ competition_name: string; competition_key: string; profile_id: string | null; status: string; assigned_judge_id: string | null; evaluation_json: string | null }>();
-  // Eski (puanlı, 1.0) AI sonucu taşıyan başvurular dört aşamalı ekranda
-  // incelenemez; hakem kuyruğunda görünseler de yeniden analiz edilebilir.
-  const legacyStuck = ["awaiting_judge", "judge_in_review"].includes(current?.status ?? "")
-    && isLegacyEvaluation(parseJson<ReportEvaluation>(current?.evaluation_json ?? null));
-  if (!current || (!["assigned", "resubmitted", "analysis_failed"].includes(current.status) && !legacyStuck)) return "conflict";
+  /*
+   * "ANALİZİ YENİLE" GERÇEKTEN ÇALIŞIR (madde 8)
+   *
+   * Eskiden yalnızca 'assigned' / 'resubmitted' / 'analysis_failed' durumları
+   * (ve eski puanlı 1.0 sonucu taşıyan "takılı" dosyalar) kabul ediliyordu.
+   * Başarılı bir analizden sonra durum 'awaiting_judge' olduğu için hakem
+   * ekranındaki "Analizi yenile" düğmesi sunucuda 409 ("zaten analiz edilmiş")
+   * ile reddediliyordu: kriterler güncellendiğinde ya da sonuç şüpheli
+   * göründüğünde yeniden analiz yapılamıyordu.
+   *
+   * Artık hakem kuyruğundaki (analiz edilmiş) dosya da yeniden analiz
+   * edilebilir; bu kural eski (puanlı) sonuç taşıyan dosyaları da kapsar.
+   * Kesinleşmiş karar ('completed') ve kararları dondurulmuş yarışma
+   * korumaları YERİNDE: onlar için önce "Kararı yeniden aç" gerekir ve bu
+   * kural `saveApplicationEvaluation` içinde ayrıca uygulanır.
+   */
+  const REANALYZABLE = ["assigned", "resubmitted", "analysis_failed", "awaiting_judge", "judge_in_review"];
+  if (!current || !REANALYZABLE.includes(current.status)) return "conflict";
   if (judge.roleCode === "02" && current.assigned_judge_id !== judge.id) return "conflict";
   // profile_id başvuru anında bağlanmış olsa bile hakem onayından geçmemiş olabilir;
   // o durumda AYNI yarışmanın onaylı profiline düşülür. Düşüş ada değil,
@@ -2388,6 +2591,9 @@ export async function markApplicationAnalyzing(id: string, judge: AdminAccount):
 /**
  * AI ön değerlendirmesinin sonucunu kaydeder. Sonuç NİHAİ KARAR DEĞİLDİR;
  * başvuru hakem kuyruğuna (`awaiting_judge`) düşer.
+ *
+ * `previousAnalysisKept` true döndüğünde başarısız bir deneme kaydedilmiş ama
+ * önceki BAŞARILI analiz korunmuştur; çağıran bunu kullanıcıya söyler.
  */
 export async function saveApplicationEvaluation(
   id: string,
@@ -2395,16 +2601,16 @@ export async function saveApplicationEvaluation(
   evaluation: ReportEvaluation | null,
   failed = false,
   binding: { criteriaVersion: number | null; criteriaHash: string | null; pdfHash: string | null; submissionVersionId: string | null } | null = null,
-): Promise<void> {
+): Promise<{ previousAnalysisKept: boolean }> {
   const database = await workflowDatabase();
   const current = await database.prepare(
-    `SELECT a.profile_id, a.current_version_id, a.status, c.decisions_locked
+    `SELECT a.profile_id, a.current_version_id, a.status, a.evaluation_json, c.decisions_locked
      FROM competition_applications a
      LEFT JOIN competitions c ON c.competition_key = a.competition_key
      WHERE a.id = ?`,
   ).bind(id).first<{
     profile_id: string | null; current_version_id: string | null;
-    status: string; decisions_locked: number | null;
+    status: string; evaluation_json: string | null; decisions_locked: number | null;
   }>();
   if (!current) throw new ConflictError("Başvuru bulunamadı.");
   /*
@@ -2422,28 +2628,62 @@ export async function saveApplicationEvaluation(
   const timestamp = new Date().toISOString();
   const versionId = binding?.submissionVersionId ?? current?.current_version_id ?? null;
   const resultRowId = crypto.randomUUID();
-  const batchResults = await database.batch([database.prepare(
-    // Koşul WHERE'de de tutulur: yukarıdaki okuma ile yazma arasında karar
-    // kesinleşirse (yarış durumu) bu satır completed durumunu EZEMEZ.
-    `UPDATE competition_applications
-     SET status = ?, evaluation_json = ?, judge_id = ?, judge_name = ?,
-         evaluation_criteria_version = ?, evaluation_criteria_hash = ?,
-         evaluation_pdf_hash = ?, evaluation_version_id = ?, updated_at = ?
-     WHERE id = ? AND status <> 'completed'`,
-  ).bind(
-    failed ? "analysis_failed" : "awaiting_judge",
-    evaluation ? JSON.stringify(evaluation) : null,
-    judge.id,
-    judge.fullName,
-    // Başarısız analizde bağ temizlenir: eski sürüm bilgisi yeni denemeyi
-    // "güncel" gibi göstermemeli.
-    failed ? null : binding?.criteriaVersion ?? null,
-    failed ? null : binding?.criteriaHash ?? null,
-    failed ? null : binding?.pdfHash ?? null,
-    failed ? null : versionId,
-    timestamp,
-    id,
-  ), database.prepare(
+  /*
+   * BAŞARISIZ DENEME ÖNCEKİ BAŞARILI ANALİZİ SİLMEZ (madde 8)
+   *
+   * Eskiden "Analizi yenile" sırasında model 503 verdiğinde bu işlev
+   * `evaluation_json = NULL` yazıyordu: hakemin elindeki çalışan analiz,
+   * kanıt bilgileri ve o analize bağlı kriter kararları geçici bir ağ
+   * hatası yüzünden kayboluyordu. Artık başarısız denemede yalnızca DURUM
+   * ve deneme kaydı yazılır; başarılı analizin kendisi ve kriter sürümü /
+   * PDF özeti bağları YERİNDE KALIR. Böylece hakem eski sonucu görmeye
+   * devam eder, yeni denemenin hatası `evaluation_results` tablosunda
+   * ayrıca tutulur.
+   *
+   * Yeni sonuç ancak BAŞARIYLA üretilip bütünlük kapılarından geçtikten
+   * sonra (failed = false) eskisinin üzerine yazılır.
+   */
+  const keepPreviousAnalysis = failed && Boolean(current.evaluation_json);
+  const applicationUpdate = keepPreviousAnalysis
+    ? database.prepare(
+      /*
+       * Başarısız deneme: sonuç ve bağ sütunlarına DOKUNULMAZ.
+       *
+       * Durum 'analysis_failed' YAZILMAZ, 'awaiting_judge' olarak bırakılır:
+       * elde KULLANILABİLİR bir analiz var ve hakem onunla nihai kararı
+       * verebilmelidir. 'analysis_failed' yazılsa `save_review` ucu "önce AI
+       * ön analizi tamamlanmalı" diyerek hakemi çıkışsız bırakırdı — geçici
+       * bir ağ hatası, tamamlanmış bir analizi kilitlemiş olurdu.
+       * Denemenin başarısızlığı `evaluation_results` satırında ve süreç
+       * geçmişinde ayrıca tutulur.
+       */
+      `UPDATE competition_applications
+       SET status = 'awaiting_judge', judge_id = ?, judge_name = ?, updated_at = ?
+       WHERE id = ? AND status <> 'completed'`,
+    ).bind(judge.id, judge.fullName, timestamp, id)
+    : database.prepare(
+      // Koşul WHERE'de de tutulur: yukarıdaki okuma ile yazma arasında karar
+      // kesinleşirse (yarış durumu) bu satır completed durumunu EZEMEZ.
+      `UPDATE competition_applications
+       SET status = ?, evaluation_json = ?, judge_id = ?, judge_name = ?,
+           evaluation_criteria_version = ?, evaluation_criteria_hash = ?,
+           evaluation_pdf_hash = ?, evaluation_version_id = ?, updated_at = ?
+       WHERE id = ? AND status <> 'completed'`,
+    ).bind(
+      failed ? "analysis_failed" : "awaiting_judge",
+      evaluation ? JSON.stringify(evaluation) : null,
+      judge.id,
+      judge.fullName,
+      // Hiç başarılı analiz yokken başarısız denemede bağ temizlenir: eski
+      // sürüm bilgisi yeni denemeyi "güncel" gibi göstermemeli.
+      failed ? null : binding?.criteriaVersion ?? null,
+      failed ? null : binding?.criteriaHash ?? null,
+      failed ? null : binding?.pdfHash ?? null,
+      failed ? null : versionId,
+      timestamp,
+      id,
+    );
+  const batchResults = await database.batch([applicationUpdate, database.prepare(
     `INSERT INTO evaluation_results
       (id, application_id, submission_version_id, profile_id, status, ai_raw_analysis, model,
        criteria_version, criteria_hash, pdf_hash, created_at, completed_at)
@@ -2468,9 +2708,12 @@ export async function saveApplicationEvaluation(
     event: failed ? "ai_analysis_failed" : "ai_prescreen_completed",
     actor: judge,
     detail: failed || !evaluation
-      ? "Analiz tamamlanamadı; başvuru yeniden başlatılabilir."
+      ? keepPreviousAnalysis
+        ? "Yeni analiz denemesi tamamlanamadı; ÖNCEKİ BAŞARILI analiz ve hakem kararları korundu, başvuru yeniden denenebilir."
+        : "Analiz tamamlanamadı; başvuru yeniden başlatılabilir."
       : `Kriter sürümü v${binding?.criteriaVersion ?? "?"} · PDF ${(binding?.pdfHash ?? "").slice(0, 12) || "?"} · AI bulguları: ${evaluation.summary?.basarili ?? 0} ${RULE_VERDICT_LABELS.BASARILI} · ${evaluation.summary?.revizyon ?? 0} ${RULE_VERDICT_LABELS.REVIZYON} · ${evaluation.summary?.kritikHata ?? 0} ${RULE_VERDICT_LABELS.KRITIK_HATA} · genel durum: ${evaluation.summary ? RULE_VERDICT_LABELS[evaluation.summary.overall] : "—"} · ${evaluation.summary?.total ?? evaluation.findings.length} kural hakem kararı bekliyor`,
   });
+  return { previousAnalysisKept: keepPreviousAnalysis };
 }
 
 /**
@@ -2530,6 +2773,58 @@ function criterionDecisionEvents(id: string, judge: AdminAccount, review: JudgeR
 }
 
 /**
+ * HAKEM ALINTISINI SUNUCUDA DOĞRULAR (madde 5).
+ *
+ * Hakem "PDF konumu" dayanağı seçtiğinde yazdığı doğrudan alıntının, belirttiği
+ * SAYFADA gerçekten bulunduğu katılımcı PDF'inden okunarak kontrol edilir.
+ * İstemci verisine tek başına güvenilmez: sayfa numarası ve alıntı yalnızca
+ * tarayıcıda doğrulanırsa, hatalı ya da uydurma bir kaynak kayda geçebilirdi.
+ *
+ * KURALLAR:
+ *   - Alıntı belirtilen sayfada YOKSA karar reddedilir (ConflictError) ve
+ *     hakeme hangi kriterde hangi sayfanın tutmadığı söylenir.
+ *   - Doğrulama YAPILAMIYORSA (PDF okunamadı, metin katmanı yok, alıntı çok
+ *     kısa) karar DÜŞÜRÜLMEZ: hakem kararı kural gereği zaten gerekçelidir ve
+ *     sistem, kanıtlayamadığı bir şey yüzünden insan kararını engellemez.
+ *   - "Raporda bulunamadı" dayanağında sayfa/alıntı istenmediği için hiçbir
+ *     doğrulama yapılmaz.
+ */
+async function verifyJudgeQuotes(
+  fileKey: string | null,
+  decisions: JudgeCriterionDecision[],
+): Promise<void> {
+  const checkable = decisions.filter((decision) =>
+    decision.judgeVerdict === "rejected"
+    && decision.evidenceMode === "PDF_KONUMU"
+    && Boolean(decision.evidencePage)
+    && decision.evidenceQuote.trim().length >= 12);
+  if (!checkable.length || !fileKey) return;
+
+  let layer: ReportTextLayer;
+  try {
+    const object = await reportBucket().get(fileKey);
+    if (!object) return;
+    layer = await readReportTextLayer(await object.arrayBuffer());
+  } catch (error) {
+    // Metin katmanı yok / PDF okunamadı: doğrulama yapılamaz, karar düşmez.
+    console.error("[workflow] hakem alıntısı doğrulanamadı; karar kabul edildi", error);
+    return;
+  }
+
+  for (const decision of checkable) {
+    const found = quoteFoundOnPage(layer, decision.evidencePage as number, decision.evidenceQuote);
+    if (found === false) {
+      throw new ConflictError(
+        `“${decision.criterionName || decision.criterionId}” kriterinde yazdığınız doğrudan alıntı, `
+        + `belirttiğiniz ${decision.evidencePage}. sayfada bulunamadı. Sayfa numarasını düzeltin, `
+        + "alıntıyı rapordan birebir kopyalayın ya da içerik raporda hiç yoksa dayanak türünü "
+        + "“Raporda bulunamadı” olarak seçin.",
+      );
+    }
+  }
+}
+
+/**
  * Hakem değerlendirmesini kaydeder (Aşama D).
  * Tamamlanmamış kayıt başvuruyu `judge_in_review` durumuna alır; nihai karar
  * yalnızca `completed` ile oluşur ve sonucu yarışmacıya açar.
@@ -2540,7 +2835,7 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
   const timestamp = new Date().toISOString();
   const before = await database.prepare(
     `SELECT a.status, a.evaluation_json, a.assigned_judge_id, a.evaluation_criteria_version,
-            c.decisions_locked,
+            a.file_key, c.decisions_locked,
             (SELECT MAX(cv.criteria_version) FROM criteria_profile_versions cv
               WHERE cv.competition_key = a.competition_key) AS current_criteria_version
      FROM competition_applications a
@@ -2548,8 +2843,8 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
      WHERE a.id = ?`,
   ).bind(id).first<{
     status: string; evaluation_json: string | null; assigned_judge_id: string | null;
-    evaluation_criteria_version: number | null; decisions_locked: number | null;
-    current_criteria_version: number | null;
+    evaluation_criteria_version: number | null; file_key: string | null;
+    decisions_locked: number | null; current_criteria_version: number | null;
   }>();
   // Hata türleri bilinçli: 409 (çakışma) döner, 500 değil. Hakem "İşlem
   // tamamlanamadı" yerine neden karar veremediğini görür.
@@ -2593,6 +2888,7 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
   if (review.criterionDecisions) {
     const decisionError = validateCriterionDecisions(visibleFindings, review.criterionDecisions, completed);
     if (decisionError) throw new ConflictError(decisionError);
+    await verifyJudgeQuotes(before.file_key, review.criterionDecisions);
     /*
      * SUNUCU DAMGASI: decidedBy/decidedAt İSTEMCİDEN ALINMAZ (sahtelenebilirdi);
      * karar anı sunucu saatiyle yazılır. AI ön değerlendirmesi de istemcinin

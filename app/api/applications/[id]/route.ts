@@ -197,6 +197,8 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
     const visibleApplication = await findApplication(id, auth.account);
     if (!visibleApplication) return jsonError(404, "Başvuru bulunamadı.");
     let notification: { delivered: boolean; message: string } = { delivered: false, message: "" };
+    /** Başarısız analiz denemesinde önceki başarılı sonuç korundu mu? */
+    let previousAnalysisKept = false;
     if (["remind_judge", "requeue_analysis", "request_document"].includes(String(body.action))) {
       const coordinated = await coordinateApplication(
         id,
@@ -311,7 +313,13 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
       // döndürülmez; kayıt SİLİNMEDİ, yalnızca işaretlendi.
       return json({ application: result === "archived" ? null : result, archived });
     } else if (body.action === "analysis_failed") {
-      await saveApplicationEvaluation(id, auth.account, null, true);
+      /*
+       * Başarısız deneme ÖNCEKİ BAŞARILI analizi silmez (madde 8): kayıt
+       * yalnızca durum ve deneme geçmişi yazar. Eski sonuç korunduysa
+       * istemciye söylenir ki ekran "eski analiz korunuyor" diyebilsin.
+       */
+      const outcome = await saveApplicationEvaluation(id, auth.account, null, true);
+      previousAnalysisKept = outcome.previousAnalysisKept;
     } else if (body.action === "save_review") {
       const review = body.review as JudgeReview | undefined;
       if (!review || !validReview(review)) return jsonError(400, "Hakem değerlendirmesi geçerli değil.");
@@ -339,6 +347,10 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
       // Bildirim hatası ayrıca denetim izine yazılır; kararın kendisi etkilenmez.
       detail: `${application?.competitionName ?? ""}${notification.message ? ` · bildirim başarısız: ${notification.message}` : ""}`,
     }).catch((auditError) => console.error("[audit] application update", auditError));
-    return json({ application, ...(notification.message ? { notificationWarning: notification.message } : {}) });
+    return json({
+      application,
+      ...(notification.message ? { notificationWarning: notification.message } : {}),
+      ...(previousAnalysisKept ? { previousAnalysisKept: true } : {}),
+    });
   } catch (error) { return handleError(error); }
 }

@@ -22,7 +22,7 @@
 import { isNegated, isWordBoundary, normalizeForSearch } from "./turkish-text";
 
 /** İçerik her değiştiğinde artırılır. Analiz kayıtlarına bu değer yazılır. */
-export const DICTIONARY_VERSION = "sozluk-v2";
+export const DICTIONARY_VERSION = "sozluk-v6-four-stages-scope-gates";
 
 export type DictionaryCategory =
   | "obligation"
@@ -124,6 +124,16 @@ const OBLIGATION = group("obligation", "Zorunluluk ve gereklilik", "obligation",
     source: "(?:hazirlanacak|sunulacak|bulunacak|kullanilacak|saglanacak|uyulacak|aciklanacak|yazilacak|yuklenecek|eklenecek|verilecek|gosterilecek|belirtilecek|icerecek)(?:tir)?|teslim edilecek(?:tir)?|yer alacak(?:tir)?",
   },
   {
+    // Şartname dilinde tasarım özelliği çoğu zaman "X olacaktır" ile yazılır
+    // ("sızdırmaz olacaktır", "seçilebilir olacaktır", "güç kesme fonksiyonu
+    // olacaktır"). Genel "olacaktır" ALINMAZ: "hedefler durağan olacaktır",
+    // "bir alan olacaktır" gibi betimlemeler kural değildir. Yalnızca tasarım
+    // durumu sıfatı, -mış ortacı veya donanım/yazılım adı önündeki biçim sayılır.
+    key: "tasarim-durumu-olacak",
+    label: "sahip / secilebilir / sizdirmaz / -mis olacaktir; fonksiyonu / sistemi olacaktir",
+    source: "(?:sahip|secilebilir|sizdirmaz|yalitimli|izole|sabitlenmis|uyumlu|mumkun|kucuk|buyuk|dusuk|yuksek|esit|uygun|zorunlu|gerekli|sart|mevcut|dahil|haric|denetiminde|kontrolunde) olacak(?:tir)?|[a-z]{3,}(?:mis|mus) olacak(?:tir)?|(?:fonksiyon|ozellig|kabiliyet|mekanizma|sistem|buton|anahtar|donanim|yazilim)[a-z]* olacak(?:tir)?",
+  },
+  {
     key: "modal-genel",
     label: "genel -mali/-meli kipi (olumsuz cekim haric)",
     // Olumsuz cekim (-mamali / -memeli) geriye bakisla dislanir; o desen
@@ -150,6 +160,10 @@ const PROHIBITION = group("prohibition", "Yasak", "prohibition", [
   { key: "uygulanmaz", label: "uygulanmaz", source: "uygulan(?:maz|mayacaktir)" },
   { key: "olumsuz-yeterlik", label: "-amaz / -emez (kullanilamaz, bulunamaz)", source: "[a-z]{3,}(?:amaz|emez)" },
   { key: "olumsuz-modal", label: "-mamali / -memeli", source: "[a-z]{2,}(?:mamali|memeli)(?:dir)?" },
+  // Olumsuz gelecek zaman şartnamede yasak kipidir: "kullanılamayacaktır",
+  // "olmayacaktır", "bulunmayacak", "yapılmayacaktır". Kök en az iki harf
+  // ("ol-mayacak").
+  { key: "olumsuz-gelecek", label: "-mayacak / -meyecek(tir) (olmayacaktir, kullanilamayacaktir, bulunmayacak)", source: "[a-z]{2,}(?:mayacak|meyecek)(?:tir)?" },
 ]);
 
 const LIMIT = group("limit", "Sinir ve aralik", "limit", [
@@ -191,6 +205,10 @@ const LANGUAGE_TEMPLATE = group("language_template", "Dil ve sablon", "language_
   { key: "dosya-turu", label: "dosya turu / format", source: "dosya tur(?:u|leri)|format(?:inda|lari|i)?" },
   { key: "pdf", label: "PDF", source: "pdf" },
   { key: "sablon", label: "sablon", source: "sablon(?:una|dan|u)?" },
+  { key: "a4", label: "A4 sayfa", source: "a4" },
+  { key: "kaynakca", label: "kaynakca / referanslar", source: "kaynakca|referans(?:lar|lar bolumu)?" },
+  { key: "ust-alt-bilgi", label: "ustbilgi / altbilgi / sayfa numarasi", source: "ustbilgi|altbilgi|sayfa numara(?:si|landirma)" },
+  { key: "paragraf-hizalama", label: "paragraf / hizalama / girinti", source: "paragraf duzeni|hizalama|girinti" },
 ]);
 
 /* ------------------------------------------------------------------ *
@@ -206,6 +224,9 @@ const HEADING_CONTENT = group("heading_content", "Baslik ve icerik", "heading_co
   { key: "tablo-cizim", label: "tablo / cizim / sema / diyagram / gorsel", source: "tablo(?:lari|sunda|su|lar)?|cizim(?:leri|ler|i)?|sema(?:lari|si|lar)?|diyagram(?:lari|lar|i)?|gorsel(?:leri|ler|i)?" },
   { key: "yontem-sonuc", label: "yontem / sonuc / test / dogrulama", source: "yontem(?:leri|ler|i)?|sonuc(?:lari|lar|u)?|test(?:leri|ler|i)?|dogrulama(?:si)?" },
   { key: "tasarim-basliklari", label: "mekanik / elektronik tasarim, yazilim, guvenlik", source: "mekanik tasarim|elektronik tasarim|yazilim(?:lari|lar|i)?" },
+  { key: "rapor-turleri", label: "teknik yeterlilik / kritik tasarim / on tasarim raporu", source: "teknik yeterlilik raporu|kritik tasarim raporu|on tasarim raporu|final degerlendirme raporu|proje raporu" },
+  { key: "rapor-icerigi", label: "rapor icerigi / raporda aciklanacaklar", source: "rapor icerigi|raporda (?:aciklan|anlatil|belirtil|sunul|gosteril|yer al)" },
+  { key: "hesap-gerekce", label: "hesap / gerekce / analiz raporu", source: "hesap(?:lari|lama)?|gerekce(?:si|lendirme)?|analiz(?:leri|i)?" },
 ]);
 
 /* ------------------------------------------------------------------ *
@@ -222,6 +243,9 @@ const CATEGORY = group("category", "Kategori ve kapsam", "category", [
   { key: "proje-konusu", label: "proje konusu / cozum alani", source: "proje konusu|cozum alani" },
   { key: "hedef-kullanim", label: "hedef kullanim / kullanim senaryosu", source: "hedef kullanim|kullanim senaryosu" },
   { key: "uygunluk", label: "yarismaya uygunluk / beklenen sistem", source: "yarismaya uygun(?:lugu|luk)?|beklenen sistem" },
+  { key: "tematik-alan", label: "tematik alan / teknoloji alani / alt kategori", source: "tematik alan|teknoloji alani|proje alani|alt kategori" },
+  { key: "hedef-problem", label: "hedef problem / cozulmesi beklenen problem", source: "hedef problem|cozulmesi beklenen problem|problem alani" },
+  { key: "proje-turu", label: "kabul edilen / beklenen proje turu", source: "kabul edilen proje turu|beklenen proje turu|proje turu" },
 ]);
 
 /* ------------------------------------------------------------------ *
@@ -244,6 +268,14 @@ const TECHNICAL = group("technical", "Teknik terimler", "technical", [
   { key: "acil-durdurma", label: "acil durdurma / kill switch", source: "acil durdurma|acil stop|kill switch" },
   { key: "algoritma", label: "algoritma / mimari / test yontemi / tasarim siniri", source: "algoritma(?:si)?|mimari(?:si)?|test yontemi|tasarim siniri" },
   { key: "kontrol-guvenlik", label: "kontrol / guvenlik", source: "kontrol(?:u|leri)?|guvenlik(?:leri|i)?" },
+  // Dört aşamalı çıkarım (criteria_evidence): rapordan kanıtlanabilen yaygın
+  // tasarım nesneleri. Yalıtım kökü "haberlesme" girdisinde zaten vardır;
+  // burada yalnızca sıfat biçimleri ve izolasyon/kablo eklenir.
+  { key: "tehlikeli-madde", label: "patlayici / yanici / basincli kap / kimyasal / lazer", source: "patlayici(?:lar|si)?|yanici|basincli kap(?:lar|i)?|kimyasal(?:lar|i)?|lazer(?:ler|i)?" },
+  { key: "kablo-yalitim", label: "kablo / yalitim / izolasyon", source: "kablo(?:lar|lari|su|lama|laj|laji)?|yalitim(?:li|siz)|izolasyon(?:u|lu)?|izole" },
+  { key: "kamera-goruntu", label: "kamera / goruntu / cozunurluk / fps / piksel", source: "kamera(?:lar|lari|si)?|goruntu(?:leri|ler|su|leme)?|cozunurluk|cozunurlugu|fps|piksel(?:ler|i)?" },
+  { key: "pil-hucre", label: "pil / hucre / aku", source: "pil(?:ler|leri|i)?|hucre(?:ler|leri|si)?|aku(?:ler|leri|su)?" },
+  { key: "calisma-modu", label: "otonom / manuel mod", source: "otonom(?:i|luk)?|manuel mod(?:da|u)?" },
 ]);
 
 /* ------------------------------------------------------------------ *
@@ -261,11 +293,33 @@ const NEGATION = group("negation", "Olumsuzluk ve istisna", "negation", [
  * 8 · Fiziksel aşama (kapsam işareti — SİLİNMEZ, işaretlenir)
  * ------------------------------------------------------------------ */
 
+/*
+ * Alternatifler UZUNDAN KISAYA sıralıdır: JS alternation sıralıdır ve tarama
+ * eşleşmeyi kelime sınırıyla doğrular; "yarisma gunu" önce gelseydi
+ * "yarisma gununde" içindeki kısa eşleşme sınırda reddedilir ve uzun biçim
+ * hiç denenmezdi.
+ */
 const PHYSICAL_STAGE = group("physical_stage", "Fiziksel / saha asamasi", "physical_stage", [
-  { key: "yarisma-gunu", label: "yarisma gunu / yarisma sirasinda", source: "yarisma (?:gunu|alaninda|sirasinda)" },
+  {
+    key: "yarisma-gunu",
+    label: "yarisma gunu / sirasinda / boyunca / alaninda / oncesinde / baslamadan once / sonrasinda; yarismada; musabaka",
+    source: "yarisma (?:sonrasinda|baslamadan|basladiktan|esnasinda|oncesinde|bitiminde|suresince|alanindan|alaninda|alanina|sirasinda|gununde|sonrasi|boyunca|sonunda|oncesi|aninda|alani|gunu)|yarismada|musabaka(?:larda|lar|da|si)?",
+  },
   { key: "saha", label: "saha / parkur / pist", source: "saha(?:sinda|da)?|parkur(?:da|u)?|pist(?:te|i)?" },
-  { key: "ucus", label: "ucus / atis / surus denemesi", source: "ucus(?:lari|lar|u)?|atis(?:lar|i)?|surus" },
-  { key: "canli", label: "canli sunum / canli demo", source: "canli (?:sunum|demo|gosterim)|yerinde sunum" },
+  // Çıplak "ucus/atis/surus" teknik ad olarak tasarım kuralında geçer ("uçuş
+  // kontrolcüsü", "sürüş sistemi", "uçuşu devre dışı bırakan kumanda");
+  // yalnızca deneme/test/sırasında gibi icra bağlamıyla fiziksel aşama sayılır.
+  {
+    key: "ucus",
+    label: "ucus / atis / surus denemesi, testi, sirasinda",
+    source: "(?:ucus|atis|surus) (?:denemelerinde|denemesinde|denemeleri|denemesi|testlerinde|testinde|testleri|testi|esnasinda|sirasinda|boyunca|gununde|gunu)",
+  },
+  {
+    key: "gorev-icra",
+    label: "gorev sirasinda / gorev ucusu / gorev basarisi / isabet / etap / kalkis-inis noktasi / pit alani / bakim molasi",
+    source: "gorev (?:esnasinda|sirasinda|ucusunda|boyunca|basarisi|basarimi|basarim|basari|ucusu)|isabet(?:le|i)?|(?:final|yarisma|gorev|ucus|parkur) (?:etab(?:inda|inin|in|i)?|etap(?:larinda|lari|lar|ta)?)|etap (?:sirasinda|boyunca|suresi)|(?:kalkis|inis) noktas(?:indan|ina|i)|pit alan(?:inda|ina|i)?|bakim molas(?:lari|i)",
+  },
+  { key: "canli", label: "canli sunum / demo / gosterim / test / olcum", source: "canli (?:gosterim|sunum|demo|test(?:lerde|te|i)?|olcum(?:lerde|de|u)?)|yerinde sunum" },
   { key: "fiziksel-test", label: "fiziksel test / yerinde olcum", source: "fiziksel test|yerinde olcum|sahada olcul" },
   { key: "puanlama", label: "puan / ceza puani / baraj", source: "puan(?:lamasi|lama|lari|lar|i)?|ceza(?:lar|si)?|baraj(?:i)?" },
 ]);
@@ -275,10 +329,11 @@ const PHYSICAL_STAGE = group("physical_stage", "Fiziksel / saha asamasi", "physi
  * ------------------------------------------------------------------ */
 
 const EXTERNAL_EVIDENCE = group("external_evidence", "Rapor disi kanit", "external_evidence", [
-  { key: "video", label: "video / youtube / vimeo", source: "video(?:lari|su|lar)?|youtube|vimeo" },
+  // Bütün çekimler: videoda / videosunda / videonun / videoların.
+  { key: "video", label: "video (butun cekimler) / youtube / vimeo", source: "video[a-z]*|youtube|vimeo" },
   { key: "portal", label: "portal / sisteme yukleme / cevrim ici form", source: "portal(?:uzerinden|dan|a)?|sisteme yukle|cevrim ici form" },
   { key: "fiziksel-teslim", label: "fiziksel teslim / numune", source: "fiziksel teslim|numune teslimi|elden teslim" },
-  { key: "islak-imza", label: "islak imza / imzali belge", source: "islak imza|imzali belge" },
+  { key: "islak-imza", label: "islak imza(li/si) / imzali belge / taahhutname / form", source: "islak imza(?:li|si)?|imzali (?:taahhutname|belge|form)" },
   { key: "veritabani", label: "veri tabani / kayit sistemi", source: "veri taban(?:indan|i)|kayit sistemi" },
 ]);
 

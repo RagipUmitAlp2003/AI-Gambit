@@ -23,12 +23,18 @@ export class WorkflowApiError extends Error {
   reference: string;
   /** Geçici bir aksaklık mı (yeniden denemeye değer) yoksa kalıcı bir ret mi? */
   retryable: boolean;
-  constructor(message: string, status: number, reference = "", retryable = false) {
+  /**
+   * Sunucunun makine okunur hata kodu (ör. `OCR_REQUIRED`). Ekran, kullanıcıya
+   * ne yapması gerektiğini metni ayrıştırmadan bu kodla söyleyebilir.
+   */
+  code: string;
+  constructor(message: string, status: number, reference = "", retryable = false, code = "") {
     super(message);
     this.name = "WorkflowApiError";
     this.status = status;
     this.reference = reference;
     this.retryable = retryable;
+    this.code = code;
   }
 }
 
@@ -58,6 +64,7 @@ async function responseJson<T>(response: Response): Promise<T> {
       response.status,
       typeof payload.reference === "string" ? payload.reference : "",
       payload.retryable === true,
+      typeof payload.code === "string" ? payload.code : "",
     );
   }
   return payload as T;
@@ -97,9 +104,13 @@ export const workflowApi = {
     if (!response.ok) await responseJson(response);
     return new File([await response.blob()], fileName, { type: "application/pdf" });
   },
-  /** `notificationWarning`: karar kaydedildi ama yarışmacıya e-posta gönderilemedi. */
+  /**
+   * `notificationWarning`: karar kaydedildi ama yarışmacıya e-posta gönderilemedi.
+   * `previousAnalysisKept`: analiz denemesi başarısız oldu ama önceki BAŞARILI
+   * analiz ve hakem kararları korundu (madde 8).
+   */
   updateApplication: (id: string, action: string, value: { evaluation?: ReportEvaluation; review?: JudgeReview; judgeId?: string; note?: string; archived?: boolean } = {}) =>
-    jsonRequest<{ application: CompetitionApplication; notificationWarning?: string }>(`/api/applications/${encodeURIComponent(id)}`, {
+    jsonRequest<{ application: CompetitionApplication; notificationWarning?: string; previousAnalysisKept?: boolean }>(`/api/applications/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify({ action, ...value }),
     }),

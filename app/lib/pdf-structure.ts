@@ -1,3 +1,4 @@
+import { loadPdfJs } from "./pdfjs-runtime";
 import { letterRatio, normalizeForSearch, normalizeUnicode } from "./turkish-text";
 
 /**
@@ -7,8 +8,12 @@ import { letterRatio, normalizeForSearch, normalizeUnicode } from "./turkish-tex
  *
  * v2: madde numarası makullük sınırları (yıl/tarih/tutar/sayfa numarası artık
  * madde sayılmaz) ve salt rakam satırlarının paragrafa karışmaması.
+ * v3: kaydırılmış madde/bent satırlarının tek blokta birleşmesi (bkz.
+ * buildPageBlocks) makullük sınırlarıyla BİRLİKTE. İki ayrı dalın damgaları
+ * ("v2" ve "v2-wrapped-lines") farklı blok kümeleri üretiyordu; hiçbirinin
+ * önbelleği yeni bloklara karşı oynatılmasın diye yeni damga verildi.
  */
-export const PDF_STRUCTURE_VERSION = "pdf-structure-v2";
+export const PDF_STRUCTURE_VERSION = "pdf-structure-v3-clauses-wrapped-lines";
 
 /**
  * OCR (görüntü okuma) yedeğiyle üretilen yapının sürümü. Metin katmanı
@@ -87,74 +92,11 @@ export class PdfTextLayerError extends Error {
   }
 }
 
-/**
- * pdfjs-dist, modül yüklemesi sırasında `DOMMatrix` globalini ister. Node'da
- * bunu isteğe bağlı `@napi-rs/canvas` paketinden alır; Cloudflare workerd'de
- * ise ne DOM API'si ne de native modül vardır ve yükleme
- * "ReferenceError: DOMMatrix is not defined" ile çöker (analiz ucunda genel
- * 500'ün kök nedeni). Metin çıkarımı hiçbir çizim yapmadığı için tam bir DOM
- * uygulaması gerekmez; modül değerlendirmesini ayakta tutan asgari 2B afin
- * matris yeterlidir. Yalnızca global tanımsızsa devreye girer.
+/*
+ * Sunucu (workerd) için DOMMatrix/Path2D globalleri ve aynı iş parçacığında
+ * çözümleyici (fake worker) kurulumu TEK yerde, `./pdfjs-runtime` içinde
+ * yaşar; bu modül PDF.js'i yalnızca `loadPdfJs()` üzerinden yükler.
  */
-class WorkerSafeDOMMatrix {
-  a = 1; b = 0; c = 0; d = 1; e = 0; f = 0;
-  constructor(init?: number[]) {
-    if (Array.isArray(init) && init.length >= 6) {
-      [this.a, this.b, this.c, this.d, this.e, this.f] = init.map((value) => Number(value) || 0);
-    }
-  }
-  translate(tx = 0, ty = 0): WorkerSafeDOMMatrix {
-    const next = new WorkerSafeDOMMatrix([this.a, this.b, this.c, this.d, this.e, this.f]);
-    next.e += tx * this.a + ty * this.c;
-    next.f += tx * this.b + ty * this.d;
-    return next;
-  }
-  scale(sx = 1, sy = sx): WorkerSafeDOMMatrix {
-    return new WorkerSafeDOMMatrix([this.a * sx, this.b * sx, this.c * sy, this.d * sy, this.e, this.f]);
-  }
-  multiply(other?: { a?: number; b?: number; c?: number; d?: number; e?: number; f?: number }): WorkerSafeDOMMatrix {
-    const o = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0, ...(other ?? {}) };
-    return new WorkerSafeDOMMatrix([
-      this.a * o.a + this.c * o.b,
-      this.b * o.a + this.d * o.b,
-      this.a * o.c + this.c * o.d,
-      this.b * o.c + this.d * o.d,
-      this.a * o.e + this.c * o.f + this.e,
-      this.b * o.e + this.d * o.f + this.f,
-    ]);
-  }
-}
-
-/** Çizim API'si hiç kullanılmadığı için boş gövde yeterlidir. */
-class WorkerSafePath2D {
-  addPath() {}
-  moveTo() {}
-  lineTo() {}
-  bezierCurveTo() {}
-  quadraticCurveTo() {}
-  arc() {}
-  rect() {}
-  closePath() {}
-}
-
-function ensurePdfJsRuntimeGlobals(): void {
-  const host = globalThis as { DOMMatrix?: unknown; Path2D?: unknown };
-  if (typeof host.DOMMatrix === "undefined") host.DOMMatrix = WorkerSafeDOMMatrix;
-  if (typeof host.Path2D === "undefined") host.Path2D = WorkerSafePath2D;
-}
-
-/**
- * pdf.js, tarayıcı Worker'ı olmayan ortamlarda "fake worker" kurar ve worker
- * modülünü çalışma anında `import(workerSrc)` ile yüklemeye çalışır. Vite ve
- * workerd altında bu dinamik yol çözülemez ("Setting up fake worker failed:
- * pdf.worker.mjs does not exist"). Worker modülü burada statik belirteçle
- * önceden yüklenir; modül kendini `globalThis.pdfjsWorker` olarak kaydeder ve
- * pdf.js dinamik importu hiç denemez. Yükleme bir kez yapılır.
- */
-async function ensurePdfJsFakeWorker(): Promise<void> {
-  const host = globalThis as { pdfjsWorker?: unknown };
-  if (!host.pdfjsWorker) await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
-}
 
 async function sha256(bytes: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -225,6 +167,14 @@ function linesFromItems(rawItems: unknown[]): PositionedLine[] {
     .filter((line) => line.text.length > 0);
 }
 
+/**
+ * Kaydırılmış bir madde/bent en fazla kaç görsel satır ve karakter birleştirir.
+ * Sınır, hatalı sınıflandırılmış bir satır yüzünden sayfanın yarısının tek
+ * bloğa erimesini engeller.
+ */
+const MAX_WRAPPED_LINES = 8;
+const MAX_WRAPPED_CHARS = 700;
+
 /** Türkçe ay adları (arama biçimi): "22 - 26 Haziran 2026" gibi tarih satırları madde değildir. */
 const TURKISH_MONTHS = new Set([
   "ocak", "subat", "mart", "nisan", "mayis", "haziran",
@@ -280,6 +230,15 @@ function isCaption(text: string): boolean {
 
 function isListItem(text: string): boolean {
   return /^\s*(?:[-•●▪◦]|[a-zA-ZçğıöşüÇĞİÖŞÜ][.)])\s+/.test(text);
+}
+
+/**
+ * Yalnızca rakam/nokta içeren satır: sayfa numarası "17", üstbilgi tarihi
+ * "28.02.2026". Bu satırlar ne paragrafa ne de kaydırılmış bir maddeye
+ * KARIŞTIRILIR; kendi başlarına blok olurlar (bkz. buildPageBlocks).
+ */
+function isBareNumberLine(text: string): boolean {
+  return /^\d[\d.]*$/.test(text.trim());
 }
 
 function classifyLine(line: PositionedLine, bodyFont: number): PdfBlockType {
@@ -378,7 +337,8 @@ export function buildPageBlocks(
     paragraph = null;
   };
 
-  normalizedLines.forEach((line, index) => {
+  for (let index = 0; index < normalizedLines.length; index += 1) {
+    const line = normalizedLines[index];
     const type = classifyLine(line, bodyFont);
     if (type === "PARAGRAPH") {
       // Yalnızca rakam/nokta içeren satır (sayfa numarası "17", üstbilgi
@@ -386,20 +346,59 @@ export function buildPageBlocks(
       // "17 Rapor ..." olur ve emit içindeki ikinci clauseNumberOf çağrısı
       // sahte madde numarasını geri getirirdi. Satır kendi başına blok olur
       // ve kapsam denetim kaydında (Spec §8) aynen korunur.
-      if (/^\d[\d.]*$/.test(line.text.trim())) {
+      if (isBareNumberLine(line.text)) {
         flushParagraph();
         emit([line], "PARAGRAPH", index);
-        return;
+        continue;
       }
       if (!paragraph) paragraph = { lines: [], start: index };
       paragraph.lines.push(line);
       const length = paragraph.lines.reduce((total, item) => total + item.text.length, 0);
       if (/[.!?;:]$/.test(line.text) || length >= 700) flushParagraph();
-      return;
+      continue;
     }
     flushParagraph();
-    emit([line], type, index);
-  });
+    /*
+     * KAYDIRILMIŞ MADDE/BENT SATIRLARI BİRLEŞTİRİLİR.
+     *
+     * NEDEN: madde işaretli bir kural PDF'te birden fazla görsel satıra
+     * taşındığında her satır ayrı blok oluyordu. Sonuç:
+     *
+     *   blok A: "• ... her boyutu (E x B x D) 100cm' den"
+     *   blok B: "küçük olacaktır."
+     *
+     * Yani KURALIN KENDİSİ hiçbir blokta tam değildi. Bu iki soruna yol
+     * açıyordu: (1) modele yarım cümleler aday olarak gidiyor, model bunlarda
+     * uygulanabilir bir kural göremeyip "kapsam dışı" diyordu; (2) model
+     * cümleyi yakın bağlamdan tamamlayıp alıntıladığında, alıntı tek bloğun
+     * içinde bulunamadığı için doğrulama onu reddediyordu. 25 sayfalık bir
+     * şartnameden 5 kriter çıkmasının başlıca nedeni buydu.
+     *
+     * BİRLEŞTİRME ÖLÇÜTÜ TEMKİNLİDİR: yalnızca madde/bent SÖZDİZİMSEL OLARAK
+     * BİTMEMİŞKEN (sonunda . ! ? : ; yok) ve sonraki satır yeni bir yapı
+     * başlatmıyorken (düz metin, yeni madde işareti/numarası yok) devam satırı
+     * eklenir. Böylece maddeden sonra gelen gerçek bir paragraf yutulmaz.
+     */
+    const merged = [line];
+    if (type === "LIST_ITEM" || type === "NUMBERED_CLAUSE") {
+      while (index + 1 < normalizedLines.length && merged.length < MAX_WRAPPED_LINES) {
+        const tail = merged.at(-1)!.text.trim();
+        // Cümle bitmişse devam satırı aranmaz.
+        if (/[.!?;:]$/.test(tail)) break;
+        const next = normalizedLines[index + 1];
+        if (classifyLine(next, bodyFont) !== "PARAGRAPH") break;
+        // Yeni bir madde işareti veya madde numarası: devam değil, yeni kural.
+        // Salt rakam satırı (sayfa numarası, üstbilgi tarihi) da devam
+        // değildir; aksi hâlde "... 100cm' den 17" gibi kurala karışırdı.
+        if (isListItem(next.text) || clauseNumberOf(next.text) || isBareNumberLine(next.text)) break;
+        const total = merged.reduce((sum, item) => sum + item.text.length, 0);
+        if (total + next.text.length > MAX_WRAPPED_CHARS) break;
+        merged.push(next);
+        index += 1;
+      }
+    }
+    emit(merged, type, index - (merged.length - 1));
+  }
   flushParagraph();
   return blocks;
 }
@@ -514,14 +513,17 @@ export function buildStructureFromOcrPages(pages: OcrPage[], pdfHash: string, pa
  */
 export async function extractPdfStructure(bytes: ArrayBuffer): Promise<StructuredPdf> {
   const pdfHash = await sha256(bytes);
-  ensurePdfJsRuntimeGlobals();
-  await ensurePdfJsFakeWorker();
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  // pdf.js, verilen görünümün ALTINDAKİ ArrayBuffer'ı worker'a transfer edip
-  // KOPARIR (structuredClone + transfer; fake worker'da da aynı). Çağıranın
-  // tamponu bozulmasın diye pdf.js'e her zaman KOPYA verilir — aksi hâlde
-  // metin katmanı yetersiz çıkıp OCR yedeğine geçildiğinde aynı bayt dizisi
-  // sıfır uzunlukta kalır ve OCR yolu daha başlamadan çökerdi.
+  // Sunucuda DOMMatrix/Path2D globalleri ve tarayıcı Worker'ı yok; PDF.js
+  // bunları modül gövdesinde kullandığı için yükleme `loadPdfJs` üzerinden
+  // yapılır (globaller + aynı iş parçacığında çözümleyici, tek yerde).
+  const pdfjs = await loadPdfJs();
+  // PDF.js, verilen görünümün ALTINDAKİ ArrayBuffer'ı çözümleyiciye AKTARIR
+  // (structuredClone + transfer; fake worker'da da aynı) ve özgün tampon
+  // çağıranın elinde sıfır uzunlukta kalır. Bu fonksiyonun imzası böyle bir
+  // yan etkiyi düşündürmediği için pdf.js'e her zaman KOPYA verilir: çağıran
+  // aynı baytları analizden sonra (arşivleme, bütünlük kontrolü) yeniden
+  // kullanabilir ve metin katmanı yetersiz çıkıp OCR yedeğine geçildiğinde
+  // OCR yolu daha başlamadan çökmez.
   const loadingTask = pdfjs.getDocument({
     data: new Uint8Array(bytes.slice(0)),
   });

@@ -9,6 +9,7 @@ import {
   listOpenCompetitions,
   markSimilarityResultsStale,
   reportBucket,
+  storeReportPdf,
 } from "../../lib/workflow-db";
 import { COMPETITION_STATUS_LABELS } from "../../lib/workflow-types";
 import { recordAudit } from "../../lib/admin-db";
@@ -108,10 +109,12 @@ export async function POST(request: Request): Promise<Response> {
     // Saklanan yarışma adının kaynağı SUNUCUDAKİ satırdır, istemci metni değil.
     const storedCompetitionName = workflow.competitionName;
     objectKey = `applications/${auth.account.id}/${crypto.randomUUID()}/${safeFileName(file.name)}`;
-    // Blob doğrudan verilir: `ReadableStream` ile R2 içerik uzunluğunu bilemediği
-    // için yükleme sessizce düşebiliyordu. `File` zaten bir `Blob`'tur.
-    await reportBucket().put(objectKey, file, {
-      httpMetadata: { contentType: "application/pdf" },
+    // R2 yazımı doğrulanır ve PDF özeti aynı baytlardan ölçülür; veri tabanı
+    // ancak nesne eksiksiz yazıldıktan sonra bu dosyaya bağlanır (madde 9).
+    // Üst veri yarışma adını SUNUCUDAKİ satırdan alır, istemci metninden değil.
+    const stored = await storeReportPdf({
+      key: objectKey,
+      bytes: await file.arrayBuffer(),
       customMetadata: { participantId: auth.account.id, competition: storedCompetitionName.slice(0, 160) },
     });
     const application = await createApplication({
@@ -125,8 +128,23 @@ export async function POST(request: Request): Promise<Response> {
       fileKey: objectKey,
       fileName: file.name.slice(0, 240),
       mimeType: "application/pdf",
-      sizeBytes: file.size,
+      sizeBytes: stored.byteLength,
+      pdfHash: stored.pdfHash,
     });
+    /*
+     * ÇİFT BAŞVURU (madde 9): aynı katılımcının aynı yarışmada ikinci aktif
+     * başvurusu veri tabanı düzeyinde reddedilir. Yeni yüklenen nesne
+     * `finally`/`catch` yolunda değil burada temizlenir; MEVCUT başvurunun
+     * PDF'ine dokunulmaz.
+     */
+    if (application === "duplicate") {
+      await reportBucket().delete(objectKey).catch(() => undefined);
+      objectKey = "";
+      return jsonError(409,
+        "Bu yarışmaya zaten bir başvurunuz var. Aynı yarışmaya ikinci başvuru açılamaz; "
+        + "raporunuzu güncellemeniz gerekiyorsa “Başvurularım” ekranından yeni sürüm yükleyin.");
+    }
+    objectKey = "";
     await recordAudit({ actorId: auth.account.id, actorEmail: auth.account.email, actorRole: auth.account.roleCode, action: "application_submitted", targetType: "competition_application", targetId: application.id, detail: storedCompetitionName }).catch((auditError) => console.error("[audit] application_submitted", auditError));
     // Havuza yeni rapor geldi (madde 8): aynı yarışma anahtarındaki DİĞER
     // başvuruların benzerlik sonuçları "güncel değil" işaretlenir. Yazım

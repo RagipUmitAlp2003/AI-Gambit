@@ -47,13 +47,19 @@ test("merkezî sözlük bağlayıcı, olumsuz ve sayı-birim ifadelerini ayrı k
 });
 
 test("aday seçimi fiziksel ve haricî ifadeleri silmez, LLM kapsam kararına taşır", () => {
+  // Aday seçimi kapsam kararı değildir: bağlayıcı kip taşıyan fiziksel/saha
+  // kuralı da aday olur; sinyalleri (PHYSICAL_STAGE_TERM) modele ve sunucu
+  // kapılarına taşınır, kapsam kararı orada verilir.
   const blocks = [
     block("SAYFA-02-MADDE-3-2", "Takım yarışma günü parkur görevini tamamlamalıdır."),
     block("SAYFA-03-MADDE-4-1", "Test sonuçları raporda tablo halinde sunulmalıdır.", 3),
   ];
   const selected = selectCriteriaCandidates(blocks);
   assert.equal(selected.candidates.length, 2);
+  assert.equal(selected.unselected.length, 0);
+  assert.equal(selected.candidates[0].block.sourceId, "SAYFA-02-MADDE-3-2");
   assert.ok(selected.candidates[0].signals.includes("PHYSICAL_STAGE_TERM"));
+  assert.equal(selected.candidates[1].block.sourceId, "SAYFA-03-MADDE-4-1");
   assert.ok(selected.candidates[1].signals.includes("HEADING_CONTENT_TERM"));
 });
 

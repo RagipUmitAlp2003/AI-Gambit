@@ -66,7 +66,23 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
   const [file, setFile] = useState<File | null>(null);
   const [applications, setApplications] = useState<CompetitionApplication[]>([]);
   const [busy, setBusy] = useState(false);
+  /*
+   * ÇİFT BAŞVURU KORUMASI (madde 9)
+   *
+   * `busy` bir React DURUMUDUR: `setBusy(true)` çağrısı bir sonraki çizime
+   * kadar `busy` değerini değiştirmez. `submit()` ise setBusy'den ÖNCE dosya
+   * okuyan iki `await` içeriyordu; hızlı çift tıklamada her iki çağrı da
+   * `if (busy) return` kontrolünü `false` görüp geçiyor ve İKİ başvuru
+   * oluşuyordu. Buton görsel olarak kilitlense bile ikinci tıklama zaten
+   * gönderilmiş oluyordu.
+   *
+   * `submitLock` senkron bir ref: ilk tıklamada ANINDA true olur ve ikinci
+   * çağrı hiçbir await beklemeden döner. Sunucu tarafında ayrıca benzersiz
+   * dizin koruması vardır (bkz. createApplication) — istemci tek savunma değil.
+   */
+  const submitLock = useRef(false);
   const [revisionFiles, setRevisionFiles] = useState<Record<string, File | null>>({});
+  const revisionLock = useRef(false);
   const [uploadingRevisionId, setUploadingRevisionId] = useState("");
   const [error, setError] = useState("");
   /** Yalnızca gönderme denemesinin hatası; düğmenin hemen altında da gösterilir. */
@@ -154,20 +170,25 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
   }
 
   async function submit() {
-    if (busy) return;
-    const missing = missingRequirements();
-    if (missing.length) {
-      fail(`Başvuru gönderilemedi. Eksik alanlar: ${missing.join(", ")}.`);
-      return;
-    }
-    const members = teamMembers.map((item) => item.trim()).filter(Boolean);
-    if (!selectedCompetition || !file) return;
-    const gateError = await pdfGateError(file);
-    if (gateError) { fail(gateError); return; }
+    // Senkron kilit: ilk tıklamada anında kapanır, ikinci tıklama hiç ilerlemez.
+    if (submitLock.current) return;
+    submitLock.current = true;
     setBusy(true);
     setError("");
     setSubmitError("");
     setNotice("");
+    /** Doğrulama hatasında kilit ve düğme serbest bırakılır; kullanıcı düzeltip yeniden dener. */
+    const release = () => { submitLock.current = false; setBusy(false); };
+    const missing = missingRequirements();
+    if (missing.length) {
+      release();
+      fail(`Başvuru gönderilemedi. Eksik alanlar: ${missing.join(", ")}.`);
+      return;
+    }
+    const members = teamMembers.map((item) => item.trim()).filter(Boolean);
+    if (!selectedCompetition || !file) { release(); return; }
+    const gateError = await pdfGateError(file);
+    if (gateError) { release(); fail(gateError); return; }
     try {
       const result = await workflowApi.submitApplication({
         competitionName: selectedCompetition.name,
@@ -196,12 +217,19 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
           : caught instanceof Error && caught.message
             ? `Başvuru gönderilemedi: ${caught.message}`
             : "Başvuru gönderilemedi; sunucu gerekçe bildirmedi.");
-    } finally { setBusy(false); }
+    } finally {
+      // Ağ hatasında kullanıcı güvenle tekrar deneyebilsin diye kilit açılır;
+      // başarıda form temizlendiği için ikinci gönderim zaten oluşmaz.
+      submitLock.current = false;
+      setBusy(false);
+    }
   }
 
   async function submitRevision(application: CompetitionApplication) {
     const revisionFile = revisionFiles[application.id];
-    if (!revisionFile || uploadingRevisionId) return;
+    // Senkron kilit: revizyon yüklemesinde de çift tıklama iki sürüm açmaz.
+    if (!revisionFile || revisionLock.current || uploadingRevisionId) return;
+    revisionLock.current = true;
     setUploadingRevisionId(application.id);
     setError("");
     setNotice("");
@@ -212,7 +240,10 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
       setNotice(`Yeni rapor sürümü alındı. Sürüm ${result.application.currentVersionNumber} değerlendirme akışına gönderildi.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Yeni rapor sürümü gönderilemedi.");
-    } finally { setUploadingRevisionId(""); }
+    } finally {
+      revisionLock.current = false;
+      setUploadingRevisionId("");
+    }
   }
 
   return (

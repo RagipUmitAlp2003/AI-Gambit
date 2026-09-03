@@ -235,7 +235,11 @@ test("şartname analizi tek generateContent çağrısı yapar", () => {
   assert.match(ANALYZE_ROUTE, /runSingleGeneration\(/, "Tek çağrı katmanı kullanılmalı.");
   assert.ok(!/apiCalls: 1,/.test(ANALYZE_ROUTE), "Tanılamaya sabit 'apiCalls: 1' yazılmamalıdır.");
   assert.match(ANALYZE_ROUTE, /apiCalls,/, "Gerçek çağrı sayısı tanılamaya yazılmalıdır.");
-  assert.match(ANALYZE_ROUTE, /retryable: failure\.transient/, "Geçici hatada 'Yeniden dene' bayrağı dönmelidir.");
+  assert.match(
+    ANALYZE_ROUTE,
+    /retryable: retryableOverride \?\? failure\.transient/,
+    "Geçici veya eksik kapsam hatasında 'Yeniden dene' bayrağı dönmelidir.",
+  );
 });
 
 test("rapor analizi tek generateContent çağrısı yapar", () => {
@@ -433,7 +437,7 @@ test("öncelik sütunu eklemeli ve geriye uyumludur", () => {
 });
 
 /* --------------------------------------------------------------------- *
- * Problem 4 · 4. prensip (teknik kriter) hassasiyeti
+ * Şartname çıkarımı · dört aşamalı rapor kontrolü
  * --------------------------------------------------------------------- */
 
 test("çıkarım istemi zorunluluk kipi ifadelerini tarar", () => {
@@ -446,15 +450,19 @@ test("çıkarım istemi zorunluluk kipi ifadelerini tarar", () => {
   }
 });
 
-test("çıkarım istemi somut teknik gereksinim türlerini sayar", () => {
+test("çıkarım istemi rapordan denetlenebilen teknik kuralı dördüncü aşamaya yazar, yarışma-anı kurallarını aktif kriter yapmaz", () => {
   const extraction = readFileSync("app/lib/criteria-extraction.ts", "utf8");
-  for (const topic of ["Boyut kısıtları", "Ağırlık sınırları", "Elektriksel limitler", "acil durdurma", "patlayıcı"]) {
-    assert.ok(extraction.includes(topic), `Sistem istemi "${topic}" başlığını içermelidir.`);
+  for (const topic of ["language_template", "headings_content", "category_similarity", "criteria_evidence"]) {
+    assert.ok(extraction.includes(topic), `Sistem istemi "${topic}" aşamasını içermelidir.`);
   }
+  assert.match(extraction, /DÖRT KAPSAM/);
+  assert.match(extraction, /Tasarım limiti; criteria_evidence \/ KRITER/);
+  assert.match(extraction, /Yarışma günü\s+performansı; KAPSAM_DISI/);
+  assert.match(extraction, /yarışma sonrası işlemler\s+daima KAPSAM_DISI/);
+  // Şema aşama listesi çıkarım aşamalarıdır; ortak CHECK_STAGE_IDS doğrudan bağlanmaz.
+  assert.doesNotMatch(extraction, /enum: CHECK_STAGE_IDS/);
   // Sürüm etiketi artırılınca eski önbellek kayıtları geçersiz olur.
-  assert.match(extraction, /EXTRACTION_PROMPT_VERSION = "v2[3-9]/, "İstem sürümü v23 veya üzeri olmalıdır.");
-  // Teknik odak diğer aşamaları boşaltmamalı.
-  assert.match(extraction, /AŞAMA DENGESİ/, "Aşamalar arası denge kuralı bulunmalıdır.");
+  assert.match(extraction, /EXTRACTION_PROMPT_VERSION = "v(?:2[3-9]|[3-9]\d)/, "İstem sürümü v23 veya üzeri olmalıdır.");
 });
 
 /* --------------------------------------------------------------------- *
@@ -474,11 +482,45 @@ test("geri bildirim kartları PRD başlıklarını kullanır", async () => {
   }
 });
 
-test("hakem ekranında kaynak satıra git düğmesi ve aşama ikonları var", () => {
+/*
+ * Eski ad "Kaynak Satıra Git"ti ve PDF'i `#page=` adres parçasıyla yeni sekmede
+ * açıyordu; tarayıcıların yerleşik PDF görüntüleyicileri bu parçayı güvenilir
+ * biçimde uygulamadığı için düğme sessizce yanlış sayfayı açıyordu. Kanıt artık
+ * uygulama içi panelde gösterilir (madde 6). Bu test yeni davranışı korur:
+ * düğme adı, uygulama içi görüntüleyicinin bağlanmış olması ve benzerlik
+ * işaretinin (dört aşamadan çıkarıldıktan sonra) kendi notunda durması.
+ */
+test("hakem ekranında kanıtı PDF'de gösteren uygulama içi panel ve aşama ikonları var", () => {
   const evaluation = readFileSync("app/components/evaluation-app.tsx", "utf8");
-  assert.match(evaluation, /Kaynak Satıra Git/, "Kanıta gitme düğmesi bulunmalıdır.");
+  assert.match(evaluation, /Kanıtı PDF&apos;de göster/, "Kanıt düğmesi bulunmalıdır.");
+  assert.match(evaluation, /<PdfEvidenceViewer/, "Kanıt uygulama içi panelde açılmalıdır.");
   assert.match(evaluation, /function StageIcon/, "Aşamalar yeşil/sarı/kırmızı ikonla gösterilmelidir.");
   // GÖREV 3 · madde 7: benzerlik dört aşamanın parçası DEĞİLDİR; aşama
   // şeridindeki "ŞÜPHELİ/Normal" satırı kaldırıldı, bağımsız kart gösterir.
   assert.match(evaluation, /Raporlar arası benzerlik/, "Bağımsız benzerlik kartı bulunmalıdır.");
+  // Şüpheli/Normal işareti kaybolmaz; yalnızca kendi notunda (bağımsız kartta) durur.
+  assert.match(evaluation, /ŞÜPHELİ/, "Benzerlik işareti kendi notunda Şüpheli/Normal olarak gösterilmelidir.");
+  const strip = evaluation.slice(evaluation.indexOf("function StageStrip"), evaluation.indexOf("type RejectDraft"));
+  assert.doesNotMatch(strip, /ŞÜPHELİ/, "Şüpheli/Normal işareti aşama şeridine geri sızmamalıdır.");
+
+  const viewer = readFileSync("app/components/pdf-evidence-viewer.tsx", "utf8");
+  // Adres parçasına güvenilmez: sayfa doğrudan çizilir.
+  assert.match(viewer, /renderPage/, "Görüntüleyici ilgili sayfayı kendisi çizmelidir.");
+  assert.match(viewer, /pdf-viewer-highlight/, "Alıntı vurgulanmalıdır.");
+  assert.match(viewer, /vurgulama yapılamadı/i, "Vurgulama yapılamadığında kullanıcıya söylenmelidir.");
+  assert.match(viewer, /Kanıt PDF&apos;i gösterilemedi/, "PDF açılamazsa açık hata gösterilmelidir.");
+});
+
+/*
+ * Benzerlik, dört aşamalı özet kartlarından ÇIKARILDI (madde 3): kategori
+ * kartı yalnızca kategori uygunluğunu gösterir. Bu test, benzerlik satırının
+ * aşama şeridine geri sızmasını engeller.
+ */
+test("dört aşamalı özet kartlarında benzerlik satırı ve yapay yüzde yoktur", () => {
+  const evaluation = readFileSync("app/components/evaluation-app.tsx", "utf8");
+  const strip = evaluation.slice(evaluation.indexOf("function StageStrip"), evaluation.indexOf("type RejectDraft"));
+  assert.ok(strip.length > 0, "StageStrip bulunmalıdır.");
+  assert.doesNotMatch(strip, /Benzerlik taraması/, "Benzerlik aşama kartında gösterilmemelidir.");
+  assert.doesNotMatch(strip, /categoryScore/, "Kategori kartı ham skoru okumamalıdır.");
+  assert.match(strip, /CATEGORY_FIT_LABELS/, "Kategori uygunluğu etiketle gösterilmelidir.");
 });

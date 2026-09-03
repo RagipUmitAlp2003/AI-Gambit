@@ -117,6 +117,7 @@ export const WORKFLOW_EVENT_LABELS: Record<WorkflowEventName, string> = {
   application_submitted: "Yarışmacı başvurusunu gönderdi",
   application_assigned: "Başvuru hakeme atandı",
   application_reassigned: "Başvuru başka hakeme aktarıldı",
+  application_reassignment_queued: "Başvuru yeniden atama kuyruğuna alındı",
   judge_reminder_sent: "Hakeme hatırlatma gönderildi",
   analysis_requeued: "AI analizi yeniden sıraya alındı",
   document_reupload_requested: "Katılımcıdan yeni belge istendi",

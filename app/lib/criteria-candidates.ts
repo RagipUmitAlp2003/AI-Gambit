@@ -10,7 +10,7 @@ import {
 import type { PdfStructureBlock } from "./pdf-structure";
 import type { UnselectedBlocksReview } from "./types";
 
-export const CANDIDATE_SELECTOR_VERSION = "candidate-selector-v1";
+export const CANDIDATE_SELECTOR_VERSION = "candidate-selector-v2-technical-restored";
 
 export type CandidateSignal =
   | "OBLIGATION_TERM"
@@ -106,16 +106,23 @@ function selectionDecision(block: PdfStructureBlock, matches: DictionaryMatch[],
   const technical = has(matches, "technical");
   const meaningfulNumber = numbers.some((match) => match.kind !== "sayi");
   const explicitRule = obligation || prohibition || limit;
+  const reportContext = /\b(?:rapor|pdf|dosya|tyr|ktr|on tasarim|kritik tasarim)\w*\b/i.test(block.normalizedText)
+    || /\b(?:rapor|pdf|tyr|ktr|on tasarim|kritik tasarim)\w*\b/i.test(block.sectionTitle ?? "");
 
-  if (explicitRule) return { selected: true, reason: "Açık zorunluluk, yasak veya sınır ifadesi bulundu." };
-  if (meaningfulNumber && technical) return { selected: true, reason: "Teknik terim ile sayısal değer/birim birlikte bulundu." };
-  if (language && (meaningfulNumber || heading)) return { selected: true, reason: "Dil/şablon terimi bir biçim veya içerik sinyaliyle birlikte bulundu." };
-  if (heading && /rapor(?:da|un|u)?\s|yer al|icer/i.test(block.normalizedText)) {
+  if (language && (explicitRule || meaningfulNumber || reportContext || heading)) {
+    return { selected: true, reason: "Raporun dil, dosya veya şablon düzenine ilişkin sinyal bulundu." };
+  }
+  if (heading && (explicitRule || reportContext || ["HEADING", "LIST_ITEM", "NUMBERED_CLAUSE"].includes(block.blockType))) {
     return { selected: true, reason: "Raporun başlık veya içerik yapısına ilişkin ifade bulundu." };
   }
   if (category && /uygun|kapsam|beklenen|ait|yonelik/i.test(block.normalizedText)) {
     return { selected: true, reason: "Projenin yarışma kapsamına uygunluğuna ilişkin ifade bulundu." };
   }
+  // Dördüncü aşama (criteria_evidence): teknik/fiziksel kurallar da aday olur.
+  // Aday seçimi kapsam kararı DEĞİLDİR; fiziksel veya haricî ifadeler silinmez,
+  // sinyalleriyle birlikte LLM kapsam kararına ve sunucu kapılarına taşınır.
+  if (explicitRule) return { selected: true, reason: "Açık zorunluluk, yasak veya sınır ifadesi bulundu." };
+  if (meaningfulNumber && technical) return { selected: true, reason: "Teknik terim ile sayısal değer/birim birlikte bulundu." };
   if ((block.blockType === "TABLE_ROW" || Boolean(block.clauseNumber)) && meaningfulNumber && (technical || language)) {
     return { selected: true, reason: "Yapısal kural satırında ölçülebilir bir gereksinim bulundu." };
   }

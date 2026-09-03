@@ -2,9 +2,9 @@ import { requirePermission } from "../../lib/admin-guard";
 import { PayloadTooLargeError, acquireAnalysisPermit, readFormDataWithLimit, requestBodyTooLarge } from "../../lib/request-guard";
 import {
   EXTRACTION_PROMPT_VERSION,
-  EXTRACTION_SCHEMA,
   EXTRACTION_SYSTEM_INSTRUCTION,
   buildExtractionPrompt,
+  extractionSchemaForCandidates,
   normalizeExtraction,
   type RawExtraction,
 } from "../../lib/criteria-extraction";
@@ -19,7 +19,8 @@ import { deleteStoredAnalysis, findStoredAnalysis, reportBucket, saveCriteriaExt
 import type { AnalysisDiagnostics, AnalysisResult } from "../../lib/types";
 
 /**
- * Şartname analizi ucu — dört aşamalı prensip, TEK LLM çağrısı.
+ * Şartname analizi ucu — dört aşamalı rapor kontrolü (dil/şablon, başlık/içerik,
+ * kategori uygunluğu, rapordan denetlenebilen teknik kural), TEK LLM çağrısı.
  *
  * Yarışma Yöneticisi YALNIZCA şartname PDF'sini yükler; ayrı bir resmî rapor
  * şablonu alanı yoktur. PDF sunucuda yapısal bloklara ayrılır; sürümlü sözlük
@@ -56,12 +57,17 @@ const GENERATION_TIMEOUT_MS = 150_000;
 /**
  * Çıktı token tavanı.
  *
- * 24 576'ya indirilmişti; ancak aday-karar sözleşmesinde model HER aday için
- * bir karar satırı (kaynak alıntısıyla birlikte) döndürür ve düşünme tokenları
- * da bu bütçeden düşer. Yoğun bir şartnamede (ör. 29 sayfa, 200+ aday) çıktı
- * tavana takılıp JSON ortasından kesiliyor ve analiz "şemaya uygun JSON
- * okunamadı" ile düşüyordu. Tavan modelin desteklediği üst sınıra alındı;
+ * 24 576'ya indirilmişti; ölçüm bunun YETMEDİĞİNİ gösterdi. Aday-karar
+ * sözleşmesinde model HER güçlü aday için bir karar satırı (kaynak alıntısıyla
+ * birlikte) döndürür ve düşünme tokenları da bu bütçeden düşer. Yoğun bir
+ * şartnamede (ör. 129 adaylı 29 sayfa; ölçülen gerçek çıktı 25 564 token)
+ * yanıt tavana dayanıp JSON'un ortasından kesiliyor ve uç "şemaya uygun JSON
+ * olarak okunamadı" diyerek 502 döndürüyordu. Tavan, aday sayısıyla birlikte
+ * büyüyen cevabı taşıyacak şekilde modelin desteklediği üst sınıra alındı;
  * gerçek maliyet üretilen tokena göre oluşur, tavana göre değil.
+ *
+ * Tavan yine sonsuz değildir; kesilme olursa `finishReason` okunup kullanıcıya
+ * ne olduğu ve ne yapabileceği açıkça söylenir (sessiz veri kaybı yok).
  */
 const MAX_OUTPUT_TOKENS = 65_536;
 
@@ -83,6 +89,25 @@ function extractGeminiText(payload: unknown) {
   const candidates = (payload as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }).candidates;
   return candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
 }
+
+/**
+ * Model cevabı çıktı tavanına dayanıp KESİLDİ mi?
+ *
+ * Kesilmiş cevap geçersiz JSON olarak geliyor ve kullanıcı "şemaya uygun JSON
+ * olarak okunamadı" gibi sebebi anlaşılmayan bir hata görüyordu. Gerçek sebep
+ * belgenin tek cevaba sığmayacak kadar çok kural adayı içermesidir; mesaj bunu
+ * söylemeli ve yöneticiye ne yapacağını anlatmalıdır.
+ */
+function truncatedByTokenLimit(payload: unknown): boolean {
+  const candidates = (payload as { candidates?: Array<{ finishReason?: string }> })?.candidates;
+  return candidates?.[0]?.finishReason === "MAX_TOKENS";
+}
+
+const TRUNCATED_OUTPUT_MESSAGE =
+  "Belge tek analiz cevabına sığmadı: model çıktısı token sınırına ulaştığı için kesildi ve "
+  + "sonuç kaydedilmedi. Şartname çok sayıda kural adayı içeriyor. Belgeyi bölümler hâlinde "
+  + "(ör. yalnızca rapor kuralları içeren bölümler) yükleyerek yeniden deneyin. Sorun sürerse "
+  + "GEMINI_MODEL için daha yüksek çıktı kapasiteli bir model seçin.";
 
 /**
  * Aynı belgenin yeniden analizini önleyen İKİ KATLI önbellek.
@@ -217,6 +242,8 @@ function buildResult(
       structureVersion: structure.version,
       dictionaryVersion: DICTIONARY_VERSION,
       selectorVersion: CANDIDATE_SELECTOR_VERSION,
+      // Yanıtı üreten istem sürümü: istemci eski sürümlü taslakta yeniden analiz uyarısı gösterir.
+      promptVersion: EXTRACTION_PROMPT_VERSION,
       totalBlocks: selection.diagnostics.totalBlocks,
       selectedBlocks: selection.diagnostics.selectedBlocks,
       unselectedBlocks: selection.diagnostics.unselectedBlocks,
@@ -249,7 +276,7 @@ async function saveCoverageArtifact(
   // criteria_extraction_runs tanılamalarındaki coverageArtifactKey'in işaret
   // ettiği nesneler) v2 yeniden analiziyle ÜZERİNE YAZILMAZ; her sürüm kendi
   // nesnesine yazar.
-  const key = `criteria-analysis/${documentHashValue}/${structure.version}-${EXTRACTION_PROMPT_VERSION}-${DICTIONARY_VERSION}.json`;
+  const key = `criteria-analysis/${documentHashValue}/${structure.version}-${EXTRACTION_PROMPT_VERSION}-${DICTIONARY_VERSION}-${CANDIDATE_SELECTOR_VERSION}.json`;
   try {
     await reportBucket().put(key, JSON.stringify({
       createdAt: new Date().toISOString(),
@@ -551,7 +578,9 @@ export async function POST(request: Request) {
         thinkingConfig: { thinkingLevel: thinkingLevelFor(pageCount) },
         maxOutputTokens: MAX_OUTPUT_TOKENS,
         responseMimeType: "application/json",
-        responseJsonSchema: EXTRACTION_SCHEMA,
+        responseJsonSchema: extractionSchemaForCandidates(
+          selection.candidates.map((candidate) => candidate.block.sourceId),
+        ),
       },
     });
 
@@ -562,7 +591,7 @@ export async function POST(request: Request) {
      */
     let apiCalls: number = ocr.apiCalls;
 
-    const failWith = (status: number, detail: string) => {
+    const failWith = (status: number, detail: string, retryableOverride?: boolean) => {
       console.error("AI analiz isteği başarısız:", { status, detail, apiCalls });
       // Sınıflandırma düşse bile bu istekte yapılmış OCR çağrısı ve tokenları kayıttan silinmez.
       recordUsage({ model: modelUsed, promptTokens: ocrUsage.prompt, outputTokens: ocrUsage.output, totalTokens: ocrUsage.total, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls });
@@ -570,7 +599,7 @@ export async function POST(request: Request) {
       // `retryable` istemciye "Yeniden dene" düğmesini göstermesini söyler;
       // sunucu kendiliğinden ikinci bir çağrı yapmaz.
       return Response.json(
-        { error: failure.message, retryable: failure.transient, apiCalls },
+        { error: failure.message, retryable: retryableOverride ?? failure.transient, apiCalls },
         { status: failure.httpStatus },
       );
     };
@@ -592,11 +621,11 @@ export async function POST(request: Request) {
     const responseText = extractGeminiText(outcome.payload);
     // Çıktı token tavanına takılan yanıt JSON ortasından kesilir; bunu genel
     // "JSON okunamadı" cümlesiyle maskelemek kök nedeni görünmez kılıyordu.
+    // Kesilme, boş yanıttan ve bozuk JSON'dan ÖNCE kontrol edilir: sebebi bilinen
+    // bir başarısızlığı "geçersiz çıktı" diye raporlamak yanıltıcıydı.
     const finishReason = (outcome.payload as { candidates?: Array<{ finishReason?: string }> })
       ?.candidates?.[0]?.finishReason ?? "";
-    if (finishReason === "MAX_TOKENS") {
-      return failWith(502, "Model çıktısı izin verilen çıktı token sınırına takılıp kesildi. Belge olağan dışı yoğun olabilir; sorun sürerse GEMINI_MODEL için daha yüksek çıktı kapasiteli bir model seçin.");
-    }
+    if (truncatedByTokenLimit(outcome.payload)) return failWith(502, TRUNCATED_OUTPUT_MESSAGE);
     if (!responseText) return failWith(502, `Belge analizi için geçerli yapılandırılmış çıktı alınamadı${finishReason ? ` (finishReason: ${finishReason})` : ""}.`);
     let raw: RawExtraction;
     try {
@@ -608,6 +637,23 @@ export async function POST(request: Request) {
     // gövde normalizasyonda patlar ve önbelleğe girerse her isteği düşürürdü.
     if (!raw || typeof raw !== "object") {
       return failWith(502, "Belge analizi şemaya uygun JSON olarak okunamadı.");
+    }
+
+    // Geçerli JSON, eksiksiz analiz demek değildir. Gemini bazı koşularda
+    // yalnızca kabul ettiği kriterleri döndürüp adayların büyük bölümünü sessizce
+    // atlayabiliyor. Eksik kapsamı başarı diye kaydetmek 129 adaylı bir belgeyi
+    // yanıltıcı biçimde 13 kriterle tamamlanmış gösteriyordu. Tek çağrı politikası
+    // korunur: sunucu gizlice yeniden denemez; eksik sonucu kaydetmez ve kullanıcıya
+    // açık, yeniden denenebilir hata verir.
+    const candidateIds = new Set(selection.candidates.map((candidate) => candidate.block.sourceId));
+    const coverageCheck = normalizeExtraction(raw, pageCount, structure.blocks, candidateIds);
+    if (coverageCheck.stats.unansweredCandidates > 0) {
+      return failWith(
+        502,
+        `Model ${selection.candidates.length} adayın ${coverageCheck.stats.unansweredCandidates} tanesi için karar döndürmedi. `
+        + "Eksik sonuç kaydedilmedi; belgeyi yeniden analiz edin.",
+        true,
+      );
     }
 
     const extraction: CachedExtraction = { raw, model: modelUsed, pageCount, analyzedAt: new Date().toISOString() };

@@ -17,8 +17,9 @@ import {
   readJson,
 } from "../../../../lib/admin-guard";
 import { buildRevokeMail, deliverMail } from "../../../../lib/mailer";
-import { assignPendingApplications } from "../../../../lib/workflow-db";
+import { assignPendingApplications, reassignApplicationsFromJudge, type JudgeReassignment } from "../../../../lib/workflow-db";
 import type { MutationResult } from "../../../../lib/admin-db";
+import type { AdminAccount } from "../../../../lib/admin-types";
 
 /**
  * Tek hesap üzerinde rol değiştirme, rol kaldırma (pasife alma), geri alma
@@ -37,6 +38,38 @@ const LAST_MODERATOR_MESSAGE =
 function mutationFailure(result: Extract<MutationResult, { ok: false }>): Response {
   if (result.reason === "not_found") return jsonError(404, "Hesap bulunamadı.");
   return jsonError(409, LAST_MODERATOR_MESSAGE, { lastModerator: true });
+}
+
+/**
+ * Pasife alınan/silinen HAKEMİN açık dosyalarını devreder ve her devri denetim
+ * kaydına yazar (madde 10). Devir başarısız olursa hesabın pasife alınması
+ * geri ALINMAZ: dosyalar atanmamış kalır ve operasyon panosu açıldığında
+ * `assignPendingApplications` tarafından dağıtılır. Sebep loga yazılır.
+ */
+async function reassignOpenJudgeFiles(
+  judgeId: string,
+  reason: string,
+  actor: AdminAccount,
+): Promise<JudgeReassignment[]> {
+  let moved: JudgeReassignment[] = [];
+  try {
+    moved = await reassignApplicationsFromJudge(judgeId, reason);
+  } catch (error) {
+    console.error("[workflow] pasif hakemin açık dosyaları devredilemedi", error);
+    return [];
+  }
+  for (const item of moved) {
+    await recordAudit({
+      actorId: actor.id,
+      actorEmail: actor.email,
+      actorRole: actor.roleCode,
+      action: item.judgeId ? "application_reassigned" : "application_reassignment_queued",
+      targetType: "competition_application",
+      targetId: item.applicationId,
+      detail: item.detail.slice(0, 400),
+    }).catch((auditError) => console.error("[audit] hakem devri", auditError));
+  }
+  return moved;
 }
 
 export async function PATCH(request: Request, context: Context): Promise<Response> {
@@ -140,6 +173,14 @@ export async function DELETE(request: Request, context: Context): Promise<Respon
     if (!account) return jsonError(404, "Hesap bulunamadı.");
 
     if (purge) {
+      /*
+       * KALICI SİLME ÖNCESİ DEVİR (madde 10): hesap satırı gittikten sonra
+       * hangi dosyaların ona bağlı olduğu okunamaz. Bu yüzden açık dosyalar
+       * ÖNCE serbest bırakılıp yeniden atanır.
+       */
+      const handover = account.roleCode === "02"
+        ? await reassignOpenJudgeFiles(id, reason || "hesap kalıcı olarak silindi", auth.account)
+        : [];
       const result = await deleteAccount(id);
       if (!result.ok) return mutationFailure(result);
       await recordAudit({
@@ -149,13 +190,25 @@ export async function DELETE(request: Request, context: Context): Promise<Respon
         action: "account_purged",
         targetType: "account",
         targetId: id,
-        detail: `${account.email} · rol ${account.roleCode}`,
+        detail: `${account.email} · rol ${account.roleCode}`
+          + (handover.length ? ` · ${handover.length} açık dosya devredildi` : ""),
       });
-      return json({ purged: true, id });
+      return json({ purged: true, id, reassignedApplications: handover.length });
     }
 
     const result = await revokeAccount(id, reason);
     if (!result.ok) return mutationFailure(result);
+
+    /*
+     * HAKEM PASİFLEŞTİRİLDİ (madde 10): ona atanmış TAMAMLANMAMIŞ dosyalar
+     * kalıcı olarak takılı kalmasın diye en az yüklü aktif hakeme devredilir;
+     * aktif hakem yoksa yeniden atama kuyruğuna alınır. Tamamlanmış
+     * değerlendirmelerin tarihsel hakem bilgisi değişmez. Devir başarısız
+     * olsa bile hesabın pasife alınması GERİ ALINMAZ.
+     */
+    const handover = account.roleCode === "02"
+      ? await reassignOpenJudgeFiles(id, reason || "hesap pasife alındı", auth.account)
+      : [];
 
     // Rol kaldırma bildirimi; sağlayıcı yoksa ortamına göre işaretlenir.
     const envelope = buildRevokeMail({
@@ -182,10 +235,11 @@ export async function DELETE(request: Request, context: Context): Promise<Respon
       action: "account_revoked",
       targetType: "account",
       targetId: id,
-      detail: `${account.email} · rol ${account.roleCode}${reason ? ` · gerekçe: ${reason}` : ""}`,
+      detail: `${account.email} · rol ${account.roleCode}${reason ? ` · gerekçe: ${reason}` : ""}`
+        + (handover.length ? ` · ${handover.length} açık dosya yeniden atandı` : ""),
     });
 
-    return json({ account: result.account, mail });
+    return json({ account: result.account, mail, reassignedApplications: handover.length });
   } catch (error) {
     return handleError(error);
   }

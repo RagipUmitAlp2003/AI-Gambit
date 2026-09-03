@@ -121,12 +121,15 @@ Belgelerin tümü uygulamadaki "Hazır test belgeleri" bölümünden seçilebili
 - `app/lib/draft-store.ts`: adımlar arası ve sayfa yenileme sonrası taslak kalıcılığı
 - `app/lib/usage-metrics.ts` + `app/api/metrics/route.ts`: API kullanım sayaçları
 - `app/globals.css` + `app/evaluation.css`: tasarım sistemi ve değerlendirme ekranı stilleri
-- `migrations/0001_admin.sql` … `0005_final_workflow.sql`: D1 şema geçmişi (5 göç)
+- `migrations/0001_admin.sql` … `0015_submission_integrity.sql`: D1 şema geçmişi (15 göç)
 - `tools/create_sample_pdf.py`: sentetik PDF üreticisi
 - `DESIGN.md`: arayüz tasarım sistemi
 - `PRODUCT.md`: ürün kapsamı ve değişmez ilkeler
 - `PROJE_DURUMU.md`: güncel durum, ölçüm sonuçları ve eksik iş listesi
 - `NIHAI_SISTEM_AKISI.md`: roller, akış ve veritabanı mimarisi
+- `DEGISIKLIK_RAPORU_2026-09-03.md`: sunucuda PDF.js düzeltmesi, hakem akışı
+  güçlendirmesi ve kriter çıkarımı kapsam düzeltmesi (5 → 33 kriter) — kök neden
+  çözümlemeleri ve ölçümlerle
 
 ## Karşılaştırma testi
 

@@ -1,6 +1,6 @@
 # AI-Gambit — Proje Durumu ve Yapılacaklar
 
-**Tarih:** 3 Eylül 2026 · **Dal:** `faruk_finalsonrasi_main1` · **Temel işleme:** `ac3b3fc`
+**Tarih:** 3 Eylül 2026 · **Dal:** `entegrasyon/umit-umut-2026-09-03` (commit edilmemiş birleştirme) · **Temel işleme:** `466e1f3` + `b7cc296`
 
 Bu belge projenin **güncel durumunu** tutar: neyin çalıştığı, neyin eksik olduğu ve
 neyin düzeltilmesi gerektiği. Aşağıdaki her madde bugün kod üzerinde veya gerçek
@@ -22,6 +22,18 @@ neyin düzeltilmesi gerektiği. Aşağıdaki her madde bugün kod üzerinde veya
 
 ---
 
+## Güncel çalışma — İki dalın birleştirilmesi ve dört aşamalı çıkarım (3 Eylül, akşam)
+
+`entegrasyon/umit-umut-2026-09-03` dalında `umit_finalsonrasi_main1` (benzerlik motoru) ile
+`umutun_buglarını_düzeltme_final_sonrasi` (PDF.js çalışma zamanı, hakem akışı v2, katılımcı bütünlüğü)
+birleştirildi; birleştirme çözülmüş ama COMMIT EDİLMEMİŞ hâlde bekliyor. Şartname çıkarımı yeniden
+DÖRT aşama üretiyor: `criteria_evidence` yalnızca katılımcı PDF raporundan metinsel/sayısal
+denetlenebilen teknik tasarım kurallarını taşır; yarışma anı, saha, parkur, ceza/puan, video, portal,
+takım ve iletişim kuralları hiçbir aşamada kriter olmaz. Sürümler: istem v36, sözlük v6, seçici v2,
+yapı v3. Ayrıntı, ölçümler ve bilinen sınırlar: `ENTEGRASYON_RAPORU_2026-09-03.md`.
+Doğrulama: tsc/lint temiz, birim 337/337, regresyon 9/9, build başarılı; canlı Gemini çağrısı yapılmadı.
+
+---
 ## Güncel çalışma — Kimlik doğrulama çekirdeği sertleştirildi (3 Eylül)
 
 GÖREV 3 · madde 10'un çekirdek dilimi (parola değiştirme akışı ve hesap

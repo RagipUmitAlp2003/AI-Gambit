@@ -302,6 +302,8 @@ export type AnalysisDiagnostics = {
   structureVersion?: string;
   dictionaryVersion?: string;
   selectorVersion?: string;
+  /** Sonucu üreten çıkarım istemi sürümü (EXTRACTION_PROMPT_VERSION); eski sürümlü taslak için yeniden analiz uyarısı buradan türetilir. */
+  promptVersion?: string;
   totalBlocks?: number;
   selectedBlocks?: number;
   unselectedBlocks?: number;
@@ -507,6 +509,33 @@ export type HeadingCheck = {
   contentFilled: boolean;
   page: number | null;
   note: string;
+  /**
+   * Kontrolün hangi kriter türüne göre yapıldığı. Her içerik kuralı ZORUNLU
+   * BAŞLIK değildir: yalnızca `BIREBIR_BASLIK` gerçek başlık konumunda aranır,
+   * `ICERIK_VARLIGI` beklenen bilginin ilgili bölümde bulunmasını arar.
+   * Eski kayıtlarda bulunmaz.
+   */
+  controlType?: CriterionControlType;
+  /**
+   * Eşleşmenin içindekiler tablosu, üstbilgi/altbilgi gibi TEKRAR EDEN bir
+   * satırdan geldiği; bu durumda gerçek bölümün dolu olduğu kanıtlanmamıştır.
+   */
+  tableOfContentsOnly?: boolean;
+};
+
+/**
+ * 3. aşama kategori uygunluğunun ekranda gösterilen sonucu.
+ *
+ * Yapay kesinlik (ör. "%100 uyumlu") üretilmez: model bir skor verse bile
+ * kullanıcıya yalnızca bu dört durumdan biri gösterilir.
+ */
+export type CategoryFit = "UYUMLU" | "KISMEN_UYUMLU" | "UYUMSUZ" | "KANIT_YOK";
+
+export const CATEGORY_FIT_LABELS: Record<CategoryFit, string> = {
+  UYUMLU: "Kategoriyle uyumlu",
+  KISMEN_UYUMLU: "Kategoriyle kısmen uyumlu",
+  UYUMSUZ: "Kategoriyle uyumsuz",
+  KANIT_YOK: "Yeterli kanıt bulunamadı",
 };
 
 export type SimilarityResult = {
@@ -526,8 +555,13 @@ export type StageResult = {
   expectedLanguage?: string | null;
   /** 2. aşama */
   headings?: HeadingCheck[];
-  /** 3. aşama: 0–100 kategori uygunluk skoru */
+  /**
+   * 3. aşama: modelin ham 0–100 kategori skoru. YALNIZCA denetim içindir;
+   * kullanıcıya gösterilmez — ekranda `categoryFit` etiketi kullanılır.
+   */
   categoryScore?: number | null;
+  /** 3. aşama: kullanıcıya gösterilen kategori uygunluk durumu. */
+  categoryFit?: CategoryFit | null;
   similarity?: SimilarityResult | null;
   evidence: EvidenceRef[];
 };
@@ -611,6 +645,25 @@ export type ReportEvaluation = {
     pdfHash?: string | null;
     /** Analizin yapıldığı katılımcı rapor sürümü (submission_versions.id). */
     submissionVersionId?: string | null;
+  };
+  /**
+   * YAYIMLI kriter kümesinin kapsam sayaçları (madde 2).
+   *
+   * `published` yayımlı ve aktif kriterlerin tamamı; `pdfEvaluable` katılımcı
+   * PDF'i üzerinden değerlendirilebilenler; `outsidePdf` video, portal veya
+   * fiziksel aşama gerektirdiği için rapor analizine HİÇ katılmayanlar.
+   *
+   * PDF dışında kalan kriterler uygun/olumsuz sayılmaz, kritik hata üretmez,
+   * hakemin karar listesinde görünmez, nihai karar kapısını engellemez ve
+   * katılımcıya eksiklik olarak gönderilmez; yalnızca burada ve denetim
+   * kaydında sayılırlar. Eski kayıtlarda bulunmaz.
+   */
+  criteriaScope?: {
+    published: number;
+    pdfEvaluable: number;
+    outsidePdf: number;
+    /** PDF dışı kriterlerin adları; hakeme "neden katılmadı" diye gösterilir. */
+    outsideNames?: string[];
   };
   /** Dosya kapısı ve havuz benzerliği gibi deterministik kontroller. */
   preChecks: PreCheck[];
