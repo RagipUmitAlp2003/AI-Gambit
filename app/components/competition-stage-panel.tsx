@@ -3,7 +3,12 @@
 import { useEffect, useState } from "react";
 import { formatDateTime } from "../lib/admin-client";
 import { workflowApi } from "../lib/workflow-client";
-import { COMPETITION_STATUS_LABELS, type CompetitionStatus, type CompetitionWorkflow } from "../lib/workflow-types";
+import {
+  COMPETITION_STATUS_LABELS,
+  type CompetitionStatus,
+  type CompetitionWorkflow,
+  type SimilarityTemplateInfo,
+} from "../lib/workflow-types";
 
 /**
  * Yarışma süreç kontrolü (Rol 01).
@@ -38,6 +43,18 @@ export default function CompetitionStagePanel() {
   /** Arşivleme gerekçesi; gerekçesiz arşivleme sunucu tarafından reddedilir. */
   const [archiveReason, setArchiveReason] = useState<Record<string, string>>({});
   const [archiveOpen, setArchiveOpen] = useState("");
+  /*
+   * Resmî şablon (GÖREV 3 · madde 3) durumu AYRI tutulur: `busyId` yarışma
+   * süreç işlemlerine aittir; farklı işlemler tek meşguliyet durumunda
+   * KARIŞTIRILMAZ (madde 11). Şablon yalnızca benzerlik filtresidir.
+   */
+  const [templateOpen, setTemplateOpen] = useState("");
+  const [templateInfo, setTemplateInfo] = useState<Record<string, SimilarityTemplateInfo | null>>({});
+  const [templateLoaded, setTemplateLoaded] = useState<Record<string, boolean>>({});
+  const [templateBusyId, setTemplateBusyId] = useState("");
+  const [templateError, setTemplateError] = useState("");
+  const [templateNotice, setTemplateNotice] = useState("");
+  const [templateFile, setTemplateFile] = useState<File | null>(null);
 
   function load() {
     return workflowApi.competitions()
@@ -102,8 +119,47 @@ export default function CompetitionStagePanel() {
     } finally { setBusyId(""); }
   }
 
+  /** Resmî şablon satırını açar/kapatır; ilk açılışta meta veri tembel yüklenir. */
+  async function openTemplate(competition: CompetitionWorkflow) {
+    if (templateOpen === competition.id) { setTemplateOpen(""); return; }
+    setTemplateOpen(competition.id);
+    setTemplateFile(null);
+    setTemplateError("");
+    setTemplateNotice("");
+    if (!templateLoaded[competition.id]) {
+      setTemplateBusyId(competition.id);
+      try {
+        const result = await workflowApi.similarityTemplate(competition.id);
+        setTemplateInfo((current) => ({ ...current, [competition.id]: result.template }));
+        setTemplateLoaded((current) => ({ ...current, [competition.id]: true }));
+      } catch (caught) {
+        setTemplateError(caught instanceof Error ? caught.message : "Şablon bilgisi yüklenemedi.");
+      } finally { setTemplateBusyId(""); }
+    }
+  }
+
+  /** Resmî şablon PDF'ini yükler; içerik aynıysa sürüm artmaz (idempotent). */
+  async function uploadTemplate(competition: CompetitionWorkflow) {
+    if (!templateFile) return;
+    setTemplateBusyId(competition.id);
+    setTemplateError("");
+    setTemplateNotice("");
+    try {
+      const result = await workflowApi.uploadSimilarityTemplate(competition.id, templateFile);
+      setTemplateInfo((current) => ({ ...current, [competition.id]: result.template }));
+      setTemplateLoaded((current) => ({ ...current, [competition.id]: true }));
+      setTemplateFile(null);
+      setTemplateNotice(result.unchanged
+        ? `Şablon içeriği değişmedi; sürüm v${result.template.version} korundu.`
+        : `Resmî şablon v${result.template.version} yüklendi; eski benzerlik sonuçları “güncel değil” olarak işaretlendi.`);
+    } catch (caught) {
+      setTemplateError(caught instanceof Error ? caught.message : "Şablon yüklenemedi.");
+    } finally { setTemplateBusyId(""); }
+  }
+
   if (loading) return <p className="page-note">Yarışma durumları yükleniyor…</p>;
-  if (!competitions.length) return null;
+  // Liste boş olsa bile bölüm çizilir: yükleme HATASI hata bandında görünür,
+  // gerçekten boş liste ise ayrı bir boş durum metniyle gösterilir.
 
   return (
     <section className="stage-panel" aria-labelledby="stage-panel-title">
@@ -171,6 +227,12 @@ export default function CompetitionStagePanel() {
                     {competition.isActive ? "Pasife al" : "Aktifleştir"}
                   </button>
                 ) : null}
+                {/* Resmî şablon: yalnızca benzerlik filtresi (GÖREV 3 · madde 3). */}
+                {!competition.archivedAt ? (
+                  <button type="button" className="text-button" onClick={() => openTemplate(competition)}>
+                    Resmî şablon
+                  </button>
+                ) : null}
                 {/* Arşivleme: fiziksel silme değil (madde 11). */}
                 {!competition.archivedAt ? (
                   archiveOpen === competition.id ? (
@@ -207,9 +269,51 @@ export default function CompetitionStagePanel() {
                   </button>
                 ) : null}
               </div>
+              {/* Resmî şablon satırı: kriter üretmez, uygunluk kararı vermez. */}
+              {!competition.archivedAt && templateOpen === competition.id ? (
+                <div className="stage-template-form">
+                  <small>
+                    {templateBusyId === competition.id && !templateLoaded[competition.id]
+                      ? "Şablon bilgisi yükleniyor…"
+                      : templateInfo[competition.id]
+                        ? `Şablon v${templateInfo[competition.id]!.version} · ${templateInfo[competition.id]!.fileName}`
+                          + ` · ${templateInfo[competition.id]!.pageCount} sayfa · ${formatDateTime(templateInfo[competition.id]!.uploadedAt)}`
+                        : "Şablon yüklenmedi."}
+                  </small>
+                  {templateError ? <small className="admin-error" role="alert">{templateError}</small> : null}
+                  {templateNotice ? <small className="success-note" role="status">{templateNotice}</small> : null}
+                  <span className="stage-archive-form">
+                    <input
+                      type="file"
+                      accept="application/pdf,.pdf"
+                      aria-label={`${competition.competitionName} resmî şablon PDF'i`}
+                      onChange={(event) => setTemplateFile(event.target.files?.[0] ?? null)}
+                    />
+                    <button type="button" className="text-button" onClick={() => setTemplateOpen("")}>Kapat</button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={templateBusyId === competition.id || !templateFile}
+                      onClick={() => uploadTemplate(competition)}
+                    >
+                      {templateBusyId === competition.id ? "Yükleniyor…" : "Şablonu yükle"}
+                    </button>
+                  </span>
+                  <small>
+                    Şablon yalnızca benzerlik analizinde ortak metni ayıklamak için kullanılır; kriter
+                    oluşturmaz ve rapor uygunluk kararı vermez. Yeni sürüm yüklenirse eski benzerlik
+                    sonuçları “güncel değil” olarak işaretlenir.
+                  </small>
+                </div>
+              ) : null}
             </article>
           );
         })}
+        {!competitions.length && !error ? (
+          <p className="participant-empty">
+            Henüz size ait bir yarışma bulunmuyor. Kriter profili yayımladığınızda yarışmanız burada görünür.
+          </p>
+        ) : null}
       </div>
     </section>
   );

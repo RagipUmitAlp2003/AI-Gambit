@@ -59,8 +59,37 @@ export function authConfigured(): boolean {
   }
 }
 
+export type RuntimeEnvironment = "production" | "development";
+
+let missingEnvWarned = false;
+
+/**
+ * Ortak ortam çıkarımı — GÜVENLİ VARSAYILAN ÜRETİMDİR (fail-closed).
+ *
+ * `APP_ENV`/`NODE_ENV` hiç tanımlı değilse ya da tanınmayan bir değer
+ * taşıyorsa sistem production sayılır: dev bootstrap kapanır, çerezler
+ * `Secure` olur, hata ayrıntısı maskelenir. Geliştirme kolaylıkları yalnızca
+ * AÇIKÇA development yazıldığında açılır. Uygulamadaki bütün ortam kontrolleri
+ * bu tek fonksiyondan geçer; dağınık `process.env` okuması yapılmaz.
+ */
+export function runtimeEnvironment(): RuntimeEnvironment {
+  const value = (env.APP_ENV ?? env.NODE_ENV ?? "").trim().toLowerCase();
+  if (value === "development" || value === "dev" || value === "test") return "development";
+  if (!value && !missingEnvWarned) {
+    missingEnvWarned = true;
+    console.warn("[env] APP_ENV/NODE_ENV tanımsız; güvenli varsayılan production uygulanıyor.");
+  }
+  // Eksik veya tanınmayan değer = güvenli varsayılan production.
+  return "production";
+}
+
 export function isProduction(): boolean {
-  return (env.APP_ENV ?? env.NODE_ENV ?? "").toLowerCase() === "production";
+  return runtimeEnvironment() === "production";
+}
+
+/** Geliştirme kolaylıkları yalnızca AÇIK development işaretiyle açılır. */
+export function isExplicitDevelopment(): boolean {
+  return runtimeEnvironment() === "development";
 }
 
 async function hmac(value: string): Promise<string> {

@@ -124,6 +124,17 @@ export const adminApi = {
 
   logout: () => request<{ signedOut: boolean }>("/api/admin/session", { method: "DELETE" }),
 
+  /**
+   * Parola değiştirme (madde 10 · must_change_password akışı): mevcut şifre
+   * sunucuda doğrulanır, bayrak temizlenir ve hesabın DİĞER oturumları
+   * düşürülür; bu oturum açık kalır.
+   */
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ account: AdminAccount }>("/api/admin/password", {
+      method: "POST",
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
+
   bootstrapStatus: () => request<BootstrapStatus>("/api/admin/bootstrap"),
 
   bootstrap: (input: { token: string; fullName: string; email: string; password?: string }) =>
@@ -152,6 +163,13 @@ export const adminApi = {
     request<{ account: AdminAccount }>(`/api/admin/accounts/${id}`, {
       method: "PATCH",
       body: JSON.stringify({ roleCode }),
+    }),
+
+  /** Pasife alınmış hesabı AYNI ROLLE yeniden aktifleştirir (rol sunucudaki kayıttan okunur). */
+  restoreAccount: (id: string) =>
+    request<{ account: AdminAccount }>(`/api/admin/accounts/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ restore: true }),
     }),
 
   revokeAccount: (id: string, reason: string) =>

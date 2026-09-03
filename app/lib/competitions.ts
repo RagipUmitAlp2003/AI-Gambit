@@ -1,4 +1,10 @@
 export type CompetitionEntry = {
+  /**
+   * Kararlı yarışma kimliği (competitions.id). Sunucudan gelen "başvuruya açık"
+   * listede bulunur; koddaki sabit havuz kayıtlarında yoktur. Başvuru bu
+   * kimlikle gönderilir ki aynı adlı iki yarışma birbirine karışmasın.
+   */
+  id?: string;
   name: string;
   field: string;
 };

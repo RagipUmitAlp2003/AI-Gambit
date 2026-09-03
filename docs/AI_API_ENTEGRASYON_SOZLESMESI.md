@@ -85,6 +85,7 @@ Model, `EXTRACTION_SCHEMA` ile sınırlandırılmış tek bir JSON döndürür:
 - Aynı aşamada aynı ad + sayfa veya aynı alıntı metnine sahip tekrarlar birleştirilir.
 - **`sourcePage` doğrulanmadan kaydedilmez.** 1 ile belgenin sayfa sayısı arasında tam sayı değilse kriter listeye alınmaz; düşen kriterlerin adları `analysisWarnings` içinde tek tek yazılır. Böylece "kaynak sayfa girilmedi" durumundaki bir profil hiç oluşmaz.
 - Doğrulamanın üst sınırı olan sayfa sayısı **sunucuda belgenin kendisinden** okunur (`app/lib/pdf-page-count.ts`); istemciden gelen değerle karşılaştırılıp büyüğü alınır. Eskiden yalnızca istemci değeri kullanılıyordu ve alan eksik geldiğinde sınır 1'e düşüp bütün kaynak sayfaları siliniyordu.
+- **Yapısal aday akışında (`decisions`) doğrulama kaynağı kaynak kimliği + birebir alıntıdır.** `sourceId` sunucunun seçtiği bir adaya karşılık gelmeli ve `sourceText` o bloğun özgün metninde birebir bulunmalıdır. Alıntısı doğrulanan bir karar, modelin `sourcePage` değeri bloğun sayfasıyla uyuşmasa bile düşürülmez: kritere **sunucu doğrulamalı blok sayfası** yazılır, düzeltme `diagnostics.correctedPages` ve `analysisWarnings` içinde raporlanır. Alıntısı doğrulanamayan karar ise sayfası doğru olsa bile reddedilir.
 - `description` en fazla 300, `sourceText` en fazla 320 karakterde kırpılır.
 - Liste aşama sırası ve kaynak sayfasına göre dizilir; kimlikler `criterion-1 … n` olarak yeniden verilir. Üst sınır 400 kriterdir.
 - Boş kriter listesi `analysisWarnings` içinde raporlanır.

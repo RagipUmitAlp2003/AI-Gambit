@@ -96,9 +96,80 @@ export function acquireAnalysisPermit(request: Request): RequestPermit {
   };
 }
 
+/**
+ * YALNIZCA başlık tabanlı HIZLI RED: Content-Length sınırın üzerindeyse true.
+ * Başlık eksikse (chunked aktarım) false döner; bu "güvenli" demek DEĞİLDİR —
+ * tek başına asla yeterli kapı sayılmaz. Gerçek bayt sınırı her zaman
+ * `readBodyWithLimit` ile akış sırasında uygulanır (madde 9).
+ */
 export function requestBodyTooLarge(request: Request, maxBytes: number): boolean {
   const raw = request.headers.get("content-length");
   if (!raw) return false;
   const length = Number(raw);
   return Number.isFinite(length) && length > maxBytes;
+}
+
+/** Ortam değişkeniyle ayarlanabilir bayt sınırı; geçersiz değer varsayılana düşer. */
+export function configuredByteLimit(name: string, fallback: number): number {
+  return positiveInteger(process.env[name], fallback);
+}
+
+/** 413 karşılığı: gövde bayt sınırı aşıldı. Boyut kapısı JSON parse'tan ÖNCE çalışır. */
+export class PayloadTooLargeError extends Error {
+  readonly maxBytes: number;
+  constructor(maxBytes: number) {
+    // Not: parametre özelliği (constructor(readonly ...)) kullanılmaz; Node'un
+    // strip-only TypeScript kipi (birim testleri) bu sözdizimini desteklemez.
+    super(`İstek gövdesi ${maxBytes} bayt sınırını aşıyor.`);
+    this.name = "PayloadTooLargeError";
+    this.maxBytes = maxBytes;
+  }
+}
+
+/**
+ * Gövdeyi AKIŞ hâlinde, gerçek baytları sayarak okur (madde 9):
+ *
+ *   - Content-Length sınırın ÜZERİNDEYSE akış hiç okunmadan reddedilir (hızlı yol).
+ *   - Content-Length EKSİKSE istek otomatik güvenli SAYILMAZ: baytlar tek tek
+ *     sayılır ve sınır aşıldığı anda okuma İPTAL edilir. 200 MB'lık chunked bir
+ *     gövde hiçbir zaman tamamen Worker belleğine alınmaz.
+ *   - Boyut kapısı her zaman JSON/multipart ayrıştırmasından ÖNCE çalışır.
+ */
+export async function readBodyWithLimit(request: Request, maxBytes: number): Promise<Uint8Array> {
+  if (requestBodyTooLarge(request, maxBytes)) throw new PayloadTooLargeError(maxBytes);
+  const body = request.body;
+  if (!body) return new Uint8Array(0);
+  const reader = body.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      // Erken iptal: kalan baytlar hiç okunmaz, bellek büyümez.
+      await reader.cancel("payload too large").catch(() => undefined);
+      throw new PayloadTooLargeError(maxBytes);
+    }
+    parts.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) { out.set(part, offset); offset += part.byteLength; }
+  return out;
+}
+
+/**
+ * Multipart gövdeler için AYNI kapı: sınırlanmış baytlar standart ayrıştırıcıya
+ * verilir. `request.formData()` yerine kullanılır; sınır aşımı ayrıştırma
+ * başlamadan `PayloadTooLargeError` fırlatır (handleError → 413).
+ */
+export async function readFormDataWithLimit(request: Request, maxBytes: number): Promise<FormData> {
+  const bytes = await readBodyWithLimit(request, maxBytes);
+  // Tip notu: lib.dom `BodyInit` genel Uint8Array'i doğrudan kabul etmiyor;
+  // çalışma zamanında (workerd + undici) ArrayBufferView geçerli bir gövdedir.
+  return await new Response(bytes as unknown as BodyInit, {
+    headers: { "content-type": request.headers.get("content-type") ?? "" },
+  }).formData();
 }

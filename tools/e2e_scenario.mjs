@@ -230,6 +230,132 @@ async function main() {
   const noDevSession = await post(newClient("x"), "/api/admin/dev-session", { roleCode: "00" });
   check("şifresiz rol kısayolu ucu yok", noDevSession.status === 404, `HTTP ${noDevSession.status}`);
 
+  /* --------------------------------------------------------------- 1b */
+  section("1b · Giriş tekdüzeliği ve dağıtık kaba kuvvet sınırı (madde 10)");
+  // HESAP KEŞFİNE KARŞI: bilinmeyen kullanıcı, yanlış şifre ve pasif hesap
+  // AYNI durum kodunu (401) ve AYNI mesajı almalıdır. Pasif hesap denemesi
+  // için koşuya özel geçici bir hesap açılıp pasife alınır; kalıcı iz bırakmaz.
+  const unknownLogin = await post(newClient("enum1"), "/api/admin/session", {
+    identifier: `hic-yok-${RUN}`, password: "yanlis-parola",
+  });
+  const wrongLogin = await post(newClient("enum2"), "/api/admin/session", {
+    identifier: ADMIN_IDENTIFIER, password: "yanlis-parola-2",
+  });
+  check("bilinmeyen kullanıcı 401 alıyor", unknownLogin.status === 401, `HTTP ${unknownLogin.status}`);
+  check("bilinmeyen kullanıcı ve yanlış şifre AYNI mesajı alıyor",
+    wrongLogin.status === 401
+      && Boolean(unknownLogin.json?.error)
+      && unknownLogin.json?.error === wrongLogin.json?.error,
+    JSON.stringify({ bilinmeyen: unknownLogin.json?.error, yanlis: wrongLogin.json?.error }));
+
+  const enumAccount = await post(admin, "/api/admin/accounts", {
+    fullName: "Tekdüzelik Deneği", email: `tekduze.${RUN}@senaryo.test`,
+    username: `tekduze${RUN}`, roleCode: "01", password: "senaryo1234",
+  });
+  check("tekdüzelik deneği hesabı açıldı", enumAccount.status === 201, JSON.stringify(enumAccount.json?.error));
+  if (enumAccount.status === 201) {
+    const revoked = await call(admin, `/api/admin/accounts/${enumAccount.json.account.id}?reason=senaryo`, {
+      method: "DELETE",
+    });
+    check("denek hesap pasife alındı", revoked.status === 200, JSON.stringify(revoked.json?.error));
+    const inactiveLogin = await post(newClient("enum3"), "/api/admin/session", {
+      identifier: `tekduze${RUN}`, password: "senaryo1234",
+    });
+    check("pasif hesap girişi tekdüze 401 (pasiflik sızmıyor)",
+      inactiveLogin.status === 401 && inactiveLogin.json?.error === unknownLogin.json?.error,
+      JSON.stringify({ durum: inactiveLogin.status, mesaj: inactiveLogin.json?.error }));
+  }
+
+  // DAĞITIK SINIR (D1): koşuya özel kimlikle 8 başarısız denemeden sonra 9.
+  // deneme 429 almalıdır. RUN etiketi anahtarı benzersiz kılar; sonraki
+  // koşular kirlenmez ve süresi geçen satırlar fırsatçı TTL ile silinir.
+  const bruteIdentifier = `kaba-kuvvet-${RUN}`;
+  let lastBrute = null;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    lastBrute = await post(newClient(`brute${attempt}`), "/api/admin/session", {
+      identifier: bruteIdentifier, password: `yanlis-${attempt}`,
+    });
+  }
+  check("ilk 8 başarısız deneme 401 alıyor", lastBrute?.status === 401, `HTTP ${lastBrute?.status}`);
+  const throttledLogin = await post(newClient("brute9"), "/api/admin/session", {
+    identifier: bruteIdentifier, password: "yanlis-9",
+  });
+  check("9. deneme dağıtık sayaçla 429 alıyor", throttledLogin.status === 429, `HTTP ${throttledLogin.status}`);
+
+  /* --------------------------------------------------------------- 1c */
+  section("1c · Zorunlu parola değişimi ve hesap açma atomikliği (madde 10)");
+  // Admin'in açtığı hesap geçici şifreyle gelir (mustChangePassword true);
+  // /api/admin/password ucu eski şifreyi doğrular, bayrağı temizler ve
+  // hesabın DİĞER oturumlarını düşürür. Tek kullanımlık şifre yalnızca
+  // tutarlı 201 yanıtında döner; mail durumu her koşulda doludur.
+  const pwUsername = `paroladenek${RUN}`;
+  const pwCreated = await post(admin, "/api/admin/accounts", {
+    fullName: "Parola Değişim Deneği", email: `parola.denek.${RUN}@senaryo.test`,
+    username: pwUsername, roleCode: "01",
+  });
+  check("geçici şifreli hesap 201 + tek kullanımlık şifreyle açıldı",
+    pwCreated.status === 201 && typeof pwCreated.json?.oneTimePassword === "string"
+      && pwCreated.json.oneTimePassword.length >= 8,
+    JSON.stringify(pwCreated.json?.error));
+  check("hesap açma yanıtında mail durumu dolu",
+    typeof pwCreated.json?.mail?.status === "string" && pwCreated.json.mail.status.length > 0,
+    JSON.stringify(pwCreated.json?.mail));
+  if (pwCreated.status === 201) {
+    const tempPassword = pwCreated.json.oneTimePassword;
+    check("yeni hesap zorunlu parola değişimiyle işaretli",
+      pwCreated.json.account?.mustChangePassword === true);
+
+    // İki ayrı istemci aynı geçici şifreyle girer; değişimden sonra yalnızca
+    // değişimi yapan oturum yaşamalıdır.
+    const pwClientA = newClient("pwA");
+    const pwClientB = newClient("pwB");
+    const pwLoginA = await post(pwClientA, "/api/admin/session", { identifier: pwUsername, password: tempPassword });
+    const pwLoginB = await post(pwClientB, "/api/admin/session", { identifier: pwUsername, password: tempPassword });
+    check("geçici şifreyle giriş yapılabiliyor (bayrak açık)",
+      pwLoginA.status === 200 && pwLoginA.json?.account?.mustChangePassword === true,
+      JSON.stringify(pwLoginA.json));
+    check("ikinci istemci de geçici şifreyle girdi", pwLoginB.status === 200, `HTTP ${pwLoginB.status}`);
+
+    const pwWrongCurrent = await post(pwClientA, "/api/admin/password", {
+      currentPassword: "yanlis-eski-parola", newPassword: `yeni-parola-${RUN}`,
+    });
+    check("yanlış mevcut şifreyle değişim 401 alıyor", pwWrongCurrent.status === 401, `HTTP ${pwWrongCurrent.status}`);
+    const pwShortNew = await post(pwClientA, "/api/admin/password", {
+      currentPassword: tempPassword, newPassword: "kisa",
+    });
+    check("kısa yeni şifre politika gereği 400 alıyor", pwShortNew.status === 400, `HTTP ${pwShortNew.status}`);
+
+    const pwChanged = await post(pwClientA, "/api/admin/password", {
+      currentPassword: tempPassword, newPassword: `yeni-parola-${RUN}`,
+    });
+    check("doğru geçici şifreyle değişim başarılı ve bayrak temiz",
+      pwChanged.status === 200 && pwChanged.json?.account?.mustChangePassword === false,
+      JSON.stringify(pwChanged.json));
+
+    const pwMeA = await get(pwClientA, "/api/admin/session");
+    check("değişimi yapan oturum açık kalıyor",
+      pwMeA.status === 200 && pwMeA.json?.account?.mustChangePassword === false, `HTTP ${pwMeA.status}`);
+    const pwMeB = await get(pwClientB, "/api/admin/session");
+    check("hesabın diğer eski oturumu düşürüldü (401)", pwMeB.status === 401, `HTTP ${pwMeB.status}`);
+
+    const pwOldLogin = await post(newClient("pwOld"), "/api/admin/session", {
+      identifier: pwUsername, password: tempPassword,
+    });
+    check("eski geçici şifreyle giriş artık reddediliyor", pwOldLogin.status === 401, `HTTP ${pwOldLogin.status}`);
+    const pwNewLogin = await post(newClient("pwNew"), "/api/admin/session", {
+      identifier: pwUsername, password: `yeni-parola-${RUN}`,
+    });
+    check("yeni şifreyle giriş başarılı ve bayrak temiz kalıyor",
+      pwNewLogin.status === 200 && pwNewLogin.json?.account?.mustChangePassword === false,
+      JSON.stringify(pwNewLogin.json));
+
+    // Denek hesap iz bırakmasın diye pasife alınır (1b'deki kalıpla aynı).
+    const pwRevoked = await call(admin, `/api/admin/accounts/${pwCreated.json.account.id}?reason=senaryo`, {
+      method: "DELETE",
+    });
+    check("parola deneği pasife alındı", pwRevoked.status === 200, JSON.stringify(pwRevoked.json?.error));
+  }
+
   /* ---------------------------------------------------------------- 2 */
   section("2 · Hesaplar ve rol bazlı yönlendirme");
   const staff = {};
@@ -384,6 +510,46 @@ async function main() {
   check("kaynak sayfa ilk değerinde kaldı", lockedCriterion?.sourcePage === 2, `sourcePage=${lockedCriterion?.sourcePage}`);
   check("kaynak alıntı ilk değerinde kaldı", !/ELLE DEĞİŞTİRİLMİŞ/.test(lockedCriterion?.sourceText ?? ""));
   check("sürüm hâlâ v1 (içerik değişmediği için)", tamperResult.json?.criteriaVersion?.criteriaVersion === 1);
+
+  /* --------------------------------------------------------------- 5b */
+  section("5b · Kimlik şeması değişse de kaynak kilidi tutar (madde 12)");
+  // Kilit eskiden yalnızca criterion.id ile eşleşiyordu; yeniden analiz kimlik
+  // biçimini değiştirdiğinde (criterion-N → içerik türevi kararlı kimlik)
+  // profil kilitsiz yayımlanabiliyordu. Bu blok KENDİ profilini açar: sunucu
+  // yeni profile kendi kimliğini verdiği için sonraki yayım yanıttaki
+  // profile.id ile yapılır ve diğer bölümlerin sürüm sayaçları etkilenmez.
+  const lockCompetitionName = `Senaryo Kaynak Kilidi Yarışması ${RUN}`;
+  const lockFirst = await post(competitions[0].manager.client, "/api/profiles", {
+    profile: profilePayload(lockCompetitionName, "Kilit", undefined),
+  });
+  const lockProfileId = lockFirst.json?.profile?.id;
+  check("kilit senaryosu profili yayımlandı (v1)",
+    lockFirst.status === 201 && Boolean(lockProfileId), JSON.stringify(lockFirst.json?.error ?? null));
+  if (lockProfileId) {
+    // Yeniden analiz simülasyonu: bütün kimlikler kararlı biçime döner, bir
+    // kriterin sayfası elle 99 yapılır; ALINTI DEĞİŞMEZ (alıntı anahtarı
+    // sourceText'ten üretilir ve aynı PDF'in yeniden analizinde sabittir).
+    const reanalyzed = profilePayload(lockCompetitionName, "Kilit", lockProfileId);
+    reanalyzed.criteria = reanalyzed.criteria.map((criterion, index) => ({
+      ...criterion,
+      id: `criterion-sayfa-${String(criterion.sourcePage ?? 0).padStart(2, "0")}-madde-${index + 1}`,
+      ...(criterion.name === "Rapor dili Türkçe" ? { sourcePage: 99 } : {}),
+    }));
+    const idSchemeResult = await post(competitions[0].manager.client, "/api/profiles", { profile: reanalyzed });
+    check("kimlik şeması değişse de kaynak kurcalaması yakalanıyor",
+      typeof idSchemeResult.json?.sourceLockWarning === "string"
+        && idSchemeResult.json.sourceLockWarning.includes("Rapor dili"),
+      JSON.stringify(idSchemeResult.json?.sourceLockWarning ?? idSchemeResult.json?.error ?? null));
+    const lockSaved = await get(competitions[0].manager.client, `/api/profiles?id=${encodeURIComponent(lockProfileId)}`);
+    const lockedByQuote = lockSaved.json?.profile?.profile?.criteria?.find(
+      (item) => item.sourceText === "Kilit raporu Türkçe hazırlanır.",
+    );
+    // criteriaHash kriter kimliğini içerdiği için sürüm ARTABİLİR; bu yüzden
+    // sürüm sayısına değil DEĞERLERE bakılır: kaynak alanları ilk yayımdaki
+    // değerinde kalmalıdır.
+    check("kimlik değişse de kaynak sayfa ilk değerinde kaldı",
+      lockedByQuote?.sourcePage === 2, `sourcePage=${lockedByQuote?.sourcePage}`);
+  }
 
   /* ---------------------------------------------------------------- 6 */
   section("6 · Katılımcı kaydı, R2 yükleme ve otomatik atama (madde 5)");
@@ -583,13 +749,31 @@ async function main() {
   check("karşılaştırılacak başka rapor yokken oran oluşturulmadı",
     targetSimilarity.json?.similarity?.level === "none" && targetSimilarity.json?.similarity?.approxPercent === null,
     JSON.stringify(targetSimilarity.json?.similarity));
-  check("normal/boş sonuç da alt not üretiyor",
-    /karşılaştırılabilecek başka güncel başvuru bulunmadığı/.test(targetSimilarity.json?.similarity?.note ?? ""));
+  check("boş havuz notu madde 7 cümlesini taşıyor ('Çalıştırılmadı' denmez)",
+    /Karşılaştırılabilecek başka güncel rapor henüz bulunmuyor\./.test(targetSimilarity.json?.similarity?.note ?? ""),
+    targetSimilarity.json?.similarity?.note);
 
   const wrongHash = await post(targetJudge.client, `/api/applications/${target.application.id}/similarity`, {
     pages: similarityPagesA, pdfHash: "0".repeat(64), skipEmbedding: true,
   });
   check("farklı PDF özetiyle gelen benzerlik metni reddediliyor", wrongHash.status === 409, `HTTP ${wrongHash.status}`);
+
+  // AKIŞLI BOYUT KAPISI (madde 9): 8 MB üstü gövde parse edilmeden 413 alır.
+  const oversizedSimilarity = await post(targetJudge.client, `/api/applications/${target.application.id}/similarity`, {
+    pages: [wordSequence("devasa", 5000), "x".repeat(9 * 1024 * 1024)], pdfHash: target.pdfHash, skipEmbedding: true,
+  });
+  check("8 MB üstü benzerlik gövdesi parse edilmeden 413 alıyor",
+    oversizedSimilarity.status === 413, `HTTP ${oversizedSimilarity.status}`);
+
+  // YETKİ (madde 9): yalnızca ATANMIŞ hakem benzerlik başlatabilir.
+  const strangerJudge = clients.judges.find((item) => item.account.id !== target.application.assignedJudgeId);
+  if (strangerJudge) {
+    const foreignSimilarity = await post(strangerJudge.client, `/api/applications/${target.application.id}/similarity`, {
+      pages: similarityPagesA, pdfHash: target.pdfHash, skipEmbedding: true,
+    });
+    check("atanmamış hakem benzerlik başlatamıyor (403)",
+      foreignSimilarity.status === 403, `HTTP ${foreignSimilarity.status}`);
+  }
 
   // Aynı yarışmadaki İKİNCİ başvuru raporu DOĞRUDAN KOPYALAMIŞ (madde 14 · senaryo 2).
   const peerApplication = applications.find((item) => item.competition === target.competition && item !== target);

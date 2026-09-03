@@ -1,4 +1,4 @@
-import { isCheckStage, isControlTypeCompatible, isCriterionControlType, isCriterionVerifiability, type CheckStage, type Criterion, type CriterionVerifiability, type ProfileExport, type SetupData, type TemplateProfile } from "./types";
+import { isCheckStage, isControlTypeCompatible, isCriterionVerifiability, resolveControlType, type CheckStage, type Criterion, type CriterionVerifiability, type ProfileExport, type SetupData, type TemplateProfile } from "./types";
 
 export const LAST_PROFILE_KEY = "kriter-atolyesi:last-profile";
 
@@ -54,7 +54,10 @@ export function upgradeLegacyCriterion(raw: Record<string, unknown>, index: numb
     ...(Array.isArray(raw.sourceIds)
       ? { sourceIds: raw.sourceIds.filter((item): item is string => typeof item === "string") }
       : {}),
-    ...(isCriterionControlType(raw.controlType) ? { controlType: raw.controlType } : {}),
+    // Alan eski profillerde hiç yoktur; aşamaya uygun varsayılan atanır.
+    // Aşamayla uyumsuz bir değer de varsayılana çekilir; böylece daha önce
+    // yayımlanmış profiller reddedilmeden yüklenmeye devam eder.
+    controlType: resolveControlType(stage, raw.controlType),
     sourcePage: Number.isInteger(page) && page > 0 ? page : null,
     sourceText: stringOr(raw.sourceText, ""),
     // Alan eski profillerde yoktur. Eski modelin "PDF aşaması dışı" saydığı

@@ -3,6 +3,8 @@ import { ConflictError, getDatabase, recordAudit, recordWorkflowEvent, recordWor
 import { COMPETITIONS, fold, type CompetitionEntry } from "./competitions";
 import type { AdminAccount, WorkflowEventInput } from "./admin-types";
 import { canUpdateProfile } from "./authorization";
+import { criteriaContentHash, criteriaHash } from "./criteria-hash";
+import { applySourceLock, buildSourceLockIndex, type SourceLockIndex } from "./source-lock";
 import { validateProfileExport } from "./profile-loader";
 import { findingRejectionAuditLine, judgeDecisionCounts, validateCriterionDecisions, visibleFindingsOf } from "./judge-review";
 import {
@@ -17,6 +19,7 @@ import {
   type SimilarityReport,
 } from "./types";
 import type { SimilarityFingerprint } from "./similarity-engine";
+import type { SimilarityChunkFeatures } from "./similarity-corroboration";
 import {
   APPLICATION_STATUSES,
   type ApplicationOutcome,
@@ -220,6 +223,50 @@ const WORKFLOW_SCHEMA = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_similarity_results_application
    ON similarity_results (application_id, analyzed_at DESC)`,
+  // Yarım kalan benzerlik koşusu (madde 8): büyük havuz partilere bölünür,
+  // süre bütçesi dolunca ilerleme buraya yazılır ve istemci koşuyu sürdürür.
+  // Ödenen embedding maliyeti CPU sınırı nedeniyle ASLA kaybolmaz: parçalar
+  // ve vektörler koşudan ÖNCE kalıcıdır (migrations/0013_similarity_flow.sql).
+  `CREATE TABLE IF NOT EXISTS similarity_runs (
+    id TEXT PRIMARY KEY,
+    application_id TEXT NOT NULL UNIQUE,
+    pdf_hash TEXT NOT NULL,
+    competition_key TEXT NOT NULL,
+    pipeline_version TEXT NOT NULL,
+    cursor_application_id TEXT NOT NULL DEFAULT '',
+    processed_peers INTEGER NOT NULL DEFAULT 0,
+    total_peers INTEGER NOT NULL DEFAULT 0,
+    pool_truncated INTEGER NOT NULL DEFAULT 0,
+    best_json TEXT NOT NULL DEFAULT 'null',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  // Resmî rapor şablonu deposu (GÖREV 3 · madde 3): YALNIZCA benzerlik
+  // filtresi içindir; kriter üretmez ve rapor uygunluğu kararı vermez. Eski
+  // sürümler SİLİNMEZ (is_current = 0): "benzerlik puanına katılmayan
+  // ortak/şablon içeriği" denetim için okunur kalır. PDF ve metin/shingle
+  // nesnesi R2'dedir (file_key / text_key); D1 yalnızca meta veriyi tutar.
+  `CREATE TABLE IF NOT EXISTS similarity_templates (
+    id TEXT PRIMARY KEY,
+    competition_id TEXT NOT NULL,
+    competition_key TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    pdf_hash TEXT NOT NULL,
+    file_key TEXT NOT NULL,
+    text_key TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    page_count INTEGER NOT NULL,
+    word_count INTEGER NOT NULL,
+    shingle_count INTEGER NOT NULL,
+    pipeline_version TEXT NOT NULL,
+    is_current INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT NOT NULL,
+    created_by_name TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (competition_key, version)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_similarity_templates_current
+   ON similarity_templates (competition_key, is_current, version DESC)`,
   `CREATE TABLE IF NOT EXISTS criteria_analysis_cache (
     cache_key TEXT PRIMARY KEY,
     document_hash TEXT NOT NULL,
@@ -332,6 +379,37 @@ const CRITERIA_COLUMNS: Array<{ name: string; definition: string }> = [
   { name: "verifiability", definition: "TEXT NOT NULL DEFAULT 'PDF_DENETLENEBILIR'" },
 ];
 
+/**
+ * Benzerlik v3 parça meta verisi (GÖREV 3 · madde 3-4; migrations/0010_similarity_v3.sql).
+ *
+ * `template_version` YALNIZCA denetim damgasıdır: embedding önbellek anahtarına
+ * GİRMEZ — şablon değişimi ücretli embedding çağrısını tekrarlatmaz, yalnızca
+ * benzerlik SONUÇLARINI "güncel değil" işaretler (kullanıcı kararı).
+ */
+const SIMILARITY_CHUNK_COLUMNS: Array<{ name: string; definition: string }> = [
+  { name: "template_version", definition: "INTEGER" },
+  { name: "block_start", definition: "INTEGER" },
+  { name: "block_end", definition: "INTEGER" },
+  { name: "chunk_kind", definition: "TEXT NOT NULL DEFAULT 'text'" },
+  { name: "is_template", definition: "INTEGER NOT NULL DEFAULT 0" },
+  // Benzerlik motoru (madde 5-6; migrations/0012_similarity_engine.sql):
+  // kelime akışı konumu (çift sayım önleyen aralık hesabı) + doğrulama
+  // özellikleri (embedding tek başına alarm üretemez). Eski satırlarda NULL
+  // kalırlar; okuma tarafı NULL'a dayanıklıdır.
+  { name: "word_start", definition: "INTEGER" },
+  { name: "feature_json", definition: "TEXT" },
+  // 64 bitlik işaret izi (madde 8; migrations/0013_similarity_flow.sql):
+  // pahalı kosinüs yalnızca iz uzaklığı eşiği geçen adaylara uygulanır. İz,
+  // kayıtlı vektörden ÜCRETSİZ üretilir; eski satırlarda NULL kalabilir.
+  { name: "embedding_sketch", definition: "TEXT" },
+];
+
+const SIMILARITY_RESULT_COLUMNS: Array<{ name: string; definition: string }> = [
+  { name: "template_version", definition: "INTEGER" },
+  { name: "is_stale", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { name: "stale_reason", definition: "TEXT" },
+];
+
 async function upgradeProfileTable(database: D1Database): Promise<void> {
   const columns = await database.prepare(`PRAGMA table_info(competition_profiles)`).all<{ name: string }>();
   const present = new Set((columns.results ?? []).map((row) => row.name));
@@ -391,6 +469,8 @@ async function workflowDatabase(): Promise<D1Database> {
         await upgradeCompetitionTable(database);
         await addMissingColumns(database, "evaluation_results", EVALUATION_RESULT_COLUMNS);
         await addMissingColumns(database, "criteria", CRITERIA_COLUMNS);
+        await addMissingColumns(database, "similarity_chunks", SIMILARITY_CHUNK_COLUMNS);
+        await addMissingColumns(database, "similarity_results", SIMILARITY_RESULT_COLUMNS);
       })
       .catch((error: unknown) => {
         workflowSchemaPromise = null;
@@ -477,6 +557,8 @@ type ApplicationRow = {
   deleted_at: string | null;
   deleted_by_name: string | null;
   deleted_reason: string | null;
+  similarity_is_stale: number | null;
+  similarity_stale_reason: string | null;
 };
 
 type TeamMemberRow = {
@@ -699,6 +781,12 @@ function toApplication(
     archivedAt: row.deleted_at ?? null,
     archivedByName: operations || view === "full" ? (row.deleted_by_name ?? null) : null,
     archivedReason: operations || view === "full" ? (row.deleted_reason ?? "") : "",
+    // "Güncel değil" işareti (madde 8): havuza yeni rapor geldiğinde ya da
+    // resmî şablon değiştiğinde hakem kartında bant gösterilir. Yalnızca
+    // hakem görünümüne taşınır; katılımcı benzerlik ayrıntısı görmez.
+    similarityStale: view === "full" && Number(row.similarity_is_stale) === 1,
+    similarityStaleReason: view === "full" && Number(row.similarity_is_stale) === 1
+      ? (row.similarity_stale_reason ?? "") : "",
     submittedAt: row.submitted_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
@@ -749,20 +837,8 @@ export class ProfileOwnershipError extends Error {
  *     yayımlarda istemci ne gönderirse göndersin sunucu ilk değeri geri koyar.
  * ------------------------------------------------------------------------- */
 
-/** Kriter setinin içeriğine bağlı, sıralamadan bağımsız kararlı özet. */
-export async function criteriaHash(criteria: Criterion[]): Promise<string> {
-  const canonical = criteria
-    .map((item) => [
-      item.id, item.name, item.stage, item.required ? "1" : "0",
-      item.description, item.controlType ?? "", item.sourceId ?? "", (item.sourceIds ?? []).join(","),
-      item.sourcePage === null ? "" : String(item.sourcePage),
-      item.sourceText, item.verifiability, item.active ? "1" : "0", item.origin,
-    ].join("␟"))
-    .sort()
-    .join("␞");
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
+/** Kriter seti özeti saf modüle taşındı (birim testlenebilirlik); dışa aktarım korunur. */
+export { criteriaHash } from "./criteria-hash";
 
 type CriteriaVersionRow = {
   id: string;
@@ -827,72 +903,32 @@ export async function listCriteriaVersions(profileId: string): Promise<CriteriaV
   return (result.results ?? []).map(toCriteriaVersion);
 }
 
-type SourceLock = {
-  sourcePage: number | null;
-  sourceText: string;
-  sourceId: string | null;
-  sourceIds: string[];
-  origin: Criterion["origin"];
-};
-
 /**
  * Kaynak sayfa / kaynak alıntı kilidi (madde 12).
  *
  * Bir kriterin kaynağı İLK yayımlandığı sürümde sabitlenir. Sonraki
  * yayımlarda istemci bu alanları değiştirse bile — arayüzde salt okunur
  * olmalarına rağmen isteği elle düzenleyerek — sunucu ilk değeri geri koyar.
- * Kaynak yanlışsa çözüm elle düzeltmek değil, "Yeniden analiz et" ya da
- * kriteri silip yeni kriter oluşturmaktır.
+ *
+ * Eşleştirme kimlik şemasına BAĞIMLI DEĞİLDİR: kriter önce id, sonra
+ * sourceId, en son alıntı anahtarıyla bulunur (bkz. app/lib/source-lock.ts).
+ * Böylece kimlik biçimi değişse de (konumsal `criterion-N` → içerik türevi
+ * kararlı kimlik) eski sürümlerin kilidi geçerli kalır. Kaynak yanlışsa çözüm
+ * elle düzeltmek değil, "Yeniden analiz et" ya da kriteri silip yeni kriter
+ * oluşturmaktır.
  */
-async function sourceLockFor(profileId: string): Promise<Map<string, SourceLock>> {
+async function sourceLockFor(profileId: string): Promise<SourceLockIndex> {
   const database = await workflowDatabase();
   const result = await database.prepare(
     `SELECT criteria_json FROM criteria_profile_versions
      WHERE criteria_profile_id = ? ORDER BY criteria_version ASC`,
   ).bind(profileId).all<{ criteria_json: string }>();
-  const lock = new Map<string, SourceLock>();
+  const versions: Criterion[][] = [];
   for (const row of result.results ?? []) {
-    for (const item of parseJson<Criterion[]>(row.criteria_json) ?? []) {
-      // İLK görülen sürüm kazanır; sonraki yayımlar kaynağı değiştiremez.
-      if (!item?.id || lock.has(item.id)) continue;
-      lock.set(item.id, {
-        sourcePage: typeof item.sourcePage === "number" ? item.sourcePage : null,
-        sourceText: typeof item.sourceText === "string" ? item.sourceText : "",
-        sourceId: typeof item.sourceId === "string" ? item.sourceId : null,
-        sourceIds: Array.isArray(item.sourceIds) ? item.sourceIds.filter((value): value is string => typeof value === "string") : [],
-        origin: item.origin === "manager" ? "manager" : "document",
-      });
-    }
+    const list = parseJson<Criterion[]>(row.criteria_json);
+    if (Array.isArray(list)) versions.push(list);
   }
-  return lock;
-}
-
-/** Kilitli kaynak alanlarını geri yazar; değiştirilmeye çalışılan kriterleri bildirir. */
-export function applySourceLock(
-  criteria: Criterion[],
-  lock: Map<string, SourceLock>,
-): { criteria: Criterion[]; reverted: string[] } {
-  const reverted: string[] = [];
-  const next = criteria.map((item) => {
-    const locked = lock.get(item.id);
-    if (!locked) return item;
-    const changed = (item.sourcePage ?? null) !== locked.sourcePage
-      || (item.sourceText ?? "") !== locked.sourceText
-      || (item.sourceId ?? null) !== locked.sourceId
-      || JSON.stringify(item.sourceIds ?? []) !== JSON.stringify(locked.sourceIds)
-      || item.origin !== locked.origin;
-    if (!changed) return item;
-    reverted.push(item.name);
-    return {
-      ...item,
-      sourcePage: locked.sourcePage,
-      sourceText: locked.sourceText,
-      sourceId: locked.sourceId,
-      sourceIds: locked.sourceIds,
-      origin: locked.origin,
-    };
-  });
-  return { criteria: next, reverted };
+  return buildSourceLockIndex(versions);
 }
 
 /**
@@ -911,9 +947,25 @@ async function publishCriteriaVersion(input: {
   const latest = await database.prepare(
     `SELECT * FROM criteria_profile_versions
      WHERE competition_key = ? ORDER BY criteria_version DESC LIMIT 1`,
-  ).bind(input.competitionKey).first<CriteriaVersionRow>();
-  if (latest && latest.criteria_hash === hash && latest.criteria_profile_id === input.profileId) {
-    return { version: toCriteriaVersion(latest), created: false };
+  ).bind(input.competitionKey).first<CriteriaVersionRow & { criteria_json: string }>();
+  if (latest && latest.criteria_profile_id === input.profileId) {
+    if (latest.criteria_hash === hash) return { version: toCriteriaVersion(latest), created: false };
+    /*
+     * GERİYE UYUMLULUK — içerik kimliği KANONİK özetle karşılaştırılır:
+     *   - eead40e öncesi satırlar ESKİ formülle (violationOutcome'lu) yazıldı;
+     *   - daha eski satırlar controlType alanı olmadan saklandı ve profil
+     *     yükleyicisi artık her kriterde aşama varsayılanını dolduruyor;
+     * bu yüzden ham özetler değişmemiş içerikte bile eşleşmeyebilir. İki taraf
+     * da `criteriaContentHash` ile (yok olan controlType == aşama varsayılanı)
+     * özetlenir; eşitse içerik değişmemiştir ve yeni sürüm AÇILMAZ — sahte
+     * sürüm, bağlı değerlendirmeleri 409'a düşürürdü. Yeni satır her zaman
+     * ham YENİ formül özetiyle (hash) yazılır.
+     */
+    const stored = parseJson<Criterion[]>(latest.criteria_json);
+    if (Array.isArray(stored) && stored.length
+      && (await criteriaContentHash(stored)) === (await criteriaContentHash(input.criteria))) {
+      return { version: toCriteriaVersion(latest), created: false };
+    }
   }
   const nextNumber = (Number(latest?.criteria_version) || 0) + 1;
   const id = crypto.randomUUID();
@@ -944,6 +996,13 @@ export type PublishedProfileResult = {
    * alınan kriterlerin adları (madde 12). Boş değilse arayüz uyarı gösterir.
    */
   sourceLockReverted: string[];
+  /**
+   * Önceki sürümlerde kaynak kilidi altındayken bu yayımda hiçbir gelen
+   * kriterle eşleşmeyen belge kaynaklı kriterlerin adları. Kriter silinmiş ya
+   * da kaynağı tanınmayacak kadar değiştirilmiş olabilir; sessizce düşmez,
+   * denetim izine olay yazılır.
+   */
+  sourceLockOrphaned: string[];
 };
 
 export async function submitProfileForReview(profile: ProfileExport, actor: AdminAccount): Promise<PublishedProfileResult> {
@@ -1076,11 +1135,26 @@ export async function submitProfileForReview(profile: ProfileExport, actor: Admi
         + `değere geri alındı: ${locked.reverted.slice(0, 5).join(", ")}`,
     }).catch((eventError) => console.error("[workflow] kaynak kilidi olayı kaydedilemedi", eventError));
   }
+  if (locked.orphaned.length) {
+    // Yansız ifade: silme meşru olabilir (yeniden analiz farklı alıntı seçmiş
+    // olabilir); olay kurcalama suçlaması değil, izlenebilirlik sinyalidir.
+    await recordWorkflowEvent({
+      subjectType: "profile",
+      subjectId: id,
+      event: "criteria_source_lock_unmatched",
+      actor,
+      detail: `${locked.orphaned.length} kriter önceki sürümlerde kaynak kilidi altındayken bu yayımda hiçbir `
+        + `kriterle eşleşmedi (kriter silinmiş ya da kaynağı tanınmayacak kadar değiştirilmiş olabilir): `
+        + `${locked.orphaned.slice(0, 5).join(", ")}`
+        + `${locked.orphaned.length > 5 ? ` ve ${locked.orphaned.length - 5} kriter daha` : ""}`,
+    }).catch((eventError) => console.error("[workflow] kaynak kilidi yetim olayı kaydedilemedi", eventError));
+  }
   return {
     profile: saved,
     criteriaVersion: published.version,
     versionCreated: published.created,
     sourceLockReverted: locked.reverted,
+    sourceLockOrphaned: locked.orphaned,
   };
 }
 
@@ -1181,6 +1255,22 @@ export async function findLatestProfileForCompetition(name: string): Promise<Com
 }
 
 /**
+ * Yarışma ANAHTARINA göre en güncel onaylı profil.
+ *
+ * Ada göre arama aynı adlı iki yarışmayı karıştırabilir; elde kesin bir
+ * `competition_key` varsa (ör. başvuru satırının kendi anahtarı) bu kullanılır.
+ */
+export async function findLatestProfileForCompetitionKey(key: string): Promise<CompetitionProfile | null> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT * FROM competition_profiles
+     WHERE competition_key = ? AND status = 'approved'
+     ORDER BY updated_at DESC LIMIT 1`,
+  ).bind(key).first<ProfileRow>();
+  return row ? toProfile(row) : null;
+}
+
+/**
  * Ada göre yarışma kaydı.
  *
  * DİKKAT — neden basit bir "en son güncellenen" sorgusu DEĞİL:
@@ -1206,6 +1296,20 @@ export async function findCompetitionWorkflow(name: string): Promise<Competition
               updated_at DESC
      LIMIT 1`,
   ).bind(name).first<CompetitionRow>();
+  return row ? toCompetition(row) : null;
+}
+
+/**
+ * Kararlı kimlikle TEK yarışma satırı.
+ *
+ * Aynı adla birden çok satır bulunabildiği için başvuru akışı ada değil bu
+ * kimliğe bağlanır; kabul kararı ve kriter profili aynı satırdan çözülür.
+ */
+export async function findCompetitionWorkflowById(id: string): Promise<CompetitionWorkflow | null> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT * FROM competitions WHERE id = ?`,
+  ).bind(id).first<CompetitionRow>();
   return row ? toCompetition(row) : null;
 }
 
@@ -1432,6 +1536,10 @@ export async function setCompetitionPriority(
  * satıra değil, "bu adla başvuruya AÇIK ve profili olan bir satır var mı"
  * sorusuna bakılır. Seçim listesini üreten `listOpenCompetitions` ile aynı
  * ölçüt; ikisi ayrışırsa yarışmacı listede görüp başvuramaz.
+ *
+ * NOT: Başvuru POST'u artık bu fonksiyonu KULLANMAZ; kabul kararını ve profili
+ * kararlı yarışma kimliğiyle TEK satırdan çözer (aynı adlı yarışmalar
+ * karışmasın diye). Fonksiyon diğer/eski çağıranlar için yerinde durur.
  */
 export async function competitionAcceptsApplications(name: string): Promise<boolean> {
   const database = await workflowDatabase();
@@ -1458,14 +1566,16 @@ export async function competitionAcceptsApplications(name: string): Promise<bool
  */
 export async function listOpenCompetitions(): Promise<CompetitionEntry[]> {
   const database = await workflowDatabase();
+  // İkincil sıralama (updated_at DESC) belirlenimcidir: aynı adla birden çok
+  // açık satır varsa ad başına HER ZAMAN aynı (en güncel) satırın kimliği döner.
   const result = await database.prepare(
-    `SELECT c.competition_name, p.category, p.stage
+    `SELECT c.id, c.competition_name, p.category, p.stage
      FROM competitions c
      LEFT JOIN competition_profiles p ON p.id = c.current_profile_id
      WHERE c.status = 'open' AND c.current_profile_id IS NOT NULL
        AND c.is_active = 1 AND c.deleted_at IS NULL
-     ORDER BY c.competition_name`,
-  ).all<{ competition_name: string; category: string | null; stage: string | null }>();
+     ORDER BY c.competition_name, c.updated_at DESC`,
+  ).all<{ id: string; competition_name: string; category: string | null; stage: string | null }>();
   const seen = new Set<string>();
   const entries: CompetitionEntry[] = [];
   for (const row of result.results ?? []) {
@@ -1473,6 +1583,9 @@ export async function listOpenCompetitions(): Promise<CompetitionEntry[]> {
     seen.add(row.competition_name);
     const registered = COMPETITIONS.find((item) => item.name === row.competition_name);
     entries.push({
+      // Kararlı yarışma kimliği: başvuru bu kimlikle gönderilir ki aynı adlı
+      // iki yarışmada başvuru yanlış/pasif kayda düşmesin.
+      id: row.id,
       name: row.competition_name,
       field: (row.category ?? "").trim() || (row.stage ?? "").trim() || registered?.field || "Başvuruya açık",
     });
@@ -1885,7 +1998,11 @@ const APPLICATION_SELECT = `SELECT a.*, d.applicant_full_name, d.team_name,
   c.is_active AS competition_is_active,
   (SELECT MAX(v.version_number) FROM submission_versions v WHERE v.application_id = a.id) AS current_version_number,
   (SELECT MAX(cv.criteria_version) FROM criteria_profile_versions cv
-    WHERE cv.competition_key = a.competition_key) AS current_criteria_version
+    WHERE cv.competition_key = a.competition_key) AS current_criteria_version,
+  (SELECT r.is_stale FROM similarity_results r WHERE r.application_id = a.id
+    ORDER BY r.analyzed_at DESC LIMIT 1) AS similarity_is_stale,
+  (SELECT r.stale_reason FROM similarity_results r WHERE r.application_id = a.id
+    ORDER BY r.analyzed_at DESC LIMIT 1) AS similarity_stale_reason
   FROM competition_applications a
   LEFT JOIN application_submission_details d ON d.application_id = a.id
   LEFT JOIN competitions c ON c.competition_key = a.competition_key`;
@@ -2065,13 +2182,14 @@ export async function saveAndListSimilarityFingerprints(
 ): Promise<StoredSimilarityPeer[] | "not_found" | "forbidden"> {
   const database = await workflowDatabase();
   const current = await database.prepare(
-    `SELECT a.competition_key, a.participant_name, a.current_version_id, a.assigned_judge_id,
+    `SELECT a.competition_key, a.participant_name, a.participant_id, a.current_version_id, a.assigned_judge_id,
             COALESCE(d.team_name, a.participant_name) AS participant_label
      FROM competition_applications a
      LEFT JOIN application_submission_details d ON d.application_id = a.id
      WHERE a.id = ?`,
   ).bind(applicationId).first<{
-    competition_key: string; participant_name: string; participant_label: string; current_version_id: string | null; assigned_judge_id: string | null;
+    competition_key: string; participant_name: string; participant_id: string; participant_label: string;
+    current_version_id: string | null; assigned_judge_id: string | null;
   }>();
   if (!current) return "not_found";
   if (actor.roleCode === "02" && current.assigned_judge_id !== actor.id) return "forbidden";
@@ -2087,10 +2205,25 @@ export async function saveAndListSimilarityFingerprints(
        fingerprint_json = excluded.fingerprint_json,
        updated_at = excluded.updated_at`,
   ).bind(applicationId, current.current_version_id, current.competition_key, current.participant_label, JSON.stringify(fingerprint), timestamp).run();
+  /*
+   * Eş izleri (madde 8): silinmiş/arşivlenmiş başvurular ve ESKİ PDF
+   * sürümlerinden kalan izler havuza GİRMEZ — iz, başvurunun geçerli
+   * sürümüne aitse sayılır (eski başvurularda current_version_id boş
+   * olabilir; o durumda kayıtlı iz olduğu gibi geçerlidir). Aynı takımın
+   * (aynı katılımcı hesabının) başka başvurusu "farklı takım benzerliği"
+   * sayılmaz. LIMIT büyük havuzlarda D1 yanıtını sınırlar.
+   */
   const rows = await database.prepare(
-    `SELECT application_id, participant_label, fingerprint_json
-     FROM submission_fingerprints WHERE competition_key = ? AND application_id <> ?`,
-  ).bind(current.competition_key, applicationId).all<{
+    `SELECT f.application_id, f.participant_label, f.fingerprint_json
+     FROM submission_fingerprints f
+     INNER JOIN competition_applications a
+       ON a.id = f.application_id AND a.deleted_at IS NULL
+       AND (a.current_version_id IS NULL OR f.submission_version_id IS NULL
+            OR a.current_version_id = f.submission_version_id)
+     WHERE f.competition_key = ? AND f.application_id <> ? AND a.participant_id <> ?
+     ORDER BY f.updated_at DESC
+     LIMIT 500`,
+  ).bind(current.competition_key, applicationId, current.participant_id).all<{
     application_id: string; participant_label: string; fingerprint_json: string;
   }>();
   return (rows.results ?? []).flatMap((row) => {
@@ -2221,8 +2354,8 @@ export async function resolveEvaluationContext(
 export async function markApplicationAnalyzing(id: string, judge: AdminAccount): Promise<"started" | "profile_missing" | "conflict"> {
   const database = await workflowDatabase();
   const current = await database.prepare(
-    `SELECT competition_name, profile_id, status, assigned_judge_id, evaluation_json FROM competition_applications WHERE id = ?`,
-  ).bind(id).first<{ competition_name: string; profile_id: string | null; status: string; assigned_judge_id: string | null; evaluation_json: string | null }>();
+    `SELECT competition_name, competition_key, profile_id, status, assigned_judge_id, evaluation_json FROM competition_applications WHERE id = ?`,
+  ).bind(id).first<{ competition_name: string; competition_key: string; profile_id: string | null; status: string; assigned_judge_id: string | null; evaluation_json: string | null }>();
   // Eski (puanlı, 1.0) AI sonucu taşıyan başvurular dört aşamalı ekranda
   // incelenemez; hakem kuyruğunda görünseler de yeniden analiz edilebilir.
   const legacyStuck = ["awaiting_judge", "judge_in_review"].includes(current?.status ?? "")
@@ -2230,9 +2363,11 @@ export async function markApplicationAnalyzing(id: string, judge: AdminAccount):
   if (!current || (!["assigned", "resubmitted", "analysis_failed"].includes(current.status) && !legacyStuck)) return "conflict";
   if (judge.roleCode === "02" && current.assigned_judge_id !== judge.id) return "conflict";
   // profile_id başvuru anında bağlanmış olsa bile hakem onayından geçmemiş olabilir;
-  // o durumda aynı yarışmanın onaylı profiline düşülür.
+  // o durumda AYNI yarışmanın onaylı profiline düşülür. Düşüş ada değil,
+  // başvurunun kendi `competition_key` değerine bakar: ada göre arama aynı adlı
+  // başka bir yarışmanın profilini bağlayabiliyordu.
   const linked = current.profile_id ? await findApprovedProfile(current.profile_id) : null;
-  const profile = linked ?? await findLatestProfileForCompetition(current.competition_name);
+  const profile = linked ?? await findLatestProfileForCompetitionKey(current.competition_key);
   if (!profile) return "profile_missing";
   const result = await database.prepare(
     `UPDATE competition_applications
@@ -2697,6 +2832,8 @@ export type SimilarityContext = {
   submissionVersionId: string | null;
   fileKey: string;
   participantLabel: string;
+  /** Başvuru sahibinin hesap kimliği: aynı takımın diğer başvuruları havuza girmez (madde 8). */
+  participantId: string;
   /** Şablon temizliğinde silinecek adlar: takım + başvuru sahibi + ekip üyeleri. */
   participantNames: string[];
   competitionName: string;
@@ -2711,6 +2848,7 @@ export async function resolveSimilarityContext(
   const database = await workflowDatabase();
   const row = await database.prepare(
     `SELECT a.id, a.competition_key, a.competition_name, a.assigned_judge_id, a.current_version_id,
+            a.participant_id,
             COALESCE(v.file_key, a.file_key) AS file_key,
             COALESCE(d.team_name, a.participant_name) AS participant_label,
             COALESCE(d.applicant_full_name, a.participant_name) AS applicant_full_name
@@ -2720,7 +2858,8 @@ export async function resolveSimilarityContext(
      WHERE a.id = ?`,
   ).bind(applicationId).first<{
     id: string; competition_key: string; competition_name: string; assigned_judge_id: string | null;
-    current_version_id: string | null; file_key: string; participant_label: string; applicant_full_name: string;
+    current_version_id: string | null; participant_id: string; file_key: string;
+    participant_label: string; applicant_full_name: string;
   }>();
   if (!row) return "not_found";
   if (actor.roleCode === "02" && row.assigned_judge_id !== actor.id) return "forbidden";
@@ -2733,6 +2872,7 @@ export async function resolveSimilarityContext(
     submissionVersionId: row.current_version_id,
     fileKey: row.file_key,
     participantLabel: row.participant_label,
+    participantId: row.participant_id,
     participantNames: [
       row.participant_label,
       row.applicant_full_name,
@@ -2747,15 +2887,38 @@ export type StoredSimilarityChunk = {
   chunkIndex: number;
   pageStart: number;
   pageEnd: number;
+  /** Parçanın bölüm başlığı; yapısal olmayan (yedek) yolda boş dizge. */
+  section: string;
   wordCount: number;
   textHash: string;
   minHash: number[];
   embedding: number[] | null;
+  /** Yapısal blok aralığı (paragraf/tablo konumu, madde 4); yedek yolda 0. */
+  blockStart: number;
+  blockEnd: number;
+  /** Tablo satırlarından üretilen parçalar ayrı işaretlenir (tablolar atılmaz). */
+  kind: "text" | "table";
+  /** Resmî şablon parçası: karşılaştırmaya girmez ama SİLİNMEZ (denetim, madde 3). */
+  isTemplate: boolean;
+  /** Üretim anındaki şablon sürümü; yalnızca denetim (önbellek anahtarına girmez). */
+  templateVersion: number | null;
+  /** Kelime akışı başlangıcı (madde 6 aralık hesabı); eski satırlarda null. */
+  wordStart: number | null;
+  /** Doğrulama özellikleri (madde 5 · Katman 2); eski satırlarda null. */
+  features: SimilarityChunkFeatures | null;
+  /** 64 bit işaret izi (madde 8 · CPU koruması); eski satırlarda null. */
+  sketch: string | null;
+  /** D1 satır kimliği; yalnızca iz geri yazımı için okunur (isteğe bağlı). */
+  rowId?: string;
 };
 
 /**
  * Embedding önbelleği okuması: aynı PDF sürümü + özet + model + boru hattı
  * sürümü için kayıtlı parçalar varsa embedding API'si YENİDEN ÇAĞRILMAZ.
+ *
+ * Anahtara ŞABLON SÜRÜMÜ dahil DEĞİLDİR (kullanıcı kararı): şablon değişimi
+ * yalnızca benzerlik SONUÇLARINI eskitir; parça/embedding önbelleği yerinde
+ * kalır ve şablon işaretleri okuyan taraf güncel şablonla yeniden hesaplar.
  */
 export async function findStoredSimilarityChunks(input: {
   submissionVersionId: string;
@@ -2765,28 +2928,51 @@ export async function findStoredSimilarityChunks(input: {
 }): Promise<StoredSimilarityChunk[] | null> {
   const database = await workflowDatabase();
   const result = await database.prepare(
-    `SELECT chunk_index, page_start, page_end, word_count, text_hash, min_hash_json,
-            embedding_json, embedding_model
+    `SELECT id, chunk_index, page_start, page_end, section, word_count, text_hash, min_hash_json,
+            embedding_json, embedding_model, block_start, block_end, chunk_kind,
+            is_template, template_version, word_start, feature_json, embedding_sketch
      FROM similarity_chunks
      WHERE submission_version_id = ? AND pdf_hash = ? AND pipeline_version = ?
      ORDER BY chunk_index ASC`,
-  ).bind(input.submissionVersionId, input.pdfHash, input.pipelineVersion).all<{
-    chunk_index: number; page_start: number; page_end: number; word_count: number;
-    text_hash: string; min_hash_json: string; embedding_json: string | null; embedding_model: string | null;
-  }>();
+  ).bind(input.submissionVersionId, input.pdfHash, input.pipelineVersion).all<SimilarityChunkRow>();
   const rows = result.results ?? [];
   if (!rows.length) return null;
-  return rows.map((row) => ({
+  return rows.map((row) => toStoredSimilarityChunk(row, input.embeddingModel));
+}
+
+type SimilarityChunkRow = {
+  id: string; chunk_index: number; page_start: number; page_end: number; section: string | null;
+  word_count: number; text_hash: string; min_hash_json: string;
+  embedding_json: string | null; embedding_model: string | null;
+  block_start: number | null; block_end: number | null; chunk_kind: string | null;
+  is_template: number | null; template_version: number | null;
+  word_start: number | null; feature_json: string | null; embedding_sketch: string | null;
+};
+
+/** Ortak satır eşlemesi; `embeddingModel` verilirse farklı modelin vektörü null okunur. */
+function toStoredSimilarityChunk(row: SimilarityChunkRow, embeddingModel?: string): StoredSimilarityChunk {
+  return {
     chunkIndex: Number(row.chunk_index) || 0,
     pageStart: Number(row.page_start) || 1,
     pageEnd: Number(row.page_end) || 1,
+    section: row.section ?? "",
     wordCount: Number(row.word_count) || 0,
     textHash: row.text_hash,
     minHash: parseJson<number[]>(row.min_hash_json) ?? [],
     // Farklı embedding modellerinin vektörleri birbiriyle karşılaştırılmaz.
-    embedding: row.embedding_model === input.embeddingModel
+    embedding: embeddingModel === undefined || row.embedding_model === embeddingModel
       ? parseJson<number[]>(row.embedding_json) : null,
-  }));
+    blockStart: Number(row.block_start) || 0,
+    blockEnd: Number(row.block_end) || 0,
+    kind: row.chunk_kind === "table" ? "table" : "text",
+    isTemplate: Number(row.is_template) === 1,
+    templateVersion: row.template_version === null || row.template_version === undefined
+      ? null : Number(row.template_version),
+    wordStart: row.word_start === null || row.word_start === undefined ? null : Number(row.word_start),
+    features: parseJson<SimilarityChunkFeatures>(row.feature_json),
+    sketch: row.embedding_sketch ?? null,
+    rowId: row.id,
+  };
 }
 
 /** Parça kayıtlarını (embedding önbelleği) bu PDF sürümü için yazar; eski sürüm satırları temizlenir. */
@@ -2798,6 +2984,8 @@ export async function saveSimilarityChunks(input: {
   pipelineVersion: string;
   embeddingModel: string | null;
   embeddingDim: number | null;
+  /** Üretim anındaki resmî şablon sürümü; yalnızca denetim damgası (madde 3). */
+  templateVersion: number | null;
   chunks: StoredSimilarityChunk[];
 }): Promise<void> {
   const database = await workflowDatabase();
@@ -2810,8 +2998,10 @@ export async function saveSimilarityChunks(input: {
     `INSERT INTO similarity_chunks
       (id, application_id, submission_version_id, competition_key, pdf_hash, chunk_index,
        page_start, page_end, section, word_count, text_hash, min_hash_json,
-       embedding_json, embedding_model, embedding_dim, pipeline_version, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)`,
+       embedding_json, embedding_model, embedding_dim, pipeline_version, created_at,
+       template_version, block_start, block_end, chunk_kind, is_template, word_start, feature_json,
+       embedding_sketch)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     `${input.submissionVersionId}:${input.pipelineVersion}:${chunk.chunkIndex}`,
     input.applicationId,
@@ -2821,6 +3011,7 @@ export async function saveSimilarityChunks(input: {
     chunk.chunkIndex,
     chunk.pageStart,
     chunk.pageEnd,
+    chunk.section,
     chunk.wordCount,
     chunk.textHash,
     JSON.stringify(chunk.minHash),
@@ -2829,6 +3020,14 @@ export async function saveSimilarityChunks(input: {
     chunk.embedding ? input.embeddingDim : null,
     input.pipelineVersion,
     timestamp,
+    input.templateVersion,
+    chunk.blockStart,
+    chunk.blockEnd,
+    chunk.kind,
+    chunk.isTemplate ? 1 : 0,
+    chunk.wordStart,
+    chunk.features ? JSON.stringify(chunk.features) : null,
+    chunk.sketch ?? null,
   ));
   // D1 tek batch'te sınırlı ifade kabul eder; parçalar dilimlenerek yazılır.
   for (let start = 0; start < statements.length; start += 20) {
@@ -2852,32 +3051,17 @@ export type SimilarityPeerChunks = {
  *   - Eski PDF sürümleri havuza girmez (yalnızca current_version_id eşleşir).
  *   - Arşivlenmiş başvurular ve arşivlenmiş yarışmalar havuza girmez.
  */
-export async function listPeerSimilarityChunks(
-  competitionKey: string,
-  excludeApplicationId: string,
-  pipelineVersion: string,
-): Promise<SimilarityPeerChunks[]> {
-  const database = await workflowDatabase();
-  const result = await database.prepare(
-    `SELECT s.application_id, s.submission_version_id, s.chunk_index, s.page_start, s.page_end,
-            s.word_count, s.text_hash, s.min_hash_json, s.embedding_json, s.embedding_model,
-            a.assigned_judge_id,
-            COALESCE(d.team_name, a.participant_name) AS participant_label
-     FROM similarity_chunks s
-     INNER JOIN competition_applications a
-       ON a.id = s.application_id AND a.current_version_id = s.submission_version_id
-     LEFT JOIN application_submission_details d ON d.application_id = a.id
-     WHERE s.competition_key = ? AND s.application_id <> ? AND s.pipeline_version = ?
-       AND a.deleted_at IS NULL
-     ORDER BY s.application_id, s.chunk_index ASC`,
-  ).bind(competitionKey, excludeApplicationId, pipelineVersion).all<{
-    application_id: string; submission_version_id: string; chunk_index: number;
-    page_start: number; page_end: number; word_count: number; text_hash: string;
-    min_hash_json: string; embedding_json: string | null; embedding_model: string | null;
-    assigned_judge_id: string | null; participant_label: string;
-  }>();
+type PeerChunkJoinRow = SimilarityChunkRow & {
+  application_id: string;
+  submission_version_id: string;
+  assigned_judge_id: string | null;
+  participant_label: string;
+};
+
+/** Eş satırlarını başvuru başına gruplar; şablon işareti eşin kendi damgasıdır. */
+function groupPeerChunkRows(rows: PeerChunkJoinRow[]): SimilarityPeerChunks[] {
   const byApplication = new Map<string, SimilarityPeerChunks>();
-  for (const row of result.results ?? []) {
+  for (const row of rows) {
     const entry = byApplication.get(row.application_id) ?? {
       applicationId: row.application_id,
       participantLabel: row.participant_label,
@@ -2885,18 +3069,258 @@ export async function listPeerSimilarityChunks(
       assignedJudgeId: row.assigned_judge_id,
       chunks: [],
     };
-    entry.chunks.push({
-      chunkIndex: Number(row.chunk_index) || 0,
-      pageStart: Number(row.page_start) || 1,
-      pageEnd: Number(row.page_end) || 1,
-      wordCount: Number(row.word_count) || 0,
-      textHash: row.text_hash,
-      minHash: parseJson<number[]>(row.min_hash_json) ?? [],
-      embedding: parseJson<number[]>(row.embedding_json),
-    });
+    // Eşin kendi koşusunda damgalanmış şablon işareti: eş yeniden analiz
+    // edilene kadar geçerli sinyaldir; çoğunluk sezgisiyle OR'lanır.
+    entry.chunks.push(toStoredSimilarityChunk(row));
     byApplication.set(row.application_id, entry);
   }
   return [...byApplication.values()];
+}
+
+const PEER_CHUNK_SELECT = `SELECT s.id, s.application_id, s.submission_version_id, s.chunk_index,
+        s.page_start, s.page_end, s.section, s.word_count, s.text_hash, s.min_hash_json,
+        s.embedding_json, s.embedding_model, s.block_start, s.block_end, s.chunk_kind,
+        s.is_template, s.template_version, s.word_start, s.feature_json, s.embedding_sketch,
+        a.assigned_judge_id,
+        COALESCE(d.team_name, a.participant_name) AS participant_label
+ FROM similarity_chunks s
+ INNER JOIN competition_applications a
+   ON a.id = s.application_id AND a.current_version_id = s.submission_version_id
+ LEFT JOIN application_submission_details d ON d.application_id = a.id`;
+
+export async function listPeerSimilarityChunks(
+  competitionKey: string,
+  excludeApplicationId: string,
+  pipelineVersion: string,
+): Promise<SimilarityPeerChunks[]> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(
+    `${PEER_CHUNK_SELECT}
+     WHERE s.competition_key = ? AND s.application_id <> ? AND s.pipeline_version = ?
+       AND a.deleted_at IS NULL
+     ORDER BY s.application_id, s.chunk_index ASC`,
+  ).bind(competitionKey, excludeApplicationId, pipelineVersion).all<PeerChunkJoinRow>();
+  return groupPeerChunkRows(result.results ?? []);
+}
+
+/** Havuz sıralamasında kullanılan eş başvuru künyesi (madde 8). */
+export type SimilarityPeerApp = {
+  applicationId: string;
+  participantLabel: string;
+  submissionVersionId: string;
+  assignedJudgeId: string | null;
+};
+
+/**
+ * Karşılaştırma havuzundaki eş başvuruların KÜNYE listesi (madde 8):
+ * parça yükü olmadan, kararlı `application_id` sırasıyla ve üst sınırla.
+ *
+ *   - Yalnızca aynı yarışma anahtarındaki GEÇERLİ PDF sürümleri (current join).
+ *   - Arşivlenmiş başvurular dışarıda (deleted_at IS NULL).
+ *   - AYNI TAKIMIN başka başvurusu "farklı takım benzerliği" SAYILMAZ:
+ *     aynı katılımcı hesabının (participant_id) diğer başvuruları havuza girmez.
+ */
+export async function listSimilarityPeerApps(
+  competitionKey: string,
+  excludeApplicationId: string,
+  excludeParticipantId: string | null,
+  pipelineVersion: string,
+  limit: number,
+): Promise<SimilarityPeerApp[]> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(
+    `SELECT DISTINCT s.application_id, s.submission_version_id, a.assigned_judge_id,
+            COALESCE(d.team_name, a.participant_name) AS participant_label
+     FROM similarity_chunks s
+     INNER JOIN competition_applications a
+       ON a.id = s.application_id AND a.current_version_id = s.submission_version_id
+     LEFT JOIN application_submission_details d ON d.application_id = a.id
+     WHERE s.competition_key = ? AND s.application_id <> ? AND s.pipeline_version = ?
+       AND a.deleted_at IS NULL AND (? = '' OR a.participant_id <> ?)
+     ORDER BY s.application_id ASC
+     LIMIT ?`,
+  ).bind(
+    competitionKey, excludeApplicationId, pipelineVersion,
+    excludeParticipantId ?? "", excludeParticipantId ?? "", Math.max(1, limit),
+  ).all<{
+    application_id: string; submission_version_id: string;
+    assigned_judge_id: string | null; participant_label: string;
+  }>();
+  return (result.results ?? []).map((row) => ({
+    applicationId: row.application_id,
+    participantLabel: row.participant_label,
+    submissionVersionId: row.submission_version_id,
+    assignedJudgeId: row.assigned_judge_id,
+  }));
+}
+
+/** D1 IN(...) sorgularının parametre üst sınırı; sorgu bu dilimlerle bölünür. */
+const SIMILARITY_ID_SLICE = 40;
+
+/**
+ * Havuz istatistik geçişi (madde 8): şablon çoğunluk sezgisi ve havuz-ortak
+ * özellik süzgeci için parça META verisi okunur — embedding vektörleri
+ * YÜKLENMEZ (bellek koruması). Sonuç: başvuru başına (textHash, features) listesi.
+ */
+export async function listSimilarityPoolStats(
+  applicationIds: string[],
+  pipelineVersion: string,
+): Promise<Map<string, Array<{ textHash: string; features: SimilarityChunkFeatures | null }>>> {
+  const database = await workflowDatabase();
+  const byApplication = new Map<string, Array<{ textHash: string; features: SimilarityChunkFeatures | null }>>();
+  for (let start = 0; start < applicationIds.length; start += SIMILARITY_ID_SLICE) {
+    const slice = applicationIds.slice(start, start + SIMILARITY_ID_SLICE);
+    const placeholders = slice.map(() => "?").join(", ");
+    const result = await database.prepare(
+      `SELECT s.application_id, s.text_hash, s.feature_json
+       FROM similarity_chunks s
+       INNER JOIN competition_applications a
+         ON a.id = s.application_id AND a.current_version_id = s.submission_version_id
+       WHERE s.pipeline_version = ? AND a.deleted_at IS NULL
+         AND s.application_id IN (${placeholders})`,
+    ).bind(pipelineVersion, ...slice).all<{
+      application_id: string; text_hash: string; feature_json: string | null;
+    }>();
+    for (const row of result.results ?? []) {
+      const list = byApplication.get(row.application_id) ?? [];
+      list.push({ textHash: row.text_hash, features: parseJson<SimilarityChunkFeatures>(row.feature_json) });
+      byApplication.set(row.application_id, list);
+    }
+  }
+  return byApplication;
+}
+
+/** Parti başına tam parça yükü okunan en fazla başvuru (D1 yanıt boyutu koruması). */
+const SIMILARITY_CHUNK_QUERY_APPS = 5;
+
+/**
+ * Verilen eş başvuruların TAM parça satırları (embedding dahil); parti
+ * döngüsünün tek pahalı okumasıdır ve başvuru dilimleriyle sınırlanır (madde 8).
+ */
+export async function listSimilarityChunkBatch(
+  competitionKey: string,
+  applicationIds: string[],
+  pipelineVersion: string,
+): Promise<SimilarityPeerChunks[]> {
+  const database = await workflowDatabase();
+  const rows: PeerChunkJoinRow[] = [];
+  for (let start = 0; start < applicationIds.length; start += SIMILARITY_CHUNK_QUERY_APPS) {
+    const slice = applicationIds.slice(start, start + SIMILARITY_CHUNK_QUERY_APPS);
+    const placeholders = slice.map(() => "?").join(", ");
+    const result = await database.prepare(
+      `${PEER_CHUNK_SELECT}
+       WHERE s.competition_key = ? AND s.pipeline_version = ?
+         AND a.deleted_at IS NULL AND s.application_id IN (${placeholders})
+       ORDER BY s.application_id, s.chunk_index ASC`,
+    ).bind(competitionKey, pipelineVersion, ...slice).all<PeerChunkJoinRow>();
+    rows.push(...(result.results ?? []));
+  }
+  return groupPeerChunkRows(rows);
+}
+
+/**
+ * İşaret izi geri yazımı (madde 8): kayıtlı vektörden ÜCRETSİZ üretilen iz,
+ * bir sonraki koşuda yeniden hesaplanmasın diye satıra işlenir. YALNIZCA
+ * embedding_sketch günceller; embedding vektörüne asla dokunmaz.
+ */
+export async function saveSimilarityChunkSketches(
+  entries: Array<{ rowId: string; sketch: string }>,
+): Promise<void> {
+  if (!entries.length) return;
+  const database = await workflowDatabase();
+  const statements = entries.map((entry) => database.prepare(
+    `UPDATE similarity_chunks SET embedding_sketch = ? WHERE id = ? AND embedding_sketch IS NULL`,
+  ).bind(entry.sketch, entry.rowId));
+  for (let start = 0; start < statements.length; start += 20) {
+    await database.batch(statements.slice(start, start + 20));
+  }
+}
+
+/* --------------------- Yarım kalan benzerlik koşusu (madde 8) --------------------- */
+
+export type SimilarityRunState = {
+  id: string;
+  applicationId: string;
+  pdfHash: string;
+  competitionKey: string;
+  pipelineVersion: string;
+  /** İşlenen SON eş başvurunun kimliği; devam bundan SONRAKİ eşlerle başlar. */
+  cursorApplicationId: string;
+  processedPeers: number;
+  totalPeers: number;
+  poolTruncated: boolean;
+  /** Şimdiye dek görülen en iyi eş sonucu (rota kendi biçiminde saklar). */
+  bestJson: string;
+};
+
+/** Sahipsiz koşular bu süreden sonra geçersiz sayılır ve silinir. */
+const SIMILARITY_RUN_TTL_MS = 30 * 60 * 1000;
+
+/** Başvurunun açık benzerlik koşusu; süresi dolmuşsa silinir ve null döner. */
+export async function findSimilarityRun(applicationId: string): Promise<SimilarityRunState | null> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT id, application_id, pdf_hash, competition_key, pipeline_version,
+            cursor_application_id, processed_peers, total_peers, pool_truncated,
+            best_json, updated_at
+     FROM similarity_runs WHERE application_id = ?`,
+  ).bind(applicationId).first<{
+    id: string; application_id: string; pdf_hash: string; competition_key: string;
+    pipeline_version: string; cursor_application_id: string; processed_peers: number;
+    total_peers: number; pool_truncated: number; best_json: string; updated_at: string;
+  }>();
+  if (!row) return null;
+  const age = Date.now() - Date.parse(row.updated_at);
+  if (!Number.isFinite(age) || age > SIMILARITY_RUN_TTL_MS) {
+    await deleteSimilarityRun(applicationId).catch(() => undefined);
+    return null;
+  }
+  return {
+    id: row.id,
+    applicationId: row.application_id,
+    pdfHash: row.pdf_hash,
+    competitionKey: row.competition_key,
+    pipelineVersion: row.pipeline_version,
+    cursorApplicationId: row.cursor_application_id ?? "",
+    processedPeers: Number(row.processed_peers) || 0,
+    totalPeers: Number(row.total_peers) || 0,
+    poolTruncated: Number(row.pool_truncated) === 1,
+    bestJson: row.best_json ?? "null",
+  };
+}
+
+/** Koşu ilerlemesini yazar (başvuru başına tek satır; upsert). */
+export async function upsertSimilarityRun(state: SimilarityRunState): Promise<void> {
+  const database = await workflowDatabase();
+  const timestamp = new Date().toISOString();
+  await database.prepare(
+    `INSERT INTO similarity_runs
+      (id, application_id, pdf_hash, competition_key, pipeline_version,
+       cursor_application_id, processed_peers, total_peers, pool_truncated,
+       best_json, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(application_id) DO UPDATE SET
+       id = excluded.id,
+       pdf_hash = excluded.pdf_hash,
+       competition_key = excluded.competition_key,
+       pipeline_version = excluded.pipeline_version,
+       cursor_application_id = excluded.cursor_application_id,
+       processed_peers = excluded.processed_peers,
+       total_peers = excluded.total_peers,
+       pool_truncated = excluded.pool_truncated,
+       best_json = excluded.best_json,
+       updated_at = excluded.updated_at`,
+  ).bind(
+    state.id, state.applicationId, state.pdfHash, state.competitionKey, state.pipelineVersion,
+    state.cursorApplicationId, state.processedPeers, state.totalPeers, state.poolTruncated ? 1 : 0,
+    state.bestJson, timestamp, timestamp,
+  ).run();
+}
+
+/** Koşu kaydını siler (tamamlanma ya da yeni analiz başlangıcı). */
+export async function deleteSimilarityRun(applicationId: string): Promise<void> {
+  const database = await workflowDatabase();
+  await database.prepare(`DELETE FROM similarity_runs WHERE application_id = ?`).bind(applicationId).run();
 }
 
 /**
@@ -2913,11 +3337,38 @@ export async function findSimilarityResult(
 ): Promise<SimilarityReport | null> {
   const database = await workflowDatabase();
   const row = await database.prepare(
-    `SELECT report_json FROM similarity_results
+    `SELECT report_json, is_stale, stale_reason, template_version, competition_key
+     FROM similarity_results
      WHERE application_id = ? AND pdf_hash = ?
      ORDER BY analyzed_at DESC LIMIT 1`,
-  ).bind(applicationId, pdfHash).first<{ report_json: string }>();
-  return row ? parseJson<SimilarityReport>(row.report_json) : null;
+  ).bind(applicationId, pdfHash).first<{
+    report_json: string; is_stale: number | null; stale_reason: string | null;
+    template_version: number | null; competition_key: string;
+  }>();
+  if (!row) return null;
+  const report = parseJson<SimilarityReport>(row.report_json);
+  if (!report) return null;
+  /*
+   * "Güncel değil" işareti (madde 3): satırdaki bayrak esas alınır; kemer-askı
+   * olarak sonucun şablon sürümü güncel şablonla da karşılaştırılır (toplu
+   * UPDATE bir nedenle atlanmışsa bile eski sonuç güncel gibi görünmez).
+   * Eski report_json kayıtları alan eklenmeden aynen döner.
+   */
+  let stale = Number(row.is_stale) === 1;
+  let staleReason = row.stale_reason ?? "";
+  if (!stale) {
+    const current = await findCurrentSimilarityTemplate(row.competition_key).catch(() => null);
+    const currentVersion = current?.version ?? null;
+    const resultVersion = row.template_version === null || row.template_version === undefined
+      ? null : Number(row.template_version);
+    if (currentVersion !== resultVersion) {
+      stale = true;
+      staleReason = "Resmî şablon sürümü değişti; benzerlik analizini yenileyin.";
+    }
+  }
+  return stale
+    ? { ...report, stale: true, staleReason: staleReason || "Benzerlik sonucu güncel değil; analizi yenileyin." }
+    : report;
 }
 
 /** Rapor düzeyi benzerlik sonucunu bu PDF sürümüne bağlı olarak kaydeder. */
@@ -2933,18 +3384,22 @@ export async function saveSimilarityResult(input: {
   approxPercent: number | null;
   closestApplicationId: string | null;
   closestLabel: string | null;
+  /** Analiz anındaki resmî şablon sürümü; şablon yoksa null (madde 3). */
+  templateVersion: number | null;
   reportJson: string;
 }): Promise<void> {
   const database = await workflowDatabase();
-  // Aynı başvurunun önceki sonucu geçersizdir; yeni sonuç tek satır olarak durur.
+  // Aynı başvurunun önceki sonucu geçersizdir; yeni sonuç tek satır olarak durur
+  // ve HER ZAMAN güncel yazılır (is_stale = 0).
   await database.batch([
     database.prepare(`DELETE FROM similarity_results WHERE application_id = ?`).bind(input.applicationId),
     database.prepare(
       `INSERT INTO similarity_results
         (id, application_id, submission_version_id, pdf_hash, competition_key, minhash_version,
          embedding_model, embedding_dim, pipeline_version, status, approx_percent,
-         closest_application_id, closest_label, report_json, analyzed_at)
-       VALUES (?, ?, ?, ?, ?, 'minhash-v1', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         closest_application_id, closest_label, template_version, is_stale, stale_reason,
+         report_json, analyzed_at)
+       VALUES (?, ?, ?, ?, ?, 'minhash-v1', ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)`,
     ).bind(
       crypto.randomUUID(),
       input.applicationId,
@@ -2958,10 +3413,201 @@ export async function saveSimilarityResult(input: {
       input.approxPercent,
       input.closestApplicationId,
       input.closestLabel,
+      input.templateVersion,
       input.reportJson,
       new Date().toISOString(),
     ),
   ]);
+}
+
+/* ------------------------------------------------------------------------- *
+ * Resmî rapor şablonu deposu (GÖREV 3 · madde 3)
+ *
+ * Bu şablon kriter üretmez ve rapor uygunluğu kararı vermez; YALNIZCA
+ * benzerlik analizinde beklenen ortak metni ayıklar. Kriter akışının emekli
+ * templateProfile alanıyla (types.ts) İLGİSİZDİR.
+ *
+ * Sürümleme: her içerik değişikliği yeni satır açar (version + 1); eski satır
+ * is_current = 0 olur ama SİLİNMEZ (denetim). Şablon sürümü değiştiğinde aynı
+ * yarışma anahtarındaki benzerlik sonuçları "güncel değil" işaretlenir;
+ * embedding önbelleğine DOKUNULMAZ (kullanıcı kararı: yeniden embedding yok).
+ * ------------------------------------------------------------------------- */
+
+export type SimilarityTemplateRecord = {
+  id: string;
+  competitionId: string;
+  competitionKey: string;
+  version: number;
+  pdfHash: string;
+  fileKey: string;
+  textKey: string;
+  fileName: string;
+  pageCount: number;
+  wordCount: number;
+  shingleCount: number;
+  /** Shingle/katlama kural sürümü (similarity-text · TEMPLATE_FILTER_VERSION). */
+  filterVersion: string;
+  isCurrent: boolean;
+  createdByName: string | null;
+  createdAt: string;
+};
+
+type SimilarityTemplateRow = {
+  id: string; competition_id: string; competition_key: string; version: number;
+  pdf_hash: string; file_key: string; text_key: string; file_name: string;
+  page_count: number; word_count: number; shingle_count: number;
+  pipeline_version: string; is_current: number; created_by_name: string | null;
+  created_at: string;
+};
+
+function toSimilarityTemplate(row: SimilarityTemplateRow): SimilarityTemplateRecord {
+  return {
+    id: row.id,
+    competitionId: row.competition_id,
+    competitionKey: row.competition_key,
+    version: Number(row.version) || 0,
+    pdfHash: row.pdf_hash,
+    fileKey: row.file_key,
+    textKey: row.text_key,
+    fileName: row.file_name,
+    pageCount: Number(row.page_count) || 0,
+    wordCount: Number(row.word_count) || 0,
+    shingleCount: Number(row.shingle_count) || 0,
+    filterVersion: row.pipeline_version,
+    isCurrent: Number(row.is_current) === 1,
+    createdByName: row.created_by_name,
+    createdAt: row.created_at,
+  };
+}
+
+/** Yarışma satırından anahtar/ad çözümü; şablon uçları kimlikle çalışır (aynı adlı yarışmalar karışmaz). */
+export async function findCompetitionKeyById(
+  competitionId: string,
+): Promise<{ competitionKey: string; competitionName: string; archived: boolean } | null> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT competition_key, competition_name, deleted_at FROM competitions WHERE id = ?`,
+  ).bind(competitionId).first<{ competition_key: string; competition_name: string; deleted_at: string | null }>();
+  return row
+    ? { competitionKey: row.competition_key, competitionName: row.competition_name, archived: Boolean(row.deleted_at) }
+    : null;
+}
+
+/** Yarışmanın GEÇERLİ resmî şablonu; yüklenmemişse null. */
+export async function findCurrentSimilarityTemplate(
+  competitionKey: string,
+): Promise<SimilarityTemplateRecord | null> {
+  const database = await workflowDatabase();
+  const row = await database.prepare(
+    `SELECT * FROM similarity_templates
+     WHERE competition_key = ? AND is_current = 1
+     ORDER BY version DESC LIMIT 1`,
+  ).bind(competitionKey).first<SimilarityTemplateRow>();
+  return row ? toSimilarityTemplate(row) : null;
+}
+
+/**
+ * Yarışma havuzundaki benzerlik sonuçlarını "güncel değil" işaretler.
+ *
+ * ORTAK giriş noktasıdır: şablon sürümü değişimi burayı kullanır; "havuza yeni
+ * rapor geldi" eskitmesi de (madde 8) AYNI kolonlar üzerinden bu işlevi
+ * çağırmalıdır — ikinci bir eskitme mekanizması büyütülmez. Sonuç satırı
+ * silinmez; hakem yeniden analizle tazeler.
+ */
+export async function markSimilarityResultsStale(
+  competitionKey: string,
+  reason: string,
+  excludeApplicationId?: string,
+): Promise<void> {
+  const database = await workflowDatabase();
+  if (excludeApplicationId) {
+    await database.prepare(
+      `UPDATE similarity_results SET is_stale = 1, stale_reason = ?
+       WHERE competition_key = ? AND is_stale = 0 AND application_id <> ?`,
+    ).bind(reason, competitionKey, excludeApplicationId).run();
+    return;
+  }
+  await database.prepare(
+    `UPDATE similarity_results SET is_stale = 1, stale_reason = ?
+     WHERE competition_key = ? AND is_stale = 0`,
+  ).bind(reason, competitionKey).run();
+}
+
+/**
+ * Resmî şablonu kaydeder (madde 3).
+ *
+ *   - Aynı pdf_hash + aynı filtre sürümü yeniden yüklenirse sürüm ARTMAZ
+ *     (idempotent; mevcut kayıt `unchanged: true` ile döner).
+ *   - İçerik değiştiyse TEK batch içinde: eski satırlar is_current = 0 olur
+ *     (silinmez), yeni satır version = max + 1 ile yazılır ve aynı yarışma
+ *     anahtarındaki benzerlik sonuçları "güncel değil" işaretlenir.
+ */
+export async function saveSimilarityTemplate(input: {
+  competitionId: string;
+  competitionKey: string;
+  pdfHash: string;
+  fileKey: string;
+  textKey: string;
+  fileName: string;
+  pageCount: number;
+  wordCount: number;
+  shingleCount: number;
+  filterVersion: string;
+  actor: AdminAccount;
+}): Promise<{ template: SimilarityTemplateRecord; unchanged: boolean }> {
+  const database = await workflowDatabase();
+  const current = await findCurrentSimilarityTemplate(input.competitionKey);
+  if (current && current.pdfHash === input.pdfHash && current.filterVersion === input.filterVersion) {
+    return { template: current, unchanged: true };
+  }
+  const maxRow = await database.prepare(
+    `SELECT COALESCE(MAX(version), 0) AS max_version FROM similarity_templates WHERE competition_key = ?`,
+  ).bind(input.competitionKey).first<{ max_version: number }>();
+  const version = (Number(maxRow?.max_version) || 0) + 1;
+  const id = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
+  const staleReason = `Resmî şablon sürümü değişti (v${version}); benzerlik analizini yenileyin.`;
+  await database.batch([
+    database.prepare(
+      `UPDATE similarity_templates SET is_current = 0 WHERE competition_key = ?`,
+    ).bind(input.competitionKey),
+    database.prepare(
+      `INSERT INTO similarity_templates
+        (id, competition_id, competition_key, version, pdf_hash, file_key, text_key, file_name,
+         page_count, word_count, shingle_count, pipeline_version, is_current,
+         created_by, created_by_name, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+    ).bind(
+      id, input.competitionId, input.competitionKey, version, input.pdfHash,
+      input.fileKey, input.textKey, input.fileName, input.pageCount, input.wordCount,
+      input.shingleCount, input.filterVersion, input.actor.id, input.actor.fullName, timestamp,
+    ),
+    // Şablon değişimi SONUÇLARI eskitir; parça/embedding önbelleğine dokunmaz.
+    database.prepare(
+      `UPDATE similarity_results SET is_stale = 1, stale_reason = ?
+       WHERE competition_key = ? AND is_stale = 0`,
+    ).bind(staleReason, input.competitionKey),
+  ]);
+  return {
+    template: {
+      id,
+      competitionId: input.competitionId,
+      competitionKey: input.competitionKey,
+      version,
+      pdfHash: input.pdfHash,
+      fileKey: input.fileKey,
+      textKey: input.textKey,
+      fileName: input.fileName,
+      pageCount: input.pageCount,
+      wordCount: input.wordCount,
+      shingleCount: input.shingleCount,
+      filterVersion: input.filterVersion,
+      isCurrent: true,
+      createdByName: input.actor.fullName,
+      createdAt: timestamp,
+    },
+    unchanged: false,
+  };
 }
 
 export async function saveCriteriaExtractionRun(

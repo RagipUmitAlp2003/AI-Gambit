@@ -7,7 +7,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { upgradeLegacyCriterion, validateProfileExport } from "../app/lib/profile-loader.ts";
-import type { Criterion, SetupData } from "../app/lib/types.ts";
+import {
+  CHECK_STAGE_IDS,
+  criterionControlTypesForStage,
+  defaultControlTypeForStage,
+  resolveControlType,
+  type Criterion,
+  type SetupData,
+} from "../app/lib/types.ts";
 
 const setup: SetupData = {
   competition: "Roket Yarışması",
@@ -85,7 +92,8 @@ test("2.0 profili olduğu gibi kabul edilir", () => {
   assert.ok(result);
   assert.equal(result.version, "2.0");
   assert.equal(result.profileId, "profile-1");
-  assert.deepEqual(result.criteria, [criterion()]);
+  // controlType alanı eksikse aşamanın varsayılanı atanır; kalan alanlar aynen korunur.
+  assert.deepEqual(result.criteria, [{ ...criterion(), controlType: "ICERIK_VARLIGI" }]);
   assert.equal(result.setup.reportLanguage, "Türkçe");
   assert.equal(result.templateProfile, undefined);
   assert.equal(result.sourceDocument.pages, 20);
@@ -162,6 +170,8 @@ test("upgradeLegacyCriterion boş kayıt için güvenli yedekler üretir", () =>
     required: false,
     description: "Kuralın nasıl kontrol edileceğini açıklayın.",
     violationOutcome: "Belgede belirtilmemiş",
+    // Alan boş kayıtta yoktur; aşamanın (criteria_evidence) varsayılanı atanır.
+    controlType: "KANIT_KONTROLU",
     // Kanıt yeri belirtilmemiş boş kayıt PDF denetlenebilir sayılır (madde 4).
     verifiability: "PDF_DENETLENEBILIR",
     sourcePage: null,
@@ -200,4 +210,69 @@ test("1.0 profilinde aşama ve zorunluluk alanı aranmaz", () => {
   assert.ok(result);
   assert.equal(result.criteria[0].stage, "criteria_evidence");
   assert.equal(result.criteria[0].required, false);
+});
+
+test("1.0 yükseltme: controlType aşamaya uygun varsayılan alır", () => {
+  const { profile: result, error } = validateProfileExport(legacyProfile([
+    legacy({ id: "l1", type: "format_rule" }),
+    legacy({ id: "l2", type: "mandatory_content" }),
+    legacy({ id: "l3", type: "qualitative_score" }),
+    legacy({ id: "l4", stage: "category_similarity" }),
+  ]));
+  assert.equal(error, "");
+  assert.ok(result);
+  // Eski profillerde alan hiç yoktur; her kriter aşamasının varsayılanını almalıdır.
+  assert.deepEqual(result.criteria.map((item) => item.controlType), [
+    "KANIT_KONTROLU",
+    "ICERIK_VARLIGI",
+    "KANIT_KONTROLU",
+    "ANLAMSAL_UYGUNLUK",
+  ]);
+});
+
+test("geçersiz veya aşamayla uyumsuz controlType varsayılana düşürülür", () => {
+  // Sözlükte olmayan değer: aşamanın (criteria_evidence) varsayılanına düşer.
+  assert.equal(upgradeLegacyCriterion(legacy({ controlType: "SACMA" }), 0).controlType, "KANIT_KONTROLU");
+  // Geçerli enum değeri ama aşamayla uyumsuz: yine varsayılana düşer.
+  assert.equal(
+    upgradeLegacyCriterion(legacy({ stage: "criteria_evidence", controlType: "BIREBIR_BASLIK" }), 0).controlType,
+    "KANIT_KONTROLU",
+  );
+  // Aşamayla uyumlu değer olduğu gibi korunur.
+  assert.equal(
+    upgradeLegacyCriterion(legacy({ stage: "headings_content", controlType: "BIREBIR_BASLIK" }), 0).controlType,
+    "BIREBIR_BASLIK",
+  );
+});
+
+test("2.0 profili: controlType eksikse varsayılan atanır, uyumsuzsa reddedilir", () => {
+  // Eksik alan: kabul edilir ve aşamanın varsayılanı atanır.
+  const { profile: result, error } = validateProfileExport(profile());
+  assert.equal(error, "");
+  assert.ok(result);
+  assert.equal(result.criteria[0].controlType, "ICERIK_VARLIGI");
+  // Aşamayla uyumsuz açık değer: 2.0 doğrulaması katı kalır ve profili reddeder.
+  const { profile: rejected, error: rejectionError } = validateProfileExport(
+    profile({ criteria: [{ ...criterion(), controlType: "KANIT_KONTROLU" }] }),
+  );
+  assert.equal(rejected, null);
+  assert.match(rejectionError, /kriter kayıtları bozuk/);
+});
+
+test("defaultControlTypeForStage ve resolveControlType aşama sözleşmesine uyar", () => {
+  assert.equal(defaultControlTypeForStage("language_template"), "KANIT_KONTROLU");
+  assert.equal(defaultControlTypeForStage("headings_content"), "ICERIK_VARLIGI");
+  assert.equal(defaultControlTypeForStage("category_similarity"), "ANLAMSAL_UYGUNLUK");
+  assert.equal(defaultControlTypeForStage("criteria_evidence"), "KANIT_KONTROLU");
+  for (const stage of CHECK_STAGE_IDS) {
+    // Varsayılan, aşamanın izin verdiği yöntemlerden biri olmalıdır.
+    assert.ok(criterionControlTypesForStage(stage).includes(defaultControlTypeForStage(stage)), stage);
+    // Eksik veya tanınmayan değer varsayılana düşer.
+    assert.equal(resolveControlType(stage, undefined), defaultControlTypeForStage(stage), stage);
+    assert.equal(resolveControlType(stage, "PUAN_KONTROLU"), defaultControlTypeForStage(stage), stage);
+    // Aşamayla uyumlu her değer olduğu gibi geri döner.
+    for (const value of criterionControlTypesForStage(stage)) {
+      assert.equal(resolveControlType(stage, value), value, `${stage}:${value}`);
+    }
+  }
 });

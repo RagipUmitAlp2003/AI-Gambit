@@ -171,6 +171,9 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
     try {
       const result = await workflowApi.submitApplication({
         competitionName: selectedCompetition.name,
+        // Kararlı yarışma kimliği: açık listeden gelen kayıtta bulunur; aynı adlı
+        // iki yarışmada başvurunun yanlış/pasif kayda düşmesini önler.
+        competitionId: selectedCompetition.id,
         applicantFullName: applicantFullName.trim(),
         teamName: teamName.trim(),
         teamMembers: members,

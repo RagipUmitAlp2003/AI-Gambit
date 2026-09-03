@@ -1,4 +1,5 @@
 import { ConflictError, DatabaseUnavailableError, findSessionAccount } from "./admin-db";
+import { PayloadTooLargeError, configuredByteLimit, readBodyWithLimit } from "./request-guard";
 import { ReportStorageUnavailableError } from "./workflow-db";
 import { ASSIGNABLE_ROLE_CODES, isRoleCode } from "./admin-roles";
 import { PERMISSIONS, type Permission } from "./authorization";
@@ -122,6 +123,10 @@ export function handleError(error: unknown): Response {
       { storageUnavailable: true },
     );
   }
+  if (error instanceof PayloadTooLargeError) {
+    // Boyut kapısı ayrıştırmadan ÖNCE çalışır (madde 9); 400'e düşürülmez.
+    return jsonError(413, "İstek gövdesi izin verilen boyutu aşıyor.");
+  }
   if (error instanceof ValidationError) {
     return jsonError(400, error.message);
   }
@@ -167,9 +172,30 @@ function describeUnexpected(error: unknown): string {
   return message.slice(0, 300);
 }
 
-export async function readJson(request: Request): Promise<Record<string, unknown>> {
+/** Ortak JSON gövde tavanı (madde 9): bütün küçük JSON uçları için bol pay. */
+export const DEFAULT_JSON_BODY_BYTES = 2 * 1024 * 1024;
+
+/**
+ * JSON gövdeyi BOYUT KAPISINDAN geçirerek okur (madde 9): gerçek baytlar akış
+ * sırasında sayılır, sınır aşımı ayrıştırma başlamadan 413'e gider
+ * (`PayloadTooLargeError` → handleError). Content-Length eksik olan istek
+ * otomatik güvenli sayılmaz. Varsayılan tavan REQUEST_JSON_MAX_BYTES ortam
+ * değişkeniyle ayarlanabilir; benzerlik gibi büyük uçlar kendi tavanını verir.
+ */
+export async function readJson(
+  request: Request,
+  maxBytes = configuredByteLimit("REQUEST_JSON_MAX_BYTES", DEFAULT_JSON_BODY_BYTES),
+): Promise<Record<string, unknown>> {
+  let bytes: Uint8Array;
   try {
-    const body = await request.json();
+    bytes = await readBodyWithLimit(request, maxBytes);
+  } catch (error) {
+    // KRİTİK: boyut aşımı 400'e DÜŞÜRÜLMEZ; handleError bunu 413'e çevirir.
+    if (error instanceof PayloadTooLargeError) throw error;
+    throw new ValidationError("İstek gövdesi okunamadı; geçerli bir JSON gönderin.");
+  }
+  try {
+    const body: unknown = JSON.parse(new TextDecoder().decode(bytes));
     if (!body || typeof body !== "object" || Array.isArray(body)) {
       throw new Error("Gövde bir nesne olmalı.");
     }

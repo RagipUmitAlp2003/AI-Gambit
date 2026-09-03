@@ -50,6 +50,33 @@ export async function PATCH(request: Request, context: Context): Promise<Respons
     const current = await findAccountById(id);
     if (!current) return jsonError(404, "Hesap bulunamadı.");
 
+    // AÇIK "ETKİNLEŞTİR" İŞLEMİ: pasife alınmış hesap AYNI ROLLE geri açılır.
+    // Rol istemciden değil VERİ TABANINDAKİ kayıttan alınır; bu yüzden bütün
+    // roller (00/01/02/03/04) için tek tip çalışır ve rol yükseltme riski yoktur.
+    // Rol değiştirme akışına (aşağıdaki assertRoleCode yolu) dokunmaz.
+    if (body.restore === true) {
+      if (current.status !== "revoked") return jsonError(409, "Hesap zaten aktif.");
+      const restored = await restoreAccount(id, current.roleCode);
+      if (!restored.ok) return mutationFailure(restored);
+
+      // Hakem hesabı geri açıldıysa bekleyen başvurular otomatik dağıtılır.
+      if (restored.account.roleCode === "02" && restored.account.status === "active") {
+        await assignPendingApplications().catch((assignError) =>
+          console.error("[workflow] hakem etkinleştirme sonrası bekleyen atama", assignError));
+      }
+
+      await recordAudit({
+        actorId: auth.account.id,
+        actorEmail: auth.account.email,
+        actorRole: auth.account.roleCode,
+        action: "account_restored",
+        targetType: "account",
+        targetId: id,
+        detail: `${current.roleCode} → ${current.roleCode} · ${restored.account.email}`,
+      });
+      return json({ account: restored.account });
+    }
+
     // ADMIN KORUMASI: Rol atama yetkisi yalnızca 01, 02 ve 04 içindir. Bir
     // Admin (00) hesabının rolü panelden değiştirilemez; aksi hâlde ilk sistem
     // Admin hesabı 01'e çevrilerek etkisiz bırakılabilirdi. Pasife alınmış bir

@@ -489,6 +489,7 @@ export function buildSimilarityCheck(reportText: string, peers: SimilarityPeer[]
       method: "deterministic",
       detail: "Havuzda karşılaştırılacak başka analiz edilmiş rapor yok. Karşılaştırma her analizde o anki havuza göre yapılır; sonradan eklenen raporlarla karşılaştırmak için bu raporu yeniden analiz edin.",
       evidence: [],
+      similarity: { percent: null, closestTeam: null },
     };
   }
   let topPeer = peers[0];
@@ -513,22 +514,49 @@ export function buildSimilarityCheck(reportText: string, peers: SimilarityPeer[]
         ? "Anlamlı metin örtüşmesi bulunmadı."
         : "Sistem intihal kararı vermez; inceleme için işaretlendi."),
     evidence: [],
+    // Yapılandırılmış sonuç (madde 6): oran/takım buradan okunur, cümleden değil.
+    similarity: { percent, closestTeam: topPeer.label },
   };
 }
 
 /**
- * Benzerlik ön kontrolünü 3. aşama sonucuna çevirir. Yüzde ve en yakın takım
- * kontrol metninden okunur (istemci ve sunucu havuzu aynı kalıbı yazar).
+ * Benzerlik ön kontrolünü 3. aşama sonucuna çevirir (madde 6).
+ *
+ * Yüzde ve en yakın takım YAPILANDIRILMIŞ `check.similarity` alanından okunur;
+ * gösterim cümlesi ASLA yeniden ayrıştırılmaz — "Takım %98 Vizyon" gibi bir
+ * takım adı oranı bozamaz. Yalnızca bu alanı taşımayan ESKİ kayıtlar için
+ * cümle sonundaki kurallı "(%NN)" kuyruğunu okuyan sertleştirilmiş bir yedek
+ * bulunur (SON parantezli yüzde; takım adındaki serbest "%" işaretleri değil).
  * Benzerlik hiçbir zaman tek başına KRİTİK_HATA doğurmaz.
  */
 export function similarityResultOf(check: PreCheck | null | undefined): SimilarityResult | null {
   if (!check || check.kind !== "similarity") return null;
-  const percentMatch = check.detail.match(/%\s?(\d{1,3})/);
-  const teamMatch = check.detail.match(/En yakın eşleşme:\s*(.+?)\s*\(%/) ?? check.detail.match(/"(.+?)"\s+ile\s+%/);
+  if (check.similarity !== undefined) {
+    return {
+      status: check.status,
+      percent: check.status !== "skipped" ? check.similarity?.percent ?? null : null,
+      closestTeam: check.similarity?.closestTeam ?? null,
+      detail: check.detail,
+    };
+  }
+  // GERİYE UYUM YEDEĞİ: eski kayıtların iki üreticisi de yüzdeyi her zaman
+  // "(%NN)" biçimli parantezli kuyrukla yazar; SON eşleşme alınır ki takım
+  // adının içindeki "(%7)" gibi bir dizge bile yanlış okunamaz.
+  const percentTail = [...check.detail.matchAll(/\(%(\d{1,3})\)/g)].pop() ?? null;
+  let closestTeam: string | null = null;
+  const labelMarker = "En yakın eşleşme:";
+  const labelStart = check.detail.indexOf(labelMarker);
+  if (percentTail && labelStart >= 0 && (percentTail.index ?? 0) > labelStart) {
+    closestTeam = check.detail.slice(labelStart + labelMarker.length, percentTail.index).trim() || null;
+  }
+  if (!closestTeam) {
+    const legacyTeam = check.detail.match(/"(.+?)"\s+ile\s+%/);
+    closestTeam = legacyTeam ? legacyTeam[1].trim() : null;
+  }
   return {
     status: check.status,
-    percent: percentMatch && check.status !== "skipped" ? Math.min(100, Number(percentMatch[1])) : null,
-    closestTeam: teamMatch ? teamMatch[1].trim() : null,
+    percent: percentTail && check.status !== "skipped" ? Math.min(100, Number(percentTail[1])) : null,
+    closestTeam,
     detail: check.detail,
   };
 }

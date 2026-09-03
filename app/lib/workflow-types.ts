@@ -233,6 +233,13 @@ export type CompetitionApplication = {
   archivedAt: string | null;
   archivedByName: string | null;
   archivedReason: string;
+  /**
+   * Benzerlik sonucu "güncel değil" mi (GÖREV 3 · madde 8)? Havuza yeni rapor
+   * geldiğinde ya da resmî şablon değiştiğinde işaretlenir; yalnızca hakem
+   * görünümünde doludur. Eski istemciler alanı görmezden gelir (isteğe bağlı).
+   */
+  similarityStale?: boolean;
+  similarityStaleReason?: string;
   submittedAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -320,4 +327,19 @@ export type TimelineEntry = {
   actorRole: RoleCode | null;
   detail: string;
   createdAt: string;
+};
+
+/**
+ * Resmî rapor şablonunun panel/istemci görünümü (GÖREV 3 · madde 3).
+ *
+ * Yalnızca BENZERLİK filtresi içindir: kriter üretmez, rapor uygunluğu kararı
+ * vermez; benzerlik analizinde beklenen ortak metni ayıklar. Kriter akışının
+ * emekli templateProfile alanıyla (types.ts) İLGİSİZDİR.
+ */
+export type SimilarityTemplateInfo = {
+  version: number;
+  fileName: string;
+  pageCount: number;
+  wordCount: number;
+  uploadedAt: string;
 };

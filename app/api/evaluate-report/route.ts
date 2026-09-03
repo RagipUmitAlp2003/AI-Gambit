@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { handleError, requirePermission } from "../../lib/admin-guard";
-import { acquireAnalysisPermit, requestBodyTooLarge } from "../../lib/request-guard";
+import { PayloadTooLargeError, acquireAnalysisPermit, readFormDataWithLimit, requestBodyTooLarge } from "../../lib/request-guard";
 import { pdfIntegrityError } from "../../lib/pdf-integrity";
 import { reportBucket, resolveEvaluationContext, type EvaluationContext } from "../../lib/workflow-db";
 import {
@@ -24,6 +24,7 @@ import {
   RULE_VERDICTS,
   VERIFIABILITY_LABELS,
   isCheckStage,
+  resolveControlType,
   verifiedOutsidePdf,
   type AnalysisDiagnostics,
   type Criterion,
@@ -71,7 +72,7 @@ const PRIMARY_MODEL = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
 /** Modele verilen tek isteğin zaman sınırı. */
 const GENERATION_TIMEOUT_MS = 150_000;
 /** Talimat/şema değiştiğinde artırılır; eski önbellek kayıtları geçersiz olur. */
-const PROMPT_VERSION = "report-v6-pdf-only-judge-decisions";
+const PROMPT_VERSION = "report-v7-controltype-defaults";
 const MAX_REPORT_BYTES = 50 * 1024 * 1024;
 const MAX_INLINE_REPORT_BYTES = 18 * 1024 * 1024;
 /** İstemcinin deterministik kontroller için gönderdiği sayfa metni üst sınırı. */
@@ -418,7 +419,11 @@ function buildPrompt(profile: ProfileExport, pageCount: number): string {
       stage: item.stage,
       required: item.required,
       description: item.description,
-      controlType: item.controlType,
+      // Alan eklenmeden önce yayımlanmış kriter sürümlerinde controlType hiç
+      // yoktur; `undefined` bırakılırsa JSON.stringify anahtarı sessizce düşürür
+      // ve model kontrol yöntemi sinyali almaz. Aşama varsayılanı burada da
+      // uygulanır ki anahtar istemden asla eksilmesin.
+      controlType: resolveControlType(item.stage, item.controlType),
       sourcePage: item.sourcePage,
       sourceText: item.sourceText,
     }));
@@ -629,8 +634,13 @@ export async function POST(request: Request) {
     cleanupKey = apiKey ?? "";
 
     let formData: FormData;
-    try { formData = await request.formData(); }
-    catch { return Response.json({ error: "İstek multipart/form-data biçiminde olmalıdır." }, { status: 400 }); }
+    // Gerçek bayt sınırı akış sırasında uygulanır (madde 9); boyut aşımı 400'e
+    // düşürülmez, dıştaki catch → handleError ile 413 olarak döner.
+    try { formData = await readFormDataWithLimit(request, MAX_MULTIPART_BYTES); }
+    catch (bodyError) {
+      if (bodyError instanceof PayloadTooLargeError) throw bodyError;
+      return Response.json({ error: "İstek multipart/form-data biçiminde olmalıdır." }, { status: 400 });
+    }
 
     /* ------------------------------------------------------------------ *
      * BÜTÜNLÜK ZİNCİRİ — istemciden yalnızca başvuru kimliği alınır.

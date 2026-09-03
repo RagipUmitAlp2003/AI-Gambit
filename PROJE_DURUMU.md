@@ -22,6 +22,78 @@ neyin düzeltilmesi gerektiği. Aşağıdaki her madde bugün kod üzerinde veya
 
 ---
 
+## Güncel çalışma — Kimlik doğrulama çekirdeği sertleştirildi (3 Eylül)
+
+GÖREV 3 · madde 10'un çekirdek dilimi (parola değiştirme akışı ve hesap
+oluşturma atomikliği ayrı dilimde):
+
+1. **Fail-closed ortam varsayımı:** `APP_ENV`/`NODE_ENV` eksik ya da
+   tanınmayan bir değerse sistem artık PRODUCTION sayılır
+   (`app/lib/session.ts · runtimeEnvironment`, tek kaynak). Çerezler `Secure`
+   olur, hata ayrıntısı maskelenir, dev bootstrap kapanır; tek seferlik uyarı
+   logu atılır. **DAĞITIM NOTU:** APP_ENV'i hiç tanımlamamış bir ortam
+   (örn. önizleme) bir anda production moduna geçer — http üzerinden Secure
+   çerez yazılamayacağı için giriş sessizce başarısız görünebilir; dağıtım
+   öncesi `APP_ENV` değeri doğrulanmalı. Araç betikleri
+   (`seed_demo_users`/`dev_reset`/`cleanup_sim_celikkubbe`) ortak
+   `tools/env_guard.mjs` ile yalnızca AÇIK development işaretinde çalışır.
+2. **Dev bootstrap kilitleri:** admin/1234 kolaylığı korunur ama DÖRT koşul
+   birlikte aranır: açık development + `ALLOW_LOCAL_ADMIN_BOOTSTRAP=on`
+   (`.env.local`'a eklendi) + loopback istek + sıfır aktif Admin; dev hesabı
+   `mustChangePassword:false` açılır (onaylı karar). Üretim token akışı yalnız
+   sıfır hesap evresinde çalışır; sonrasında GET nötrdür, POST nötr 404
+   "Kurulum ucu kapalı." döner.
+3. **Rol fail-closed:** tanınmayan `role_code` hiçbir role çevrilmez (eski
+   sessiz "01" düşüşü kalktı); böyle hesap giriş yapamaz, açık oturumu düşer
+   ve `login_denied_invalid_role`/`session_denied_invalid_role` denetim kaydı
+   yazılır.
+4. **Giriş tekdüzeliği:** bilinmeyen kullanıcı, yanlış şifre ve pasif hesap
+   AYNI 401 + AYNI mesajı alır; her yolda tam BİR PBKDF2 türetmesi çalışır
+   (bilinmeyen kullanıcıda önbellekli sahte kayıt).
+5. **Dağıtık kaba kuvvet sayacı:** proses içi Map yerine D1
+   `admin_login_failures` (yeni `migrations/0014_auth_hardening.sql` +
+   çalışma anı şeması): SHA-256(ip|kimlik) anahtarlı 10 dk pencere, 8 deneme,
+   fırsatçı TTL temizliği; bootstrap token denemeleri de aynı sayaçtan geçer.
+
+Doğrulama: tür kontrolü, lint, 177 birim + tüm regresyon testleri temiz;
+`tools/auth-security.test.ts` sayaç SQL sözleşmesini satır düzeyinde sınar.
+E2E'ye 1b bölümü (tekdüze giriş + 429) eklendi ama canlı koşu yapılmadı.
+Commit/push yapılmadı.
+
+---
+
+## Güncel çalışma — Madde numarası makullüğü ve yönetici onaylı OCR yedeği (3 Eylül)
+
+İki hata düzeltmesi:
+
+1. **Madde numarası yanlış sınıflaması (`pdf-structure-v2`):** `clauseNumberOf`
+   artık korpusla doğrulanmış makullük sınırları uygular — 3 haneden uzun ya da
+   öndeki sıfırlı bölütler (yıl "2024", tarih "28.02.2026", tutar "250.000",
+   koordinat), tek başına duran çıplak sayılar (sayfa numarası "17") ve Türkçe
+   ay adıyla süren tarih başlangıçları ("30 Eylül-4 Ekim 2026") madde sayılmaz.
+   Salt rakam satırları paragrafa karışmaz. Yapı sürümü `pdf-structure-v2`ye
+   yükseltildi (eski önbellek kayıtları yeni bloklara karşı oynatılmaz) ve
+   kapsam denetim nesnesinin R2 anahtarı yapı sürümünü içerir (v1 kayıtları
+   üzerine yazılmaz). Yayımlı profiller etkilenmez; aynı şartname yeniden
+   analiz edilirse kaynak kimlikleri bir kez değişir.
+2. **Taranmış PDF çıkmazı — OCR yedeği:** metin katmansız belgede 422
+   `OCR_REQUIRED` kontrollü durağı korunur; yanıt artık `ocrFallbackAvailable`
+   bayrağı taşır ve Kriter Atölyesi "Görüntüden metni çıkar ve analiz et (OCR)"
+   düğmesini gösterir. Yönetici onaylarsa (`ocr=1`) sunucu tam olarak BİR ek
+   Gemini aktarım çağrısıyla (sıcaklık 0, şemalı JSON, `pdf-ocr.ts`) yapısal
+   metni çıkarır, aynı `sourceId` şemasını kullanır ve yapıyı R2'de sabitler:
+   sonraki yeniden analizler ek çağrı yapmaz. OCR metni aynı yeterlilik
+   kapısından ve alıntı doğrulamasından geçer; sonuçlar analiz uyarısı +
+   `ocrDerived` iziyle işaretlenir, sayaçlar dürüst toplamı yazar. Metin
+   katmanlı belgelerin önbellek anahtarları bayt bayt değişmedi.
+
+Doğrulama: tür kontrolü, lint, birim + regresyon testleri temiz; OCR akışı
+YALNIZCA sahte (mock) `fetch` ile doğrulandı — canlı Gemini koşusu yapılmadı,
+gerçek taranmış şartnameyle kalite/tavan kalibrasyonu (OCR_MAX_PAGES=60,
+65 536 çıktı tokenı) bekliyor. Commit/push yapılmadı.
+
+---
+
 ## Güncel çalışma — Yapısal şartname taraması ve güvenli kriter yayımı (3 Eylül)
 
 GÖREV 1/3 kapsamında şartname analizi, PDF'nin tamamını doğrudan LLM'ye gönderen

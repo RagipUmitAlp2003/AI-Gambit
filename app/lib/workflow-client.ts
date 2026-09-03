@@ -13,6 +13,7 @@ import type {
   OperationsSummary,
   JudgeWorkload,
   ProfileReviewDecision,
+  SimilarityTemplateInfo,
   TimelineEntry,
 } from "./workflow-types";
 
@@ -75,6 +76,8 @@ export const workflowApi = {
   applications: () => jsonRequest<{ applications: CompetitionApplication[]; openCompetitions?: CompetitionEntry[] }>("/api/applications"),
   submitApplication: async (input: {
     competitionName: string;
+    /** Kararlı yarışma kimliği; açık liste sunucudan geldiyse gönderilir ve aynı adlı yarışmaları ayırır. */
+    competitionId?: string;
     applicantFullName: string;
     teamName: string;
     teamMembers: string[];
@@ -82,6 +85,7 @@ export const workflowApi = {
   }) => {
     const form = new FormData();
     form.set("competitionName", input.competitionName);
+    if (input.competitionId) form.set("competitionId", input.competitionId);
     form.set("applicantFullName", input.applicantFullName);
     form.set("teamName", input.teamName);
     form.set("teamMembers", JSON.stringify(input.teamMembers));
@@ -110,15 +114,33 @@ export const workflowApi = {
    * Hibrit benzerlik kontrolü (madde 9). Sayfa metinleri PDF'ten BİR KEZ
    * çıkarılır ve kriter analiziyle paylaşılır; `pdfHash` sunucunun R2'deki
    * geçerli PDF sürümüyle eşleşmezse istek reddedilir.
+   *
+   * Büyük havuz (madde 8): sunucu süre bütçesi dolunca `status: "partial"` ve
+   * `resumeRunId` döndürür; istemci aynı kimlikle çağırarak taramayı sürdürür.
+   * Embedding maliyeti ilk çağrıda kalıcıdır; devam çağrıları API'yi tekrar
+   * ÇAĞIRMAZ.
    */
-  similarityCheck: (id: string, input: { pages: string[]; pdfHash: string }) => jsonRequest<{
-    similarity: SimilarityReport;
-    check: PreCheck;
+  similarityCheck: (id: string, input: { pages: string[]; pdfHash: string; resumeRunId?: string }) => jsonRequest<{
+    /** Tam sonuç; yalnızca koşu tamamlandığında bulunur. */
+    similarity?: SimilarityReport;
+    /** Geriye uyum: 3. aşama şeridinin eski kaydı (yeni ekran kullanmaz). */
+    check?: PreCheck;
+    /** Koşu yarım kaldı: aynı kimlikle yeniden çağrılarak sürdürülür. */
+    status?: "partial";
+    resumeRunId?: string;
+    progress?: { processed: number; total: number };
     /** Embedding 429 aldı: kriter analizinin arkasından kısa gecikmeyle yeniden denenebilir. */
     embeddingRateLimited?: boolean;
   }>(
     `/api/applications/${encodeURIComponent(id)}/similarity`,
-    { method: "POST", body: JSON.stringify({ pages: input.pages, pdfHash: input.pdfHash }) },
+    {
+      method: "POST",
+      body: JSON.stringify({
+        pages: input.pages,
+        pdfHash: input.pdfHash,
+        ...(input.resumeRunId ? { resumeRunId: input.resumeRunId } : {}),
+      }),
+    },
   ),
   profiles: () => jsonRequest<{ profiles: CompetitionProfile[] }>("/api/profiles"),
   extractions: () => jsonRequest<{ extractions: CriteriaExtractionRun[] }>("/api/extractions"),
@@ -215,6 +237,23 @@ export const workflowApi = {
     jsonRequest<{ competition: CompetitionWorkflow }>("/api/competitions", {
       method: "PATCH", body: JSON.stringify({ action: "priority", competitionId, priority, note }),
     }),
+  /**
+   * Resmî rapor şablonu (GÖREV 3 · madde 3) — yalnızca BENZERLİK filtresi;
+   * kriter üretmez ve rapor uygunluğu kararı vermez. Yalnızca yarışmanın
+   * sahibi Yarışma Yöneticisi (01) okuyabilir/yükleyebilir.
+   */
+  similarityTemplate: (competitionId: string) =>
+    jsonRequest<{ template: SimilarityTemplateInfo | null }>(
+      `/api/competitions/${encodeURIComponent(competitionId)}/similarity-template`),
+  /** Yeni şablon sürümü yükler; içerik aynıysa sürüm artmaz (`unchanged: true`). */
+  uploadSimilarityTemplate: async (competitionId: string, file: File) => {
+    const form = new FormData();
+    form.set("file", file);
+    return responseJson<{ template: SimilarityTemplateInfo; unchanged: boolean }>(
+      await fetch(`/api/competitions/${encodeURIComponent(competitionId)}/similarity-template`, {
+        method: "POST", credentials: "same-origin", body: form,
+      }));
+  },
   registerParticipant: (fullName: string, email: string, password: string) =>
     jsonRequest<{ account: AdminAccount; expiresAt: string }>("/api/participant/register", {
       method: "POST",

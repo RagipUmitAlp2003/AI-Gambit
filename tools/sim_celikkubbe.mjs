@@ -331,7 +331,8 @@ async function stage4() {
 
   const sim = run.saved.evaluation.similarityReport;
   check("ilk raporda karşılaştırılacak başvuru yok mesajı", sim?.level === "none"
-    && /karşılaştırılabilecek başka güncel başvuru bulunmadığı/.test(sim?.note ?? ""), JSON.stringify(sim));
+    && /Karşılaştırılabilecek başka güncel rapor henüz bulunmuyor|karşılaştırılabilecek başka güncel başvuru bulunmadığı/
+      .test(sim?.note ?? ""), JSON.stringify(sim));
 
   state.appA.findings = evaluation.findings.map((f) => ({ id: f.criterionId, name: f.criterionName, verdict: f.verdict }));
   state.appA.judgeUser = run.username;

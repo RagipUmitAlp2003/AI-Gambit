@@ -261,6 +261,15 @@
  * ------------------------------------------------------------------------- */
 .eval-similarity-note { display: grid; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-left-width: 5px; border-radius: var(--radius-md); background: #f8fafb; }
 .eval-similarity-note p { margin: 0; font-size: 12.5px; line-height: 1.6; color: var(--ink); }
+.eval-similarity-title { margin: 0; font-size: 13px; font-weight: 800; color: var(--ink); }
+.eval-similarity-stale { padding: 8px 10px; border: 1px solid var(--amber); border-radius: var(--radius-sm); background: #fff7e8; font-weight: 600; }
+.eval-similarity-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 6px 14px; margin: 0; }
+.eval-similarity-facts > div { display: grid; gap: 2px; }
+.eval-similarity-facts dt { color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.eval-similarity-facts dd { margin: 0; font-size: 12px; font-weight: 600; color: var(--ink); }
+.eval-similarity-llm { font-size: 11.5px; line-height: 1.55; color: var(--ink-soft); }
+.eval-similarity-llmfail { color: var(--muted); font-size: 11px; font-style: italic; }
+.eval-similarity-disclaimer { color: var(--ink-soft); font-size: 11px; font-weight: 700; }
 .eval-similarity-note.level-normal, .eval-similarity-note.level-none { border-left-color: var(--line-strong); }
 .eval-similarity-note.level-review { border-left-color: var(--amber); background: #fffaf0; }
 .eval-similarity-note.level-high { border-left-color: var(--danger); background: #fff8f7; }

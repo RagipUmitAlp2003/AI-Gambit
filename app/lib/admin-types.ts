@@ -96,6 +96,7 @@ export type WorkflowEventName =
   | "competition_stage_changed"
   | "criteria_version_published"
   | "criteria_source_locked"
+  | "criteria_source_lock_unmatched"
   | "competition_activated"
   | "competition_deactivated"
   | "competition_archived"

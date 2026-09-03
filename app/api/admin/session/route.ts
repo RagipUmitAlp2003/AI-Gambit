@@ -1,8 +1,12 @@
 import {
+  LOGIN_FAILURE_LIMIT,
+  clearLoginFailures,
+  countRecentLoginFailures,
   createSession,
   deleteSession,
   findCredentialsByIdentifier,
   recordAudit,
+  recordLoginFailure,
 } from "../../../lib/admin-db";
 import { roleByCode } from "../../../lib/admin-roles";
 import {
@@ -22,46 +26,50 @@ import {
   sessionCookieHeader,
 } from "../../../lib/session";
 import { hashPassword, verifyPassword } from "../../../lib/password";
+import type { PasswordRecord } from "../../../lib/password";
 
 /**
  * Oturum ucu: giriş (POST), çıkış (DELETE) ve mevcut oturum (GET).
  *
- * Giriş akışı: kullanıcı adı VEYA e-posta + şifre → hesap D1'den bulunur →
- * hesap aktif mi kontrol edilir → parola özeti doğrulanır → imzalı oturum
- * çerezi verilir.
+ * Giriş akışı: kullanıcı adı VEYA e-posta + şifre → D1 sayaç kontrolü →
+ * hesap D1'den bulunur → parola özeti doğrulanır (hesap yoksa sahte kayıtla
+ * aynı maliyette) → hesap aktif mi kontrol edilir → imzalı oturum çerezi
+ * verilir. Bütün başarısız dallar aynı 401 + mesajı döner (hesap keşfi yok).
  *
  * ROL SEÇİMİ YOKTUR (madde 7): kullanıcı giriş sırasında rol seçmez; rol
  * veri tabanındaki hesaptan okunur ve panel ona göre açılır. Şifresiz rol
  * kısayolu (eski `/api/admin/dev-session`) kaldırılmıştır.
  */
 
-/** Aynı izolat içinde kaba kuvvet denemelerini yavaşlatan basit sayaç. */
-const FAILURE_WINDOW_MS = 10 * 60 * 1000;
-const FAILURE_LIMIT = 8;
-const failures = new Map<string, { count: number; firstAt: number }>();
+/**
+ * HESAP KEŞFİNE KARŞI TEKDÜZELİK: bilinmeyen kullanıcı, yanlış şifre ve
+ * pasif hesap AYNI durum kodunu (401) ve AYNI mesajı alır; hiçbir dal hesap
+ * varlığını veya pasifliğini ele vermez.
+ */
+const UNIFORM_LOGIN_MESSAGE = "Kullanıcı adı, e-posta veya şifre hatalı.";
+const THROTTLE_MESSAGE = "Çok fazla başarısız deneme. Lütfen bir süre sonra tekrar deneyin.";
 
-function failureKey(request: Request, email: string): string {
+/**
+ * Dağıtık kaba kuvvet sınırı: sayaç D1'dedir (bkz. admin-db ·
+ * admin_login_failures) ve Cloudflare izolatları arasında paylaşılır; eski
+ * proses içi Map izolat-yerel kaldığı için üretimde etkisizdi. Anahtar,
+ * IP + kimliğin SHA-256 özetidir; açık IP veya kimlik saklanmaz.
+ */
+function failureKey(request: Request, identifier: string): Promise<string> {
   const ip = request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for") ?? "local";
-  return `${ip}|${email}`;
+  return hashToken(`${ip}|${identifier}`);
 }
 
-function throttled(key: string): boolean {
-  const entry = failures.get(key);
-  if (!entry) return false;
-  if (Date.now() - entry.firstAt > FAILURE_WINDOW_MS) {
-    failures.delete(key);
-    return false;
-  }
-  return entry.count >= FAILURE_LIMIT;
-}
-
-function noteFailure(key: string): void {
-  const entry = failures.get(key);
-  if (!entry || Date.now() - entry.firstAt > FAILURE_WINDOW_MS) {
-    failures.set(key, { count: 1, firstAt: Date.now() });
-    return;
-  }
-  entry.count += 1;
+/**
+ * ZAMANLAMA TEKDÜZELİĞİ: hesap bulunamadığında da tam olarak BİR PBKDF2
+ * türetmesi çalışsın diye izolat başına bir kez üretilip önbelleklenen sahte
+ * kayıt. (Eski akış bilinmeyen kullanıcıda her istekte 2× türetme yapıyordu;
+ * bu, bilinen kullanıcı yoluna göre ölçülebilir bir zamanlama farkıydı.)
+ */
+let dummyRecordPromise: Promise<PasswordRecord> | null = null;
+function dummyRecord(): Promise<PasswordRecord> {
+  dummyRecordPromise ??= hashPassword("kayitsiz-hesap-icin-sabit-deger");
+  return dummyRecordPromise;
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -90,23 +98,34 @@ export async function POST(request: Request): Promise<Response> {
       : requiredText(body, "email", "Kullanıcı adı veya e-posta", 200)).toLowerCase();
     const password = requiredText(body, "password", "Şifre", 200);
 
-    const key = failureKey(request, identifier);
-    if (throttled(key)) {
-      return jsonError(429, "Çok fazla başarısız deneme. Lütfen bir süre sonra tekrar deneyin.");
+    const key = await failureKey(request, identifier);
+    if ((await countRecentLoginFailures(key)) >= LOGIN_FAILURE_LIMIT) {
+      return jsonError(429, THROTTLE_MESSAGE);
     }
 
     const credentials = await findCredentialsByIdentifier(identifier);
 
-    if (!credentials) {
-      // Hesap yokken de bir türetme çalıştırılır; yanıt süresi hesap
-      // varlığını ele vermesin.
-      await verifyPassword(password, await hashPassword("kayitsiz-hesap-icin-sabit-deger"));
-      noteFailure(key);
-      return jsonError(401, "Kullanıcı adı, e-posta veya şifre hatalı.");
+    // Hesap bulunsun ya da bulunmasın HER yolda tam BİR parola türetmesi
+    // çalışır; yanıt süresi hesap varlığını ele vermez.
+    const record = credentials?.password ?? await dummyRecord();
+    let valid = false;
+    try {
+      valid = await verifyPassword(password, record);
+    } catch (error) {
+      // Bozuk/eksik özet kaydı giriş akışını düşürmez.
+      console.error("[auth] parola özeti okunamadı", error);
+      valid = false;
+    }
+
+    if (!credentials || !valid) {
+      await recordLoginFailure(key);
+      return jsonError(401, UNIFORM_LOGIN_MESSAGE);
     }
 
     if (credentials.account.status !== "active") {
-      noteFailure(key);
+      await recordLoginFailure(key);
+      // Parola doğrulandığı için denetim kaydı hesabın gerçek sahibini
+      // gösterir; yanıt yine tekdüzedir, pasiflik istemciye SIZMAZ.
       await recordAudit({
         actorId: credentials.account.id,
         actorEmail: credentials.account.email,
@@ -115,24 +134,10 @@ export async function POST(request: Request): Promise<Response> {
         targetType: "account",
         targetId: credentials.account.id,
       });
-      return jsonError(403, "Hesap aktif değil.");
+      return jsonError(401, UNIFORM_LOGIN_MESSAGE);
     }
 
-    let valid = false;
-    try {
-      valid = await verifyPassword(password, credentials.password);
-    } catch (error) {
-      // Bozuk/eksik özet kaydı giriş akışını düşürmez.
-      console.error("[auth] parola özeti okunamadı", error);
-      valid = false;
-    }
-
-    if (!valid) {
-      noteFailure(key);
-      return jsonError(401, "Kullanıcı adı, e-posta veya şifre hatalı.");
-    }
-
-    failures.delete(key);
+    await clearLoginFailures(key);
 
     const session = await issueSession();
     await createSession({

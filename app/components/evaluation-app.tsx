@@ -5,7 +5,7 @@ import Link from "next/link";
 import TopbarSession from "./topbar-session";
 import { formatDateTime } from "../lib/admin-client";
 import { extractPdfText } from "../lib/pdf-reader";
-import { applySimilarity, expectedLanguageCode } from "../lib/report-prechecks";
+import { expectedLanguageCode } from "../lib/report-prechecks";
 import { evaluateReport } from "../lib/report-evaluator";
 import { WorkflowApiError, workflowApi } from "../lib/workflow-client";
 import { APPLICATION_STATUS_LABELS, type CompetitionApplication, type CompetitionProfile, type CompetitionWorkflow } from "../lib/workflow-types";
@@ -360,17 +360,9 @@ function StageStrip({ stages }: { stages: StageResult[] }) {
             value: score === null || score === undefined ? "Skor yok" : `%${score}`,
             tone: score === null || score === undefined ? undefined : score >= 70 ? "ok" : score >= 40 ? "warn" : "bad",
           });
-          // Benzerlik hakeme "Şüpheli / Normal" olarak işaretlenir (Problem 4 · 3).
-          const similarity = stage.similarity;
-          const suspicious = similarity?.status === "flagged" || similarity?.status === "failed";
-          const warning = similarity?.status === "warning";
-          rows.push({
-            label: "Benzerlik taraması",
-            value: !similarity || similarity.status === "skipped"
-              ? "Çalıştırılmadı"
-              : `${suspicious || warning ? "ŞÜPHELİ" : "Normal"}${similarity.percent !== null && similarity.percent !== undefined ? ` · %${similarity.percent}` : ""}${similarity.closestTeam ? ` · en yakın: ${similarity.closestTeam}` : ""}`,
-            tone: !similarity || similarity.status === "skipped" ? undefined : suspicious ? "bad" : warning ? "warn" : "ok",
-          });
+          // Benzerlik ARTIK bu şeritte gösterilmez (GÖREV 3 · madde 7): dört
+          // kriter aşamasının parçası değildir; bağımsız "Raporlar arası
+          // benzerlik" kartında sunulur ve sayaçlara/karara katılmaz.
         }
 
         if (stage && definition.id === "criteria_evidence") {
@@ -654,17 +646,44 @@ function CriterionDecisionCard({ finding, decision, application, specSourcePage,
 }
 
 /**
- * Benzerlik kontrolü notu (madde 9.9–9.10): bütün kriter analizlerinin
- * ALTINDA ayrı ve sade bir nottur. Sayaçlara katılmaz, genel kararı
- * değiştirmez, otomatik intihal veya ret kararı vermez.
+ * Bağımsız "Raporlar arası benzerlik" kartı (GÖREV 3 · madde 7): bütün kriter
+ * analizlerinin ALTINDA, dört aşamadan AYRI bir bölümdür. Sayaçlara katılmaz,
+ * genel kararı değiştirmez, otomatik intihal veya ret kararı vermez.
+ *
+ * Bütün sayılar YAPILANDIRILMIŞ alanlardan okunur (madde 6): gösterim
+ * cümlesinden asla yüzde geri ayrıştırılmaz ("%98'li takım adı" oranı bozamaz).
+ * Eski kayıtlarda bulunmayan alanların satırları gizlenir (geriye uyum).
  */
-function SimilarityNote({ report, application }: { report: SimilarityReport; application: CompetitionApplication }) {
+function SimilarityCard({ report, application }: { report: SimilarityReport; application: CompetitionApplication }) {
   const flagged = report.level === "review" || report.level === "high";
+  const stale = application.similarityStale || report.stale;
+  const hasSplit = typeof report.directMatchCount === "number" || typeof report.semanticMatchCount === "number";
   return (
-    <section className={`eval-similarity-note level-${report.level}`} aria-label="Benzerlik kontrolü">
-      <p>
-        <strong>Benzerlik kontrolü:</strong> {report.note}
-      </p>
+    <section className={`eval-similarity-note level-${report.level}`} aria-label="Raporlar arası benzerlik">
+      <h3 className="eval-similarity-title">Raporlar arası benzerlik</h3>
+      {stale ? (
+        <p className="eval-similarity-stale">
+          Bu sonuç güncel değil: {application.similarityStaleReason || report.staleReason || "havuza yeni rapor geldi."}{" "}
+          “Analizi Yenile” ile güncelleyebilirsiniz.
+        </p>
+      ) : null}
+      <p>{report.note}</p>
+      {report.level !== "none" ? (
+        <dl className="eval-similarity-facts">
+          <div><dt>Karşılaştırılan rapor</dt><dd>{report.comparedCount}{report.poolTruncated ? " (havuz üst sınırı uygulandı)" : ""}</dd></div>
+          {typeof report.comparableWords === "number" ? (
+            <div><dt>Karşılaştırılabilir özgün içerik</dt><dd>{report.comparableWords} kelime</dd></div>
+          ) : null}
+          <div><dt>Yaklaşık oran</dt><dd>{report.approxPercent === null ? "—" : `%${report.approxPercent}`}</dd></div>
+          {report.closestLabel ? <div><dt>En yakın rapor</dt><dd>{report.closestLabel}</dd></div> : null}
+          {hasSplit ? (
+            <div>
+              <dt>Eşleşme ayrımı</dt>
+              <dd>{report.directMatchCount ?? 0} doğrudan (MinHash) · {report.semanticMatchCount ?? 0} anlamsal</dd>
+            </div>
+          ) : null}
+        </dl>
+      ) : null}
       {flagged && report.matches.length ? (
         <details className="eval-similarity-detail">
           <summary>Güçlü eşleşmeleri göster ({Math.min(3, report.matches.length)})</summary>
@@ -687,11 +706,44 @@ function SimilarityNote({ report, application }: { report: SimilarityReport; app
                     <q>{match.peerQuote || "Alıntı yok"}</q>
                   </div>
                 </div>
+                {match.llmClassLabel ? (
+                  // Katman 3 açıklaması: sayfa/alıntı deterministik veridir;
+                  // model yalnızca sınıf + açıklama verir (madde 5).
+                  <p className="eval-similarity-llm">
+                    <strong>{match.llmClassLabel}</strong>
+                    {match.llmExplanation ? ` — ${match.llmExplanation}` : ""}
+                    {match.llmAssessment ? ` · ${match.llmAssessment}` : ""}
+                  </p>
+                ) : null}
               </li>
             ))}
           </ol>
         </details>
       ) : null}
+      {report.llmStatus === "failed" ? (
+        <p className="eval-similarity-llmfail">Açıklama kontrolü tamamlanamadı; MinHash ve anlamsal sonuç geçerlidir.</p>
+      ) : null}
+      {/* Madde 7: uyarı her durumda AYRI bir öğe olarak gösterilir. */}
+      <p className="eval-similarity-disclaimer">Bu sonuç intihal kararı değildir.</p>
+    </section>
+  );
+}
+
+/**
+ * Geriye uyum: `similarityReport` alanı olmayan ESKİ değerlendirme kayıtları
+ * 3. aşama şeridinden kaldırılan benzerlik satırı yerine bu sade kartla
+ * gösterilir; yapılandırılmış `stage.similarity` alanından okunur (regex yok).
+ */
+function LegacySimilarityCard({ similarity }: { similarity: NonNullable<StageResult["similarity"]> }) {
+  return (
+    <section className="eval-similarity-note level-normal" aria-label="Raporlar arası benzerlik">
+      <h3 className="eval-similarity-title">Raporlar arası benzerlik</h3>
+      <p>
+        {similarity.status === "skipped"
+          ? "Karşılaştırılabilecek başka güncel rapor henüz bulunmuyor."
+          : `Önceki analizde ${similarity.percent === null || similarity.percent === undefined ? "benzerlik oranı hesaplanmadı" : `yaklaşık %${similarity.percent} benzerlik bulundu`}${similarity.closestTeam ? ` (en yakın: ${similarity.closestTeam})` : ""}. Ayrıntı için analizi yenileyin.`}
+      </p>
+      <p className="eval-similarity-disclaimer">Bu sonuç intihal kararı değildir.</p>
     </section>
   );
 }
@@ -857,6 +909,11 @@ function ApplicationDetail({ application, profile, analyzing, progress, onAnalyz
   }
 
   const similarityReport = evaluation?.similarityReport ?? null;
+  // Geriye uyum: eski kayıtta similarityReport yoksa 3. aşamaya yazılmış
+  // yapılandırılmış benzerlik alanı sade kartla gösterilir (madde 7).
+  const legacySimilarity = !similarityReport
+    ? evaluation?.stages.find((stage) => stage.stage === "category_similarity")?.similarity ?? null
+    : null;
 
   return (
     <section className="eval-detail" aria-labelledby="eval-detail-title">
@@ -1000,7 +1057,9 @@ function ApplicationDetail({ application, profile, analyzing, progress, onAnalyz
           </div>
 
           {/* Benzerlik kontrolü: bütün kriter analizlerinin EN ALTINDA (madde 9.9). */}
-          {similarityReport ? <SimilarityNote report={similarityReport} application={application} /> : null}
+          {similarityReport
+            ? <SimilarityCard report={similarityReport} application={application} />
+            : legacySimilarity ? <LegacySimilarityCard similarity={legacySimilarity} /> : null}
 
           {/*
             NİHAİ KARAR — bütün kriterler sonuçlanmadan AÇILMAZ. Sistem
@@ -1250,7 +1309,22 @@ export default function EvaluationApp() {
       const extracted = await extractPdfText(file);
 
       setProgress("Rapor kriterlere göre analiz ediliyor… · Aynı yarışmadaki başvurularla benzerlik karşılaştırılıyor…");
-      const runSimilarity = () => workflowApi.similarityCheck(current.id, { pages: extracted.pages, pdfHash });
+      /*
+       * Büyük havuz (madde 8): sunucu süre bütçesi dolunca "partial" +
+       * resumeRunId döndürür; koşu SINIRLI sayıda devam çağrısıyla sürdürülür
+       * (kontrolsüz tekrar yok). Devam çağrıları embedding API'sini yeniden
+       * ÇAĞIRMAZ; kesinti hâlinde ödenmiş maliyet sunucuda kalıcıdır.
+       */
+      const runSimilarity = async () => {
+        let result = await workflowApi.similarityCheck(current.id, { pages: extracted.pages, pdfHash });
+        for (let attempt = 0; attempt < 12 && result.status === "partial" && result.resumeRunId; attempt += 1) {
+          setProgress(`Benzerlik karşılaştırması sürüyor… (${result.progress?.processed ?? "?"}/${result.progress?.total ?? "?"} rapor)`);
+          result = await workflowApi.similarityCheck(current.id, {
+            pages: extracted.pages, pdfHash, resumeRunId: result.resumeRunId,
+          });
+        }
+        return result;
+      };
       const [evaluationResult, similarityResult] = await Promise.allSettled([
         evaluateReport({ applicationId: current.id, pages: extracted.pages, pageCount: extracted.pageCount, force }),
         runSimilarity(),
@@ -1269,13 +1343,19 @@ export default function EvaluationApp() {
         await new Promise((resolve) => setTimeout(resolve, 2_500));
         try { similarity = await runSimilarity(); } catch { /* MinHash/ilk sonuç neyse o kalır. */ }
       }
-      if (similarity) {
-        evaluation = applySimilarity(evaluation, similarity.check);
+      /*
+       * Benzerlik ARTIK 3. aşama şeridine yazılmaz (madde 7): sonuç yalnızca
+       * bağımsız `similarityReport` alanında taşınır; sayaçlara ve karara
+       * katılmaz. Sunucu kayıtta zaten kendi yetkili kopyasını kullanır.
+       */
+      if (similarity?.similarity) {
         evaluation = { ...evaluation, similarityReport: similarity.similarity };
       } else {
         const reason = similarityResult.status === "rejected" && similarityResult.reason instanceof Error
           ? similarityResult.reason.message
-          : "bilinmeyen hata";
+          : similarity?.status === "partial"
+            ? "büyük havuz taraması bu oturumda tamamlanamadı; analizi yenileyerek sürdürebilirsiniz"
+            : "bilinmeyen hata";
         evaluation = { ...evaluation, similarityReport: null };
         evaluation.analysisWarnings.push(`Benzerlik kontrolü tamamlanamadı: ${reason}. Kriter analizi bundan etkilenmedi.`);
       }

@@ -34,10 +34,13 @@ export async function GET(request: Request): Promise<Response> {
     } else {
       const profile = await findProfile(id);
       if (!profile) return jsonError(404, "Değerlendirme profili bulunamadı.");
+      // 01 yalnızca kendi hazırladığı profili, 02/04 yalnızca yürürlükteki
+      // (onaylı) profili görür — kardeş uçlarla (profiles, profiles/[id]/file)
+      // aynı kural. Rol 03 read_timeline iznine zaten sahip değildir.
       if (auth.account.roleCode === "01" && profile.createdBy !== auth.account.id) {
         return jsonError(403, "Bu işlem için yetkiniz yok.");
       }
-      if (auth.account.roleCode === "03" && profile.status !== "approved") {
+      if (["02", "04"].includes(auth.account.roleCode) && profile.status !== "approved") {
         return jsonError(403, "Bu işlem için yetkiniz yok.");
       }
     }

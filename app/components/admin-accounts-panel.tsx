@@ -395,14 +395,26 @@ export default function AdminAccountsPanel({ accounts, roles, mailReady, mail, v
                         </button>
                       )
                     ) : (
-                      <button
-                        type="button"
-                        className="danger-button"
-                        disabled={busy}
-                        onClick={() => runRowAction(account.id, () => adminApi.purgeAccount(account.id))}
-                      >
-                        Kalıcı sil
-                      </button>
+                      <>
+                        {/* Açık "Etkinleştir": rol select'ine bağlı olmadan, AYNI ROLLE geri açar. */}
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={busy}
+                          onClick={() => runRowAction(account.id, () => adminApi.restoreAccount(account.id))}
+                        >
+                          Etkinleştir
+                        </button>
+                        <small>Aynı rolle yeniden aktifleştirir.</small>
+                        <button
+                          type="button"
+                          className="danger-button"
+                          disabled={busy}
+                          onClick={() => runRowAction(account.id, () => adminApi.purgeAccount(account.id))}
+                        >
+                          Kalıcı sil
+                        </button>
+                      </>
                     )}
                     {error ? <small className="admin-error">{error.message}</small> : null}
                   </span>

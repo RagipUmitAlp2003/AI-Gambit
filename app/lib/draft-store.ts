@@ -1,4 +1,4 @@
-import type { AnalysisResult, Criterion, ProfileExport, SetupData, Step } from "./types";
+import type { AnalysisResult, Criterion, ProfileExport, SetupData, Step, UnselectedBlocksReview } from "./types";
 
 // v2: dört aşamalı, puansız kriter modeli. Eski v1 taslakları okunmaz;
 // kaynak PDF IndexedDB'de korunur ve belge yeni prensiple yeniden analiz edilir.
@@ -13,6 +13,7 @@ export const REPORT_POOL_STORE_NAME = "report-pool";
 const FILE_KEY_PREFIX = "source-document:";
 const PREVIOUS_FILE_KEY = "source-document";
 const TEMPLATE_FILE_KEY = "report-template";
+const UNSELECTED_REVIEW_KEY_PREFIX = "unselected-review:";
 
 export type DraftSnapshot = {
   step: Step;
@@ -32,6 +33,10 @@ function snapshotKey(scope: string): string {
 
 function fileKey(scope: string): string {
   return `${FILE_KEY_PREFIX}${safeScope(scope)}`;
+}
+
+function unselectedReviewKey(scope: string): string {
+  return `${UNSELECTED_REVIEW_KEY_PREFIX}${safeScope(scope)}`;
 }
 
 export function loadDraftSnapshot(scope = "workspace"): DraftSnapshot | null {
@@ -144,4 +149,48 @@ async function saveStoredDraftFile(key: string, file: File | null) {
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
   }).finally(() => database.close());
+}
+
+/**
+ * Seçilmeyen blok incelemesi localStorage anlık görüntüsüne DEĞİL IndexedDB'ye
+ * yazılır: anlık görüntü her kriter tuşlamasında eşzamanlı JSON.stringify ile
+ * kaydedilir; yüzlerce blok metnini oraya gömmek hem tuşlama başına takılma
+ * hem kota aşımı (ve sessiz catch'te BÜTÜN taslağın düşmesi) riskidir. Mevcut
+ * `draft-files` deposu aynı sürümle kullanılır; yeni bir anahtar öneki dışında
+ * veri tabanı yükseltmesi gerekmez.
+ */
+export async function saveUnselectedReview(review: UnselectedBlocksReview | null, scope = "workspace") {
+  const database = await openDraftDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    if (review) store.put(review, unselectedReviewKey(scope));
+    else store.delete(unselectedReviewKey(scope));
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+  }).finally(() => database.close());
+}
+
+export async function loadUnselectedReview(scope = "workspace"): Promise<UnselectedBlocksReview | null> {
+  try {
+    const database = await openDraftDatabase();
+    return await new Promise((resolve, reject) => {
+      const transaction = database.transaction(STORE_NAME, "readonly");
+      const request = transaction.objectStore(STORE_NAME).get(unselectedReviewKey(scope));
+      request.onsuccess = () => {
+        // Şekil doğrulanır; yabancı ya da bozuk kayıt sessizce yok sayılır ve
+        // arayüz sayılarla birlikte "yeniden analiz edin" notunu gösterir.
+        const stored = request.result as Partial<UnselectedBlocksReview> | undefined;
+        resolve(
+          stored && typeof stored.totalCount === "number" && Array.isArray(stored.blocks)
+            ? stored as UnselectedBlocksReview
+            : null,
+        );
+      };
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => database.close();
+    });
+  } catch {
+    return null;
+  }
 }

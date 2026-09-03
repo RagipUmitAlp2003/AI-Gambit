@@ -377,6 +377,13 @@ console.log("Language and competition lookup regression tests: PASS");
   assert(/reportHash/.test(cacheBlock), "Önbellek anahtarı katılımcı PDF özetini içermelidir.");
   assert(/PROMPT_VERSION/.test(cacheBlock), "Önbellek anahtarı istem sürümünü içermelidir.");
   assert(/PRIMARY_MODEL/.test(cacheBlock), "Önbellek anahtarı modeli içermelidir.");
+  // controlType alanı eklenmeden önce yayımlanan kriter sürümlerinde alan hiç
+  // yoktur; `undefined` bırakılırsa JSON.stringify anahtarı düşürür ve model
+  // kontrol yöntemi sinyali almaz.
+  assert(
+    /resolveControlType\(item\.stage, item\.controlType\)/.test(route),
+    "Model istemindeki kriter listesi controlType için aşama varsayılanı uygulamalıdır.",
+  );
 
   const applicationRoute = readFileSync("app/api/applications/[id]/route.ts", "utf8");
   // Dal gövdesi: yetki ternary'sindeki ilk eşleşme değil, GERÇEK dal aranır.
@@ -432,13 +439,20 @@ console.log("Language and competition lookup regression tests: PASS");
 {
   const { readFileSync } = await import("node:fs");
   const source = readFileSync("app/lib/workflow-db.ts", "utf8");
-  const lock = source.slice(source.indexOf("export function applySourceLock"));
+  // Kilit mantığı saf modüle taşındı (kimlik şemasından bağımsız eşleştirme).
+  const lockSource = readFileSync("app/lib/source-lock.ts", "utf8");
+  const lock = lockSource.slice(lockSource.indexOf("export function applySourceLock"));
   const body = lock.slice(0, lock.indexOf("\n/**"));
   assert(/sourcePage: locked\.sourcePage/.test(body), "Kaynak sayfa ilk değerine geri konmalıdır.");
   assert(/sourceText: locked\.sourceText/.test(body), "Kaynak alıntı ilk değerine geri konmalıdır.");
   assert(
     /const locked = applySourceLock\(profile\.criteria, lock\)/.test(source),
     "Yayımlama akışı kaynak kilidini uygulamalıdır.",
+  );
+  // Eşleşmeyen (yetim) kilitli kriter sessizce düşmemeli; olay yazılmalı.
+  assert(
+    /criteria_source_lock_unmatched/.test(source),
+    "Eşleşmeyen kilitli kriter yayımı denetim izine olay yazmalıdır.",
   );
 
   const app = readFileSync("app/components/criteria-app.tsx", "utf8");
@@ -504,6 +518,88 @@ console.log("Language and competition lookup regression tests: PASS");
   assert(/if \(existing\)/.test(bootstrap), "İkinci çağrı ikinci Admin üretmemelidir (idempotent).");
   assert(/isProduction\(\)/.test(bootstrap), "Geliştirme kurulumu üretimde kapalı olmalıdır.");
   assert(/GELİŞTİRME\/DEMO/.test(bootstrap), "Hesabın yalnızca geliştirme/demo için olduğu belirtilmelidir.");
+}
+
+/*
+ * KİMLİK GÜVENLİĞİ SERTLEŞTİRMESİ (GÖREV 3 · madde 10)
+ * Fail-closed ortam varsayımı, rol fail-closed, tekdüze giriş yanıtları ve
+ * D1 tabanlı dağıtık kaba kuvvet sayacı.
+ */
+{
+  const { readFileSync } = await import("node:fs");
+
+  // Ortam çıkarımı: eksik/tanınmayan değer production'a düşmeli (fail-closed).
+  const sessionLib = readFileSync("app/lib/session.ts", "utf8");
+  assert(/return "production"/.test(sessionLib), "Ortam çıkarımı eksik değerde production'a düşmelidir (fail-closed).");
+  assert(/isExplicitDevelopment/.test(sessionLib), "Geliştirme modu yalnızca açık işaretle tanınmalıdır.");
+  const metrics = readFileSync("app/api/metrics/route.ts", "utf8");
+  assert(!/process\.env\.NODE_ENV/.test(metrics), "Metrics ucu ortamı tek kaynaktan (isProduction) okumalıdır.");
+
+  // Rol fail-closed: tanınmayan role_code hiçbir role çevrilmemeli.
+  const adminDb = readFileSync("app/lib/admin-db.ts", "utf8");
+  assert(!/: "01"\) as RoleCode/.test(adminDb), "Tanınmayan role_code hiçbir role (01) çevrilmemelidir.");
+  assert(/toAccountOrNull/.test(adminDb), "Hesap dönüşümü rol fail-closed olmalıdır.");
+  assert(/login_denied_invalid_role/.test(adminDb), "Geçersiz rollü giriş denemesi denetim izine yazılmalıdır.");
+  assert(/session_denied_invalid_role/.test(adminDb), "Geçersiz rollü oturum düşürülmeli ve denetime yazılmalıdır.");
+  assert(/admin_login_failures/.test(adminDb), "Kaba kuvvet sayacı D1 tablosunda tutulmalıdır.");
+
+  // Giriş ucu: proses içi Map yok; D1 sayaç var; pasiflik sızmıyor.
+  const sessionRoute = readFileSync("app/api/admin/session/route.ts", "utf8");
+  assert(!/new Map\(/.test(sessionRoute), "Giriş ucunda proses içi sayaç Map'i kalmamalıdır.");
+  assert(
+    /recordLoginFailure/.test(sessionRoute) && /countRecentLoginFailures/.test(sessionRoute),
+    "Giriş ucu D1 tabanlı dağıtık sayacı kullanmalıdır.",
+  );
+  assert(!/Hesap aktif değil/.test(sessionRoute), "Pasif hesap yanıtı hesap varlığını sızdırmamalıdır (tekdüze 401).");
+  assert(/UNIFORM_LOGIN_MESSAGE/.test(sessionRoute), "Bütün başarısız girişler aynı mesajı dönmelidir.");
+
+  // Bootstrap: dev kilitleri + kurulum sonrası nötr üretim yanıtı.
+  const bootstrapRoute = readFileSync("app/api/admin/bootstrap/route.ts", "utf8");
+  assert(/ALLOW_LOCAL_ADMIN_BOOTSTRAP/.test(bootstrapRoute), "Dev bootstrap açık yerel izin bayrağına bağlanmalıdır.");
+  assert(/isLoopbackRequest/.test(bootstrapRoute), "Dev bootstrap yalnızca loopback isteklerde açılmalıdır.");
+  assert(/isExplicitDevelopment/.test(bootstrapRoute), "Dev bootstrap açık development işareti istemelidir.");
+  assert(/Kurulum ucu kapalı\./.test(bootstrapRoute), "Üretim bootstrap kurulumdan sonra nötr yanıt vermelidir.");
+  assert(/mustChangePassword: false/.test(bootstrapRoute), "Dev bootstrap hesabı zorunlu parola değişimine takılmamalıdır.");
+
+  // Araç betikleri: fail-closed ortak ortam kilidi.
+  for (const file of ["tools/seed_demo_users.mjs", "tools/dev_reset.mjs", "tools/cleanup_sim_celikkubbe.mjs"]) {
+    const script = readFileSync(file, "utf8");
+    assert(/assertExplicitDevelopment/.test(script), `${file} açık geliştirme işareti istemelidir (fail-closed).`);
+  }
+
+  // must_change_password GERÇEK AKIŞ: uç mevcut ve doğru adımları çağırıyor.
+  const passwordRoute = readFileSync("app/api/admin/password/route.ts", "utf8");
+  assert(/verifyPassword/.test(passwordRoute), "Parola değişiminde eski (geçici) şifre doğrulanmalıdır.");
+  assert(/updatePassword/.test(passwordRoute), "Parola değişimi bayrağı tek güncellemeyle temizlemelidir.");
+  assert(
+    /deleteOtherSessionsForAccount/.test(passwordRoute),
+    "Parola değişiminde hesabın DİĞER oturumları düşürülmelidir.",
+  );
+  assert(/recordLoginFailure/.test(passwordRoute), "Yanlış mevcut şifre denemeleri D1 sayacına yazılmalıdır.");
+  const gate = readFileSync("app/components/management-app.tsx", "utf8");
+  assert(/PasswordChangeGate/.test(gate), "Geçici şifreli hesap panele geçmeden parola değişim ekranına yönlenmelidir.");
+  const register = readFileSync("app/api/participant/register/route.ts", "utf8");
+  assert(
+    /mustChangePassword: false/.test(register),
+    "Kendi parolasını seçen yarışmacı zorunlu değişime sokulmamalıdır.",
+  );
+
+  // HESAP OLUŞTURMA ATOMİKLİĞİ: defter (mail/kayıt) hatası 500 üretmemeli;
+  // tek kullanımlık parola yalnızca tutarlı başarıda ve her zaman 201 ile döner.
+  const accountsRoute = readFileSync("app/api/admin/accounts/route.ts", "utf8");
+  assert(
+    /outcome = await deliverMail/.test(accountsRoute) && /catch \(mailError\)/.test(accountsRoute),
+    "Mail gönderim istisnası hesap oluşturmayı düşürmemelidir.",
+  );
+  assert(
+    /mail = await recordMail/.test(accountsRoute) && /catch \(recordError\)/.test(accountsRoute),
+    "Giden kutusu kaydı hatası hesap oluşturmayı düşürmemelidir.",
+  );
+  const adminDbInsert = readFileSync("app/lib/admin-db.ts", "utf8");
+  assert(
+    /UNIQUE constraint failed:.*username/.test(adminDbInsert) && /UNIQUE constraint failed:.*email/.test(adminDbInsert),
+    "Eşzamanlı hesap açmada UNIQUE ihlali tutarlı 409'a (ConflictError) çevrilmelidir.",
+  );
 }
 
 /*
@@ -683,7 +779,13 @@ console.log("Integrity, lifecycle and login regression tests: PASS");
   assert(/effectiveVerdictOf\(decision\) === "OLUMSUZ"/.test(judgeReview),
     "Gelişime açık yönler kesin sonucu olumsuz kriterlerden gelmelidir.");
   // Benzerlik ayrıntısında başka takımın PDF'ine doğrudan bağlantı YOKTUR.
-  const similarityUi = app.slice(app.indexOf("function SimilarityNote"), app.indexOf("function ApplicationDetail"));
+  // Çapalar önce doğrulanır: bileşen yeniden adlandırılırsa bu test SESSİZCE
+  // geçemez (indexOf -1 dilimi bütün denetimi boşa düşürürdü).
+  const similarityUiStart = app.indexOf("function SimilarityCard");
+  const similarityUiEnd = app.indexOf("function ApplicationDetail");
+  assert(similarityUiStart > -1 && similarityUiEnd > similarityUiStart,
+    "SimilarityCard/ApplicationDetail çapaları bulunamadı; bileşen adı değiştiyse bu test güncellenmelidir.");
+  const similarityUi = app.slice(similarityUiStart, similarityUiEnd);
   assert(!/peerApplicationId\)\}\/file/.test(similarityUi),
     "Başka takımın PDF'ine doğrudan bağlantı eklenmemelidir.");
 
@@ -706,3 +808,67 @@ console.log("Integrity, lifecycle and login regression tests: PASS");
 }
 
 console.log("Judge-decision flow regression tests: PASS");
+
+/*
+ * OCR YEDEĞİ (taranmış belge çıkmazı)
+ *
+ * Metin katmansız belgede kontrollü durak (422 OCR_REQUIRED) korunur; OCR
+ * yalnızca yöneticinin AÇIK onayıyla (ocr=1) ve tam olarak BİR ek aktarım
+ * çağrısıyla çalışır. Sınıflandırma çağrısına PDF asla geri dönmez ve metin
+ * katmanlı belgelerin önbellek anahtarları bayt bayt aynı kalır.
+ */
+{
+  const { readFileSync } = await import("node:fs");
+  const route = readFileSync("app/api/analyze/route.ts", "utf8");
+  assert(/code: "OCR_REQUIRED"/.test(route), "Kontrollü durak OCR_REQUIRED koduyla korunmalıdır.");
+  assert(/ocrFallbackAvailable: true/.test(route), "422 yanıtı OCR yedeğinin varlığını bildirmelidir.");
+  assert(/formData\.get\("ocr"\)/.test(route), "OCR yalnızca istemcinin açık bayrağıyla çalışmalıdır (otomatik OCR yok).");
+  assert(/documentDelivery: "structured_text"/.test(route),
+    "Sınıflandırma çağrısı yapısal aday metinleriyle kalmalıdır.");
+  assert(!/parts: \[documentPart/.test(route),
+    "Sınıflandırma gövdesine PDF belge parçası geri dönmemelidir.");
+  assert(/\.\.\.\(ocr\.used \? \{ textExtraction: "gemini_ocr", ocrPromptVersion: OCR_PROMPT_VERSION \} : \{\}\)/.test(route),
+    "Önbellek anahtarı OCR alanlarını YALNIZCA OCR kullanıldığında içermelidir; eski anahtarlar değişmemelidir.");
+  assert(/OCR metnine dayanır/.test(route), "OCR kullanılan analizde yönetici uyarısı üretilmelidir.");
+
+  const ocr = readFileSync("app/lib/pdf-ocr.ts", "utf8");
+  assert(/temperature: 0/.test(ocr), "OCR aktarımı sıcaklık 0 ile sabitlenmelidir.");
+  assert(/responseJsonSchema/.test(ocr), "OCR aktarımı şemalı JSON istemelidir.");
+  assert((ocr.match(/runSingleGeneration\(/g) || []).length === 1,
+    "OCR tek üretim çağrısı yapmalıdır; yeniden deneme döngüsü olmamalıdır.");
+
+  const app = readFileSync("app/components/criteria-app.tsx", "utf8");
+  assert(/Görüntüden metni çıkar ve analiz et \(OCR\)/.test(app),
+    "OCR düğmesi yönetici onayını açıkça istemelidir.");
+}
+
+console.log("OCR fallback regression tests: PASS");
+
+/*
+ * SESSİZ ELEME YOK (Spec §8)
+ *
+ * Deterministik taramada aday SEÇİLMEYEN bloklar yalnızca R2 denetim kaydına
+ * yazılmakla kalmaz; analiz yanıtı özetlerini taşır ve Yarışma Yöneticisi
+ * inceleme adımında görür. Özet localStorage anlık görüntüsüne gömülmez;
+ * IndexedDB'de ayrı saklanır (tuşlama başına takılma ve kota riski yok).
+ */
+{
+  const { readFileSync } = await import("node:fs");
+  const route = readFileSync("app/api/analyze/route.ts", "utf8");
+  assert(/summarizeUnselectedBlocks/.test(route),
+    "Analiz yanıtı seçilmeyen blokların özetini üretmelidir.");
+  assert(/unselectedReview: summarizeUnselectedBlocks\(selection\.unselected\)/.test(route),
+    "Seçilmeyen blok özeti buildResult üzerinden yanıt gövdesine yazılmalıdır.");
+
+  const app = readFileSync("app/components/criteria-app.tsx", "utf8");
+  assert(/Otomatik taramada seçilmeyen bölümler/.test(app),
+    "Yönetici, seçilmeyen blokları inceleme adımında görmelidir.");
+  assert(/blocks: \[\]/.test(app),
+    "Anlık görüntüye yazılan kopyada blok listesi soyulmalıdır (sayılar kalır).");
+
+  const store = readFileSync("app/lib/draft-store.ts", "utf8");
+  assert(/saveUnselectedReview/.test(store) && /loadUnselectedReview/.test(store),
+    "Seçilmeyen blok incelemesi localStorage anlık görüntüsü dışında (IndexedDB) saklanmalıdır.");
+}
+
+console.log("Silent-exclusion regression tests: PASS");

@@ -106,6 +106,17 @@ const SCHEMA = [
    ON workflow_events (subject_type, subject_id, created_at ASC)`,
   `CREATE INDEX IF NOT EXISTS idx_workflow_events_created
    ON workflow_events (created_at DESC)`,
+  // Dağıtık kaba kuvvet sayacı: eski proses içi Map izolatlar arasında
+  // paylaşılmıyordu. Anahtar SHA-256(ip|kimlik) özetidir; açık IP, kullanıcı
+  // adı veya e-posta SAKLANMAZ. Referans SQL: migrations/0014_auth_hardening.sql
+  `CREATE TABLE IF NOT EXISTS admin_login_failures (
+    key_hash TEXT PRIMARY KEY,
+    window_started_at TEXT NOT NULL,
+    fail_count INTEGER NOT NULL DEFAULT 1,
+    last_failed_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_admin_login_failures_last
+   ON admin_login_failures (last_failed_at)`,
   // Bir kez çalışan veri düzeltmelerinin izi; aynı migration iki kez uygulanmaz.
   `CREATE TABLE IF NOT EXISTS schema_migrations (
     name TEXT PRIMARY KEY,
@@ -167,6 +178,32 @@ async function applyRoleMigrations(database: D1Database): Promise<void> {
 }
 
 /**
+ * Yarışmacı parola bayrağı düzeltmesi (tek seferlik veri göçü).
+ *
+ * Yarışmacı kayıt sırasında parolasını KENDİSİ seçer; buna rağmen eski kayıt
+ * akışı `must_change_password` bayrağını varsayılan 1 bırakıyordu. Gerçek
+ * parola değiştirme akışı (app/api/admin/password) devreye girince bu bayrak
+ * yarışmacıyı yanlış yere zorunlu değişime sokardı. Yalnızca kendi kaydını
+ * açan (created_by = 'yarışmacı kaydı') 03 hesapları temizlenir; yönetici
+ * eliyle geçici parolayla açılan hesaplara DOKUNULMAZ.
+ * Referans SQL: migrations/0011_participant_password_flag.sql
+ */
+const PARTICIPANT_PASSWORD_FLAG_MIGRATION = "0011_participant_password_flag";
+
+async function applyParticipantPasswordFlagMigration(database: D1Database): Promise<void> {
+  if (await migrationApplied(database, PARTICIPANT_PASSWORD_FLAG_MIGRATION)) return;
+  // Rol göçlerinden SONRA çalışmalıdır: 03 kodu nihai dizilimde Yarışmacıdır.
+  await database.batch([
+    database.prepare(
+      `UPDATE admin_accounts SET must_change_password = 0
+       WHERE role_code = '03' AND created_by = 'yarışmacı kaydı'`,
+    ),
+    database.prepare(`INSERT OR IGNORE INTO schema_migrations (name, applied_at) VALUES (?, ?)`)
+      .bind(PARTICIPANT_PASSWORD_FLAG_MIGRATION, new Date().toISOString()),
+  ]);
+}
+
+/**
  * Kullanıcı adıyla giriş (madde 7).
  *
  * Sütun EKLEMELİ ve geriye uyumludur: var olan hesaplar e-postayla girmeye
@@ -201,6 +238,7 @@ export async function getDatabase(): Promise<D1Database> {
       .batch(SCHEMA.map((statement) => database.prepare(statement)))
       .then(() => upgradeAccountTable(database))
       .then(() => applyRoleMigrations(database))
+      .then(() => applyParticipantPasswordFlagMigration(database))
       .catch((error: unknown) => {
         // Sonraki istek yeniden denesin; kalıcı hata bırakma.
         schemaPromise = null;
@@ -246,13 +284,20 @@ type AccountRow = {
   revoked_reason: string | null;
 };
 
-function toAccount(row: AccountRow): AdminAccount {
+/**
+ * ROL FAIL-CLOSED: tanınmayan `role_code` HİÇBİR role çevrilmez (eski davranış
+ * sessizce "01" Yarışma Yöneticisine düşürüyordu — yetki kazandıran bir
+ * fail-open). Geçersiz rollü satır hesap olarak dönmez; giriş yapamaz ve
+ * oturum tutamaz. Çağıranlar null durumunda denetim kaydı/sunucu logu üretir.
+ */
+function toAccountOrNull(row: AccountRow): AdminAccount | null {
+  if (!isRoleCode(row.role_code)) return null;
   return {
     id: row.id,
     fullName: row.full_name,
     email: row.email,
     username: row.username ?? null,
-    roleCode: (isRoleCode(row.role_code) ? row.role_code : "01") as RoleCode,
+    roleCode: row.role_code as RoleCode,
     status: row.status === "revoked" ? "revoked" : "active",
     mustChangePassword: row.must_change_password === 1,
     createdAt: row.created_at,
@@ -270,7 +315,18 @@ export async function listAccounts(): Promise<AdminAccount[]> {
        ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, role_code ASC, created_at DESC`,
     )
     .all<AccountRow>();
-  return (result.results ?? []).map(toAccount);
+  const accounts: AdminAccount[] = [];
+  for (const row of result.results ?? []) {
+    const account = toAccountOrNull(row);
+    if (!account) {
+      // Geçersiz rollü satır panelde gösterilmez; düzeltme veri tabanı
+      // müdahalesi ister ve iz sunucu logunda kalır.
+      console.error("[admin] tanınmayan role_code'lu hesap listeden gizlendi:", row.id, row.role_code);
+      continue;
+    }
+    accounts.push(account);
+  }
+  return accounts;
 }
 
 export async function findAccountByEmail(email: string): Promise<AdminAccount | null> {
@@ -279,13 +335,13 @@ export async function findAccountByEmail(email: string): Promise<AdminAccount | 
     .prepare(`SELECT * FROM admin_accounts WHERE email = ?`)
     .bind(normalizeEmail(email))
     .first<AccountRow>();
-  return row ? toAccount(row) : null;
+  return row ? toAccountOrNull(row) : null;
 }
 
 export async function findAccountById(id: string): Promise<AdminAccount | null> {
   const database = await getDatabase();
   const row = await database.prepare(`SELECT * FROM admin_accounts WHERE id = ?`).bind(id).first<AccountRow>();
-  return row ? toAccount(row) : null;
+  return row ? toAccountOrNull(row) : null;
 }
 
 export async function insertAccount(input: {
@@ -332,27 +388,41 @@ export async function insertAccount(input: {
     revokedReason: null,
   };
 
-  await database
-    .prepare(
-      `INSERT INTO admin_accounts
-        (id, full_name, email, username, role_code, password_hash, password_salt, password_iterations,
-         must_change_password, status, created_at, created_by, revoked_at, revoked_reason)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, NULL)`,
-    )
-    .bind(
-      account.id,
-      account.fullName,
-      account.email,
-      account.username,
-      account.roleCode,
-      input.password.hash,
-      input.password.salt,
-      input.password.iterations,
-      account.mustChangePassword ? 1 : 0,
-      account.createdAt,
-      account.createdBy,
-    )
-    .run();
+  try {
+    await database
+      .prepare(
+        `INSERT INTO admin_accounts
+          (id, full_name, email, username, role_code, password_hash, password_salt, password_iterations,
+           must_change_password, status, created_at, created_by, revoked_at, revoked_reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, NULL)`,
+      )
+      .bind(
+        account.id,
+        account.fullName,
+        account.email,
+        account.username,
+        account.roleCode,
+        input.password.hash,
+        input.password.salt,
+        input.password.iterations,
+        account.mustChangePassword ? 1 : 0,
+        account.createdAt,
+        account.createdBy,
+      )
+      .run();
+  } catch (error) {
+    // EŞZAMANLILIK: yukarıdaki ön-SELECT'ler iki eşzamanlı istekte yarışı
+    // kaçırabilir; UNIQUE ihlali burada tutarlı 409'a çevrilir (belirsiz 500
+    // değil) ve hesap oluşmadığı için parola çağırana dönmez.
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    if (/UNIQUE constraint failed:.*username/i.test(message)) {
+      throw new ConflictError("Bu kullanıcı adı zaten kullanılıyor.");
+    }
+    if (/UNIQUE constraint failed:.*email/i.test(message)) {
+      throw new ConflictError("Bu e-posta adresiyle zaten aktif bir hesap var.");
+    }
+    throw error;
+  }
 
   return account;
 }
@@ -450,7 +520,7 @@ export async function findAccountByUsername(username: string): Promise<AdminAcco
   if (!normalized) return null;
   const row = await database.prepare(`SELECT * FROM admin_accounts WHERE username = ?`)
     .bind(normalized).first<AccountRow>();
-  return row ? toAccount(row) : null;
+  return row ? toAccountOrNull(row) : null;
 }
 
 export async function countActiveModerators(): Promise<number> {
@@ -485,8 +555,24 @@ export async function findCredentialsByIdentifier(identifier: string): Promise<A
     .bind(email, username ?? "\u0000")
     .first<AccountRow>();
   if (!row) return null;
+  const account = toAccountOrNull(row);
+  if (!account) {
+    // ROL FAIL-CLOSED: geçersiz/sentinel rollü hesap giriş yapamaz. Deneme
+    // denetim izine yazılır; çağıran, bilinmeyen kullanıcıyla AYNI tekdüze
+    // yoldan (sahte PBKDF2 dahil) 401 döner — rol bozukluğu dışarı sızmaz.
+    await recordAudit({
+      actorId: row.id,
+      actorEmail: row.email,
+      actorRole: row.role_code,
+      action: "login_denied_invalid_role",
+      targetType: "account",
+      targetId: row.id,
+      detail: `tanınmayan role_code ile giriş reddedildi: ${row.role_code}`,
+    });
+    return null;
+  }
   return {
-    account: toAccount(row),
+    account,
     password: { hash: row.password_hash, salt: row.password_salt, iterations: row.password_iterations },
   };
 }
@@ -498,15 +584,46 @@ export async function findCredentialsByEmail(email: string): Promise<AccountCred
     .bind(normalizeEmail(email))
     .first<AccountRow>();
   if (!row) return null;
+  const account = toAccountOrNull(row);
+  if (!account) return null;
   return {
-    account: toAccount(row),
+    account,
     password: { hash: row.password_hash, salt: row.password_salt, iterations: row.password_iterations },
   };
 }
 
-export async function markPasswordChanged(id: string): Promise<void> {
+/**
+ * Oturumdaki hesabın parola özetini getirir (parola değiştirme akışı).
+ * Rol dönüşümü fail-closed'dır: tanınmayan rollü satır kimlik DÖNDÜRMEZ.
+ */
+export async function findCredentialsById(id: string): Promise<AccountCredentials | null> {
   const database = await getDatabase();
-  await database.prepare(`UPDATE admin_accounts SET must_change_password = 0 WHERE id = ?`).bind(id).run();
+  const row = await database.prepare(`SELECT * FROM admin_accounts WHERE id = ?`).bind(id).first<AccountRow>();
+  if (!row) return null;
+  const account = toAccountOrNull(row);
+  if (!account) return null;
+  return {
+    account,
+    password: { hash: row.password_hash, salt: row.password_salt, iterations: row.password_iterations },
+  };
+}
+
+/**
+ * Parolayı günceller ve `must_change_password` bayrağını AYNI ifadede
+ * temizler; iki ayrı yazım arasında yarıda kalmış durum oluşamaz. (Eski
+ * `markPasswordChanged` yardımcısı hiçbir akışa bağlı değildi; bu tek
+ * güncellemenin içinde eridi.)
+ */
+export async function updatePassword(id: string, record: PasswordRecord): Promise<void> {
+  const database = await getDatabase();
+  await database
+    .prepare(
+      `UPDATE admin_accounts
+       SET password_hash = ?, password_salt = ?, password_iterations = ?, must_change_password = 0
+       WHERE id = ?`,
+    )
+    .bind(record.hash, record.salt, record.iterations, id)
+    .run();
 }
 
 type SessionRow = { token_hash: string; account_id: string; created_at: string; expires_at: string };
@@ -541,7 +658,26 @@ export async function findSessionAccount(tokenHash: string): Promise<AdminAccoun
     await deleteSession(tokenHash);
     return null;
   }
-  const account = await findAccountById(row.account_id);
+  const accountRow = await database
+    .prepare(`SELECT * FROM admin_accounts WHERE id = ?`)
+    .bind(row.account_id)
+    .first<AccountRow>();
+  const account = accountRow ? toAccountOrNull(accountRow) : null;
+  if (accountRow && !account) {
+    // ROL FAIL-CLOSED: oturum sahibinin rolü tanınmıyorsa açık oturum ANINDA
+    // düşürülür ve olay denetim izine yazılır; hesap hiçbir yetki kazanamaz.
+    await deleteSession(tokenHash);
+    await recordAudit({
+      actorId: accountRow.id,
+      actorEmail: accountRow.email,
+      actorRole: accountRow.role_code,
+      action: "session_denied_invalid_role",
+      targetType: "account",
+      targetId: accountRow.id,
+      detail: `tanınmayan role_code ile oturum reddedildi: ${accountRow.role_code}`,
+    });
+    return null;
+  }
   // Hesap silinmiş veya pasife alınmışsa oturum da geçersizdir.
   if (!account || account.status !== "active") {
     await deleteSession(tokenHash);
@@ -558,6 +694,79 @@ export async function deleteSession(tokenHash: string): Promise<void> {
 export async function deleteSessionsForAccount(accountId: string): Promise<void> {
   const database = await getDatabase();
   await database.prepare(`DELETE FROM admin_sessions WHERE account_id = ?`).bind(accountId).run();
+}
+
+/**
+ * Parola değişiminde hesabın DİĞER bütün oturumları düşürülür; kullanıcının
+ * değişimi yaptığı mevcut oturum korunur (ekrandan atılmaz). Geçici parolayla
+ * açılmış eski oturumlar böylece anında geçersizleşir.
+ */
+export async function deleteOtherSessionsForAccount(accountId: string, keepTokenHash: string): Promise<void> {
+  const database = await getDatabase();
+  await database
+    .prepare(`DELETE FROM admin_sessions WHERE account_id = ? AND token_hash <> ?`)
+    .bind(accountId, keepTokenHash)
+    .run();
+}
+
+/* ------------------------------------------------------------------------- *
+ * Dağıtık kaba kuvvet sınırlaması (D1)
+ *
+ * Eski proses içi Map, Cloudflare izolatları arasında paylaşılmıyor ve süresi
+ * dolan anahtarları temizlemiyordu. Sayaç artık D1'dedir: anahtar
+ * SHA-256(ip|kimlik) özetidir (açık IP/kimlik SAKLANMAZ), pencere sürelidir
+ * ve eski satırlar her yazımda fırsatçı TTL ile silinir (createSession'daki
+ * süresi dolmuş oturum temizliğiyle aynı kalıp).
+ * Referans SQL: migrations/0014_auth_hardening.sql
+ * ------------------------------------------------------------------------- */
+export const LOGIN_FAILURE_WINDOW_MS = 10 * 60 * 1000;
+export const LOGIN_FAILURE_LIMIT = 8;
+
+/** Pencere içindeki başarısız deneme sayısı; pencere dolmuşsa 0 sayılır. */
+export async function countRecentLoginFailures(
+  keyHash: string,
+  windowMs: number = LOGIN_FAILURE_WINDOW_MS,
+): Promise<number> {
+  const database = await getDatabase();
+  const row = await database
+    .prepare(`SELECT fail_count, window_started_at FROM admin_login_failures WHERE key_hash = ?`)
+    .bind(keyHash)
+    .first<{ fail_count: number; window_started_at: string }>();
+  if (!row) return 0;
+  const cutoff = new Date(Date.now() - windowMs).toISOString();
+  return row.window_started_at < cutoff ? 0 : row.fail_count;
+}
+
+/** Başarısız denemeyi TEK upsert ile yazar (yarışa dayanıklı) + TTL temizliği. */
+export async function recordLoginFailure(
+  keyHash: string,
+  windowMs: number = LOGIN_FAILURE_WINDOW_MS,
+): Promise<void> {
+  const database = await getDatabase();
+  const now = nowIso();
+  const cutoff = new Date(Date.now() - windowMs).toISOString();
+  await database
+    .prepare(
+      `INSERT INTO admin_login_failures (key_hash, window_started_at, fail_count, last_failed_at)
+       VALUES (?, ?, 1, ?)
+       ON CONFLICT(key_hash) DO UPDATE SET
+         fail_count = CASE WHEN admin_login_failures.window_started_at < ?
+           THEN 1 ELSE admin_login_failures.fail_count + 1 END,
+         window_started_at = CASE WHEN admin_login_failures.window_started_at < ?
+           THEN excluded.window_started_at ELSE admin_login_failures.window_started_at END,
+         last_failed_at = excluded.last_failed_at`,
+    )
+    .bind(keyHash, now, now, cutoff, cutoff)
+    .run();
+  // Fırsatçı TTL: süresi çoktan geçmiş satırlar birikmesin (sınırsız büyüme yok).
+  const expiry = new Date(Date.now() - windowMs * 2).toISOString();
+  await database.prepare(`DELETE FROM admin_login_failures WHERE last_failed_at < ?`).bind(expiry).run();
+}
+
+/** Başarılı girişte sayaç sıfırlanır. */
+export async function clearLoginFailures(keyHash: string): Promise<void> {
+  const database = await getDatabase();
+  await database.prepare(`DELETE FROM admin_login_failures WHERE key_hash = ?`).bind(keyHash).run();
 }
 
 export type AuditEntry = {
@@ -650,7 +859,7 @@ export async function findActiveAccountByRoleAndName(roleCode: RoleCode, fullNam
     )
     .bind(roleCode, fullName)
     .first<AccountRow>();
-  return row ? toAccount(row) : null;
+  return row ? toAccountOrNull(row) : null;
 }
 
 type MailRow = {

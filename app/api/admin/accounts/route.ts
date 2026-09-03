@@ -13,8 +13,9 @@ import {
   requireModerator,
   requiredText,
 } from "../../../lib/admin-guard";
-import type { CreateAccountResult } from "../../../lib/admin-types";
+import type { CreateAccountResult, MailDelivery } from "../../../lib/admin-types";
 import { buildAccountMail, deliverMail, mailProviderReady } from "../../../lib/mailer";
+import type { MailOutcome } from "../../../lib/mailer";
 import { PASSWORD_LENGTH, generatePassword, hashPassword } from "../../../lib/password";
 import { isProduction } from "../../../lib/session";
 
@@ -86,17 +87,46 @@ export async function POST(request: Request): Promise<Response> {
       password: oneTimePassword,
       loginUrl: `${baseUrl}/moderator`,
     });
-    const outcome = await deliverMail(env, envelope);
+    // ATOMİKLİK (madde 10): hesap D1'e yazıldıktan sonra hiçbir defter işlemi
+    // (mail gönderimi, giden kutusu kaydı, denetim izi) 500 üretemez; aksi
+    // hâlde yönetici hata görür ama parolası bilinmeyen AKTİF bir hesap
+    // kalırdı. Defter hatası yanıtın `mail.status = "failed"` alanına düşer,
+    // tek kullanımlık parola HER ZAMAN tutarlı 201 ile birlikte döner ve
+    // yönetici şifreyi bu ekrandan iletebilir.
+    let outcome: MailOutcome;
+    try {
+      outcome = await deliverMail(env, envelope);
+    } catch (mailError) {
+      // deliverMail normalde fırlatmaz; beklenmeyen istisna da hesabı düşürmez.
+      console.error("[mail] gönderim istisnası", mailError);
+      outcome = { status: "failed", provider: "outbox", error: "Bildirim gönderilemedi; şifreyi bu ekrandan iletin." };
+    }
     // Kayda maskelenmiş gövde yazılır; açık şifre yalnızca bu yanıtta döner.
-    const mail = await recordMail({
-      accountId: account.id,
-      toEmail: envelope.to,
-      subject: envelope.subject,
-      body: envelope.storedBody,
-      status: outcome.status,
-      provider: outcome.provider,
-      error: outcome.error,
-    });
+    let mail: MailDelivery;
+    try {
+      mail = await recordMail({
+        accountId: account.id,
+        toEmail: envelope.to,
+        subject: envelope.subject,
+        body: envelope.storedBody,
+        status: outcome.status,
+        provider: outcome.provider,
+        error: outcome.error,
+      });
+    } catch (recordError) {
+      console.error("[mail] kayıt yazılamadı", recordError);
+      mail = {
+        id: crypto.randomUUID(),
+        accountId: account.id,
+        toEmail: envelope.to,
+        subject: envelope.subject,
+        body: envelope.storedBody,
+        status: "failed",
+        provider: outcome.provider,
+        error: "Bildirim kaydı yazılamadı; şifre yalnızca bu ekranda görünür.",
+        createdAt: new Date().toISOString(),
+      };
+    }
 
     await recordAudit({
       actorId: auth.account.id,

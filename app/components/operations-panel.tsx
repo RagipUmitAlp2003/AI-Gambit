@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { formatDateTime } from "../lib/admin-client";
 import { roleLabel } from "../lib/admin-roles";
 import { fold } from "../lib/competitions";
@@ -55,15 +55,28 @@ export default function OperationsPanel() {
   /** Kim neyi ne zaman ve neden arşivledi (madde 11); bu rol yalnızca görüntüler. */
   const [archiveTrail, setArchiveTrail] = useState<ArchiveTrailEntry[]>([]);
   const [priorityNote, setPriorityNote] = useState<Record<string, string>>({});
-  const [busyId, setBusyId] = useState("");
+  /** Pasifleştirme notu — öncelik gerekçesinden AYRI tutulur; iki metin birbirine karışmaz. */
+  const [deactivationNote, setDeactivationNote] = useState<Record<string, string>>({});
+  /** İşlem bazlı meşgul durumu: başvuru, öncelik ve aktiflik işlemleri birbirini engellemez. */
+  const [busyApplicationId, setBusyApplicationId] = useState("");
+  const [busyPriorityId, setBusyPriorityId] = useState("");
+  const [busyActiveId, setBusyActiveId] = useState("");
+  /** İşlem bazlı hata: hata, yalnızca ilgili kart/satır içinde gösterilir. */
+  const [actionError, setActionError] = useState<{ id: string; message: string } | null>(null);
   const [notice, setNotice] = useState("");
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  /** Eski ağ yanıtının yeni ekran durumunu ezmesini önleyen sıra sayacı. */
+  const loadSeq = useRef(0);
 
   function load() {
+    // Her yükleme bir sıra numarası alır; yalnızca EN SON başlatılan yükleme
+    // state yazabilir. Böylece geciken eski yanıt yeni veriyi ezemez.
+    const seq = ++loadSeq.current;
     return Promise.all([workflowApi.applications(), workflowApi.operations()])
       .then(([applicationResult, operationsResult]) => {
+        if (seq !== loadSeq.current) return;
         setApplications(applicationResult.applications);
         setSummary(operationsResult.summary);
         setRecent(operationsResult.recent);
@@ -72,25 +85,35 @@ export default function OperationsPanel() {
         setArchiveTrail(operationsResult.archiveTrail ?? []);
         setError("");
       })
-      .catch((caught) => setError(caught instanceof Error ? caught.message : "Süreç bilgileri yüklenemedi."))
-      .finally(() => setLoading(false));
+      .catch((caught) => {
+        if (seq !== loadSeq.current) return;
+        setError(caught instanceof Error ? caught.message : "Süreç bilgileri yüklenemedi.");
+      })
+      .finally(() => {
+        if (seq !== loadSeq.current) return;
+        setLoading(false);
+      });
   }
 
   useEffect(() => {
     load();
     // İlk yükleme dışında kullanıcı eylemleri `load` ile yeniler.
+    // Temizlik: bileşen kapanınca bekleyen yanıtların state yazması engellenir.
+    return () => { loadSeq.current += 1; };
   }, []);
 
   async function applicationAction(application: CompetitionApplication, action: string) {
-    setBusyId(application.id);
-    setError("");
+    setBusyApplicationId(application.id);
+    setActionError(null);
     setNotice("");
     try {
       await workflowApi.updateApplication(application.id, action, { note: "Operasyon panosu işlemi" });
       setNotice("Operasyon işlemi tamamlandı.");
       await load();
-    } catch (caught) { setError(caught instanceof Error ? caught.message : "İşlem tamamlanamadı."); }
-    finally { setBusyId(""); }
+    } catch (caught) {
+      setActionError({ id: application.id, message: caught instanceof Error ? caught.message : "İşlem tamamlanamadı." });
+    }
+    finally { setBusyApplicationId(""); }
   }
 
   /**
@@ -101,8 +124,8 @@ export default function OperationsPanel() {
    * yarışmayı öne çıkarır ve listenin başına alır.
    */
   async function togglePriority(item: CompetitionOverview) {
-    setBusyId(item.competitionId);
-    setError("");
+    setBusyPriorityId(item.competitionId);
+    setActionError(null);
     setNotice("");
     try {
       const next = !item.isPriority;
@@ -112,8 +135,10 @@ export default function OperationsPanel() {
         : `“${item.competitionName}” önceliği kaldırıldı.`);
       setPriorityNote((current) => ({ ...current, [item.competitionId]: "" }));
       await load();
-    } catch (caught) { setError(caught instanceof Error ? caught.message : "Öncelik güncellenemedi."); }
-    finally { setBusyId(""); }
+    } catch (caught) {
+      setActionError({ id: item.competitionId, message: caught instanceof Error ? caught.message : "Öncelik güncellenemedi." });
+    }
+    finally { setBusyPriorityId(""); }
   }
 
   /**
@@ -124,18 +149,22 @@ export default function OperationsPanel() {
    * aşaması ve kararları DEĞİŞMEZ.
    */
   async function toggleActive(item: CompetitionOverview) {
-    setBusyId(item.competitionId);
-    setError("");
+    setBusyActiveId(item.competitionId);
+    setActionError(null);
     setNotice("");
     try {
       const next = !item.isActive;
-      await workflowApi.setCompetitionActive(item.competitionId, next, priorityNote[item.competitionId] ?? "");
+      // Pasifleştirme notu KENDİ alanından okunur; öncelik gerekçesi karışmaz.
+      await workflowApi.setCompetitionActive(item.competitionId, next, deactivationNote[item.competitionId] ?? "");
       setNotice(next
         ? `“${item.competitionName}” AKTİF edildi; yarışmacı listesinde görünür ve yeni başvuru kabul eder.`
         : `“${item.competitionName}” PASİF edildi; yeni başvuru alınmaz. Hakem geçmiş başvuruları görmeye devam eder.`);
+      setDeactivationNote((current) => ({ ...current, [item.competitionId]: "" }));
       await load();
-    } catch (caught) { setError(caught instanceof Error ? caught.message : "Yarışma durumu güncellenemedi."); }
-    finally { setBusyId(""); }
+    } catch (caught) {
+      setActionError({ id: item.competitionId, message: caught instanceof Error ? caught.message : "Yarışma durumu güncellenemedi." });
+    }
+    finally { setBusyActiveId(""); }
   }
 
   const filtered = useMemo(() => {
@@ -311,23 +340,38 @@ export default function OperationsPanel() {
                   <button
                     type="button"
                     className={item.isPriority ? "text-button" : "secondary-button"}
-                    disabled={busyId === item.competitionId}
+                    disabled={busyPriorityId === item.competitionId || busyActiveId === item.competitionId}
                     onClick={() => togglePriority(item)}
                   >
-                    {busyId === item.competitionId
+                    {busyPriorityId === item.competitionId
                       ? "Güncelleniyor…"
                       : item.isPriority ? "Önceliği kaldır" : "🔥 Öncelikli işaretle"}
                   </button>
+                  {/* Pasifleştirme notu: öncelik gerekçesinden ayrı, kendi alanında tutulur. */}
+                  {item.isActive ? (
+                    <input
+                      value={deactivationNote[item.competitionId] ?? ""}
+                      maxLength={300}
+                      placeholder="Pasifleştirme notu (isteğe bağlı)"
+                      aria-label={`${item.competitionName} pasifleştirme notu`}
+                      onChange={(event) => setDeactivationNote((current) => ({ ...current, [item.competitionId]: event.target.value }))}
+                    />
+                  ) : null}
                   {/* Aktif/pasif: yeni başvuru ve yeni kuyruk üretimini durdurur (madde 6). */}
                   <button
                     type="button"
                     className={item.isActive ? "danger-button ghost" : "secondary-button"}
-                    disabled={busyId === item.competitionId}
+                    disabled={busyPriorityId === item.competitionId || busyActiveId === item.competitionId}
                     onClick={() => toggleActive(item)}
                   >
-                    {item.isActive ? "Pasife al" : "Aktifleştir"}
+                    {busyActiveId === item.competitionId
+                      ? "Güncelleniyor…"
+                      : item.isActive ? "Pasife al" : "Aktifleştir"}
                   </button>
                 </div>
+                {actionError?.id === item.competitionId ? (
+                  <p className="admin-error" role="alert">{actionError.message}</p>
+                ) : null}
               </article>
             );
           })}
@@ -371,9 +415,10 @@ export default function OperationsPanel() {
                 : <small className="assignment-pending">Sistem, aktif Hakem hesabı açıldığında otomatik atayacak</small>}
             </span>
             <span className="operation-actions">
-              {item.assignedJudgeId ? <button type="button" className="text-button" disabled={busyId === item.id} onClick={() => applicationAction(item, "remind_judge")}>Hatırlat</button> : null}
-              {item.status === "analysis_failed" ? <button type="button" className="text-button" disabled={busyId === item.id} onClick={() => applicationAction(item, "requeue_analysis")}>Analizi yeniden başlat</button> : null}
-              {item.status === "analysis_failed" ? <button type="button" className="text-button" disabled={busyId === item.id} onClick={() => applicationAction(item, "request_document")}>Yeni PDF iste</button> : null}
+              {item.assignedJudgeId ? <button type="button" className="text-button" disabled={busyApplicationId === item.id} onClick={() => applicationAction(item, "remind_judge")}>Hatırlat</button> : null}
+              {item.status === "analysis_failed" ? <button type="button" className="text-button" disabled={busyApplicationId === item.id} onClick={() => applicationAction(item, "requeue_analysis")}>Analizi yeniden başlat</button> : null}
+              {item.status === "analysis_failed" ? <button type="button" className="text-button" disabled={busyApplicationId === item.id} onClick={() => applicationAction(item, "request_document")}>Yeni PDF iste</button> : null}
+              {actionError?.id === item.id ? <small className="admin-error" role="alert">{actionError.message}</small> : null}
             </span>
           </div>
         ))}

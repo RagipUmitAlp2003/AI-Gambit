@@ -1,5 +1,5 @@
 import { requirePermission } from "../../lib/admin-guard";
-import { acquireAnalysisPermit, requestBodyTooLarge } from "../../lib/request-guard";
+import { PayloadTooLargeError, acquireAnalysisPermit, readFormDataWithLimit, requestBodyTooLarge } from "../../lib/request-guard";
 import {
   EXTRACTION_PROMPT_VERSION,
   EXTRACTION_SCHEMA,
@@ -11,9 +11,10 @@ import {
 import { describeGeminiFailure, runSingleGeneration } from "../../lib/gemini-generation";
 import { recordUsage } from "../../lib/usage-metrics";
 import { pdfIntegrityError } from "../../lib/pdf-integrity";
-import { CANDIDATE_SELECTOR_VERSION, formatCandidatesForLlm, selectCriteriaCandidates, type CandidateSelection } from "../../lib/criteria-candidates";
+import { CANDIDATE_SELECTOR_VERSION, formatCandidatesForLlm, selectCriteriaCandidates, summarizeUnselectedBlocks, type CandidateSelection } from "../../lib/criteria-candidates";
 import { DICTIONARY_VERSION } from "../../lib/criteria-dictionary";
-import { extractPdfStructure, PDF_STRUCTURE_VERSION, PdfTextLayerError, type StructuredPdf } from "../../lib/pdf-structure";
+import { extractPdfStructure, PDF_STRUCTURE_OCR_VERSION, PDF_STRUCTURE_VERSION, PdfTextLayerError, type StructuredPdf } from "../../lib/pdf-structure";
+import { extractPdfStructureViaOcr, OCR_PROMPT_VERSION } from "../../lib/pdf-ocr";
 import { deleteStoredAnalysis, findStoredAnalysis, reportBucket, saveCriteriaExtractionRun, saveStoredAnalysis, touchStoredAnalysis } from "../../lib/workflow-db";
 import type { AnalysisDiagnostics, AnalysisResult } from "../../lib/types";
 
@@ -31,6 +32,13 @@ import type { AnalysisDiagnostics, AnalysisResult } from "../../lib/types";
  * `retryable: true` döndürür, kullanıcı "Yeniden dene" ile kendisi karar verir.
  * Tanılamadaki `apiCalls` gerçekten yapılan istek sayısıdır.
  *
+ * TEK İSTİSNA — OCR yedeği: metin katmansız (taranmış) belgede uç önce
+ * kontrollü 422 (OCR_REQUIRED) ile durur. Yarışma Yöneticisi OCR'yi arayüzden
+ * AÇIKÇA onaylarsa (`ocr=1`) aktarım için tam olarak BİR ek `generateContent`
+ * isteği yapılır; bu çağrı da hiç yeniden denenmez ve sayaçlara olduğu gibi
+ * yazılır. OCR yapısı belge başına bir kez üretilip R2'de sabitlenir; sonraki
+ * yeniden analizler ek çağrı yapmadan sabit yapıyı kullanır.
+ *
  * Model çıktısı sunucuda doğrulanır (sayfa sınırı, tekrar, boş alan); karar
  * yöneticide kalır. Puan planı, güven seviyesi ve pasif kriter üretilmez.
  */
@@ -46,12 +54,16 @@ const MAX_MULTIPART_BYTES = MAX_PDF_BYTES + 768 * 1024;
 const GENERATION_TIMEOUT_MS = 150_000;
 
 /**
- * Çıktı token tavanı. Eskiden 65536'ydı; şema sıkılaştıktan sonra (şablon ve
- * kapsam-dışı listesi çıkarıldı, açıklamalar tek cümleye indi) en yoğun
- * şartname bile bunun çok altında kalıyor. Düşük tavan modelin uzun, dolambaçlı
- * metin üretmesini de caydırır ve yanıt süresini kısaltır.
+ * Çıktı token tavanı.
+ *
+ * 24 576'ya indirilmişti; ancak aday-karar sözleşmesinde model HER aday için
+ * bir karar satırı (kaynak alıntısıyla birlikte) döndürür ve düşünme tokenları
+ * da bu bütçeden düşer. Yoğun bir şartnamede (ör. 29 sayfa, 200+ aday) çıktı
+ * tavana takılıp JSON ortasından kesiliyor ve analiz "şemaya uygun JSON
+ * okunamadı" ile düşüyordu. Tavan modelin desteklediği üst sınıra alındı;
+ * gerçek maliyet üretilen tokena göre oluşur, tavana göre değil.
  */
-const MAX_OUTPUT_TOKENS = 24_576;
+const MAX_OUTPUT_TOKENS = 65_536;
 
 /**
  * Modelin "düşünme" bütçesi — analiz süresinin en büyük belirleyicisi.
@@ -154,27 +166,55 @@ function extractUsage(payload: unknown) {
   };
 }
 
+/** Bu isteğin OCR ayak izi; önbellek isabetinde de sonuç OCR uyarısını taşır. */
+type OcrRunInfo = {
+  used: boolean;
+  /** OCR aktarımı için BU istekte yapılan üretim çağrısı sayısı (sabit yapıda 0). */
+  apiCalls: number;
+  modelMs: number;
+  extraWarnings: string[];
+};
+
+const NO_OCR: OcrRunInfo = { used: false, apiCalls: 0, modelMs: 0, extraWarnings: [] };
+
+/**
+ * OCR ile çıkarılan metne dayanan HER analizde (taze ya da önbellekten)
+ * yöneticiye gösterilen zorunlu uyarı; mevcut analysisWarnings listesinde
+ * ek arayüz gerektirmeden görünür.
+ */
+const OCR_WARNING = "Bu belgede okunabilir metin katmanı bulunamadı; metin yapay zekâ görüntü okumasıyla (OCR) çıkarıldı. "
+  + "Kaynak sayfaları ve alıntılar OCR metnine dayanır; yayımlamadan önce kaynakları belge üzerinde doğrulayın.";
+
 function buildResult(
   extraction: CachedExtraction,
   diagnostics: AnalysisDiagnostics,
   structure: StructuredPdf,
   selection: CandidateSelection,
+  ocr: OcrRunInfo = NO_OCR,
 ): AnalysisResult {
   const candidateIds = new Set(selection.candidates.map((candidate) => candidate.block.sourceId));
   const normalized = normalizeExtraction(extraction.raw, extraction.pageCount, structure.blocks, candidateIds);
   const analysisWarnings = [...normalized.warnings];
+  if (ocr.used) analysisWarnings.push(OCR_WARNING, ...ocr.extraWarnings);
   return {
     setup: normalized.setup,
     templateProfile: normalized.templateProfile,
-    criteria: normalized.criteria,
+    // OCR kökeni kriter üstünde iz olarak taşınır; yayımlanan profil de taşır.
+    criteria: ocr.used ? normalized.criteria.map((item) => ({ ...item, ocrDerived: true })) : normalized.criteria,
     pageCount: extraction.pageCount,
     provider: "api",
     model: extraction.model,
     analyzedAt: new Date().toISOString(),
     analysisWarnings,
+    // Sessiz eleme yok (Spec §8): otomatik taramanın aday SEÇMEDİĞİ bloklar
+    // yalnızca R2 denetim kaydına değil, yanıt gövdesine de yazılır ve
+    // Yarışma Yöneticisi inceleme adımında görür. Seçim her istekte yeniden
+    // hesaplandığı için önbellek isabetleri de bu özeti sıfır maliyetle taşır.
+    unselectedReview: summarizeUnselectedBlocks(selection.unselected),
     diagnostics: {
       ...diagnostics,
-      structureVersion: PDF_STRUCTURE_VERSION,
+      // OCR kullanıldıysa yapı sürümü OCR sürümüdür (pdf-structure-ocr-v1).
+      structureVersion: structure.version,
       dictionaryVersion: DICTIONARY_VERSION,
       selectorVersion: CANDIDATE_SELECTOR_VERSION,
       totalBlocks: selection.diagnostics.totalBlocks,
@@ -184,6 +224,9 @@ function buildResult(
       excludedCandidates: normalized.stats.excludedCandidates,
       rejectedSources: normalized.stats.rejectedSources,
       duplicateCriteria: normalized.stats.duplicateCriteria,
+      correctedPages: normalized.stats.correctedPages,
+      droppedCriteria: normalized.stats.droppedCriteria,
+      ...(ocr.used ? { textExtraction: "gemini_ocr" as const, ocrApiCalls: ocr.apiCalls, ocrMs: ocr.modelMs } : {}),
     },
   };
 }
@@ -202,11 +245,15 @@ async function saveCoverageArtifact(
   structure: StructuredPdf,
   selection: CandidateSelection,
 ): Promise<string | undefined> {
-  const key = `criteria-analysis/${documentHashValue}/${EXTRACTION_PROMPT_VERSION}-${DICTIONARY_VERSION}.json`;
+  // Anahtar yapı sürümünü de içerir: v1 denetim kayıtları (eski
+  // criteria_extraction_runs tanılamalarındaki coverageArtifactKey'in işaret
+  // ettiği nesneler) v2 yeniden analiziyle ÜZERİNE YAZILMAZ; her sürüm kendi
+  // nesnesine yazar.
+  const key = `criteria-analysis/${documentHashValue}/${structure.version}-${EXTRACTION_PROMPT_VERSION}-${DICTIONARY_VERSION}.json`;
   try {
     await reportBucket().put(key, JSON.stringify({
       createdAt: new Date().toISOString(),
-      structureVersion: PDF_STRUCTURE_VERSION,
+      structureVersion: structure.version,
       dictionaryVersion: DICTIONARY_VERSION,
       selectorVersion: CANDIDATE_SELECTOR_VERSION,
       structure,
@@ -217,6 +264,44 @@ async function saveCoverageArtifact(
   } catch (error) {
     console.error("[analyze] kapsam denetim kaydı R2'ye yazılamadı", error);
     return undefined;
+  }
+}
+
+/**
+ * Belge başına TEK OCR koşusu: aktarılan yapı R2'de bu anahtarla sabitlenir ve
+ * sonraki yeniden analizler modele gitmeden sabit yapıyı okur. Kaynak
+ * kimlikleri (sourceId) böylece OCR'li belgede de yeniden analizler arasında
+ * kararlı kalır. Yalnızca `ocr=1&refresh=1` birlikte gelirse taze OCR yapılır.
+ */
+function ocrStructureKey(documentHashValue: string): string {
+  return `criteria-analysis/${documentHashValue}/ocr-structure-${OCR_PROMPT_VERSION}.json`;
+}
+
+async function loadStoredOcrStructure(documentHashValue: string): Promise<StructuredPdf | null> {
+  try {
+    const stored = await reportBucket().get(ocrStructureKey(documentHashValue));
+    if (!stored) return null;
+    const parsed = JSON.parse(await stored.text()) as StructuredPdf;
+    // Sürüm ve içerik doğrulanır; bozuk/yabancı kayıt sessizce yok sayılır ve
+    // yönetici onayı yeniden istenir.
+    if (parsed?.version !== PDF_STRUCTURE_OCR_VERSION || parsed.pdfHash !== documentHashValue
+      || !Array.isArray(parsed.blocks) || !parsed.blocks.length) return null;
+    return parsed;
+  } catch (error) {
+    console.error("[analyze] sabitlenmiş OCR yapısı okunamadı; OCR onayı yeniden istenecek", error);
+    return null;
+  }
+}
+
+async function saveOcrStructure(documentHashValue: string, structure: StructuredPdf): Promise<void> {
+  try {
+    await reportBucket().put(ocrStructureKey(documentHashValue), JSON.stringify(structure), {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+    });
+  } catch (error) {
+    // Sabitleme başarısız olsa da analiz sonucu döner; D1 önbelleği nihai
+    // sonucu zaten içerik özetiyle korur.
+    console.error("[analyze] OCR yapısı R2'ye sabitlenemedi", error);
   }
 }
 
@@ -254,7 +339,9 @@ export async function POST(request: Request) {
       console.warn("[gemini] GEMINI_API_KEY beklenen 'AIza' ön ekiyle başlamıyor; Gemini API bu kimlik türünü reddedebilir.");
     }
 
-    const formData = await request.formData();
+    // Gerçek bayt sınırı akış sırasında uygulanır; Content-Length eksik olsa
+    // bile 200 MB'lık gövde Worker belleğine alınmaz (madde 9).
+    const formData = await readFormDataWithLimit(request, MAX_MULTIPART_BYTES);
     const file = formData.get("file");
     if (!(file instanceof File)) {
       return Response.json({ error: "Analiz edilecek organizatör PDF'si eksik." }, { status: 400 });
@@ -268,7 +355,62 @@ export async function POST(request: Request) {
     const pdfBytes = await file.arrayBuffer();
     const sourceIntegrityError = pdfIntegrityError(pdfBytes);
     if (sourceIntegrityError) return Response.json({ error: sourceIntegrityError }, { status: 422 });
-    const structure = await extractPdfStructure(pdfBytes);
+
+    const forceRefresh = String(formData.get("refresh") ?? "") === "1";
+    /** OCR yalnızca yöneticinin arayüzden verdiği açık onayla (`ocr=1`) çalışır. */
+    const ocrRequested = String(formData.get("ocr") ?? "") === "1";
+    const docHash = await documentHash(pdfBytes);
+
+    /*
+     * METİN ÇIKARIMI — kontrollü durak + yönetici onaylı OCR yedeği.
+     *
+     * 1. Metin katmanı yeterliyse her şey eskisi gibidir (tek sınıflandırma çağrısı).
+     * 2. Yetersizse önce R2'deki SABİTLENMİŞ OCR yapısına bakılır: varsa ek
+     *    çağrı yapılmadan kullanılır (kaynak kimlikleri kararlı kalır).
+     * 3. Sabit yapı yoksa ve yönetici `ocr=1` ile onayladıysa tam olarak BİR
+     *    aktarım çağrısı yapılır ve çıktı R2'ye sabitlenir.
+     * 4. Onay yoksa 422 OCR_REQUIRED + `ocrFallbackAvailable` döner; kararı
+     *    arayüzdeki düğmeyle yönetici verir. Sunucu kendiliğinden OCR başlatmaz.
+     */
+    let structure: StructuredPdf;
+    let ocr: OcrRunInfo = NO_OCR;
+    let ocrUsage = { prompt: 0, output: 0, total: 0 };
+    try {
+      structure = await extractPdfStructure(pdfBytes);
+    } catch (extractionError) {
+      if (!(extractionError instanceof PdfTextLayerError)) throw extractionError;
+      const pinned = ocrRequested && forceRefresh ? null : await loadStoredOcrStructure(docHash);
+      if (pinned) {
+        structure = pinned;
+        ocr = { used: true, apiCalls: 0, modelMs: 0, extraWarnings: [] };
+      } else if (ocrRequested) {
+        const ocrOutcome = await extractPdfStructureViaOcr({
+          apiKey,
+          pdfBytes,
+          fileName: file.name,
+          pageCount: extractionError.pageCount ?? 0,
+          pdfHash: extractionError.pdfHash ?? docHash,
+        });
+        if (!ocrOutcome.ok) {
+          console.error("OCR aktarımı başarısız:", { status: ocrOutcome.status, detail: ocrOutcome.detail, apiCalls: ocrOutcome.apiCalls });
+          recordUsage({ model: PRIMARY_MODEL, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls: ocrOutcome.apiCalls });
+          // `retryable` yine kullanıcıya bırakılır; sunucu ikinci OCR denemez.
+          return Response.json(
+            { error: ocrOutcome.detail, retryable: ocrOutcome.transient, code: "OCR_FAILED", apiCalls: ocrOutcome.apiCalls },
+            { status: ocrOutcome.status },
+          );
+        }
+        structure = ocrOutcome.structure;
+        ocr = { used: true, apiCalls: ocrOutcome.apiCalls, modelMs: ocrOutcome.modelMs, extraWarnings: ocrOutcome.warnings };
+        ocrUsage = ocrOutcome.usage;
+        await saveOcrStructure(docHash, ocrOutcome.structure);
+      } else {
+        return Response.json(
+          { error: extractionError.message, code: "OCR_REQUIRED", ocrFallbackAvailable: true },
+          { status: 422 },
+        );
+      }
+    }
     const pageCount = structure.pageCount;
     const selection = selectCriteriaCandidates(structure.blocks);
     if (!selection.candidates.length) {
@@ -279,7 +421,6 @@ export async function POST(request: Request) {
 
     // Aynı belge ve aynı talimat daha önce işlendiğinde modeli hiç çağırma.
     // Önbellek isabetinde `apiCalls: 0` yazılır; sayı uydurulmaz.
-    const docHash = structure.pdfHash;
     const cacheContext = JSON.stringify({
       promptVersion: EXTRACTION_PROMPT_VERSION,
       document: docHash,
@@ -295,6 +436,10 @@ export async function POST(request: Request) {
       maxOutputTokens: MAX_OUTPUT_TOKENS,
       temperature: 0,
       pageCount,
+      // OCR alanları YALNIZCA OCR kullanıldığında eklenir: metin katmanlı
+      // belgelerin anahtar dizgesi bayt bayt aynı kalır ve mevcut D1/bellek
+      // kayıtları geçersizleşmez.
+      ...(ocr.used ? { textExtraction: "gemini_ocr", ocrPromptVersion: OCR_PROMPT_VERSION } : {}),
     });
     const cacheKey = await documentHash(new TextEncoder().encode(cacheContext).buffer);
     const coverageArtifactKey = await saveCoverageArtifact(docHash, structure, selection);
@@ -305,27 +450,33 @@ export async function POST(request: Request) {
      * Yarışma Yöneticisi "Yeniden analiz et" dediğinde `refresh=1` gelir:
      * bellek ve D1 kayıtları ATLANIR, model gerçekten yeniden çalışır ve
      * yeni sonuç eski kaydın üzerine yazılır. Böylece eski ama hatalı bir
-     * sonuç sistemde sonsuza kadar kalamaz.
+     * sonuç sistemde sonsuza kadar kalamaz. (Bayrak, OCR akışı da okuduğu
+     * için yukarıda, metin çıkarımından önce çözülür.)
      */
-    const forceRefresh = String(formData.get("refresh") ?? "") === "1";
     if (forceRefresh) {
       analysisCache().delete(cacheKey);
       await deleteStoredAnalysis(cacheKey).catch((cacheError) =>
         console.error("[analyze] kalıcı analiz kaydı silinemedi", cacheError));
     }
 
-    /** Önbellek isabeti: modele gidilmez, 0 token; kaynağı tanılamaya yazılır. */
+    /**
+     * Önbellek isabeti: sınıflandırma modeline gidilmez. Sayaçlar uydurulmaz:
+     * bu istekte OCR aktarımı yapıldıysa (nadir: sabitleme yazılamamış ama D1
+     * kaydı duruyorsa) o çağrı ve tokenları olduğu gibi yazılır; olağan yolda
+     * hepsi 0'dır.
+     */
     const respondFromCache = async (extraction: CachedExtraction, store: "memory" | "database") => {
       const totalMs = Date.now() - startedAt;
-      recordUsage({ model: extraction.model, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: totalMs, cached: true, error: false, apiCalls: 0 });
+      recordUsage({ model: extraction.model, promptTokens: ocrUsage.prompt, outputTokens: ocrUsage.output, totalTokens: ocrUsage.total, durationMs: totalMs, cached: true, error: false, apiCalls: ocr.apiCalls });
       // Bellekten sunulan isabet kalıcı kaydın tazeliğini de işaretler; aksi
       // hâlde en sık kullanılan belge D1'de "soğuk" görünür ve satır sınırı
       // budaması tam da onu silerdi. Güncelleme başarısız olsa da yanıt döner.
       if (store === "memory") await touchStoredAnalysis(cacheKey).catch(() => undefined);
       const cachedResult = buildResult(extraction, {
-        totalMs, modelMs: 0, promptTokens: 0, outputTokens: 0, cached: true, apiCalls: 0, documentTransfers: 0,
+        totalMs, modelMs: 0, promptTokens: ocrUsage.prompt, outputTokens: ocrUsage.output, cached: true,
+        apiCalls: ocr.apiCalls, documentTransfers: ocr.apiCalls > 0 ? 1 : 0,
         cacheStore: store, firstAnalyzedAt: extraction.analyzedAt, coverageArtifactKey,
-      }, structure, selection);
+      }, structure, selection, ocr);
       await saveCriteriaExtractionRun(cachedResult, file.name, auth.account)
         .catch((historyError) => console.error("[workflow] analiz geçmişi kaydedilemedi", historyError));
       return Response.json(cachedResult);
@@ -405,12 +556,16 @@ export async function POST(request: Request) {
     });
 
     let modelUsed = PRIMARY_MODEL;
-    /** Gerçekten yapılan `generateContent` isteği sayısı; tanılamaya bu yazılır. */
-    let apiCalls: 0 | 1 = 0;
+    /**
+     * Gerçekten yapılan `generateContent` isteği sayısı; tanılamaya bu yazılır.
+     * OCR aktarımı yapıldıysa o çağrı da sayılır (dürüst toplam, 2 olabilir).
+     */
+    let apiCalls: number = ocr.apiCalls;
 
     const failWith = (status: number, detail: string) => {
       console.error("AI analiz isteği başarısız:", { status, detail, apiCalls });
-      recordUsage({ model: modelUsed, promptTokens: 0, outputTokens: 0, totalTokens: 0, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls });
+      // Sınıflandırma düşse bile bu istekte yapılmış OCR çağrısı ve tokenları kayıttan silinmez.
+      recordUsage({ model: modelUsed, promptTokens: ocrUsage.prompt, outputTokens: ocrUsage.output, totalTokens: ocrUsage.total, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls });
       const failure = describeGeminiFailure(status, detail, "AI belge analizi");
       // `retryable` istemciye "Yeniden dene" düğmesini göstermesini söyler;
       // sunucu kendiliğinden ikinci bir çağrı yapmaz.
@@ -430,17 +585,24 @@ export async function POST(request: Request) {
       label: "analyze",
     });
     const modelMs = Date.now() - modelStartedAt;
-    apiCalls = outcome.apiCalls;
+    apiCalls = ocr.apiCalls + outcome.apiCalls;
     if (!outcome.ok) return failWith(outcome.status, outcome.detail);
     modelUsed = outcome.model;
 
     const responseText = extractGeminiText(outcome.payload);
-    if (!responseText) return failWith(502, "Belge analizi için geçerli yapılandırılmış çıktı alınamadı.");
+    // Çıktı token tavanına takılan yanıt JSON ortasından kesilir; bunu genel
+    // "JSON okunamadı" cümlesiyle maskelemek kök nedeni görünmez kılıyordu.
+    const finishReason = (outcome.payload as { candidates?: Array<{ finishReason?: string }> })
+      ?.candidates?.[0]?.finishReason ?? "";
+    if (finishReason === "MAX_TOKENS") {
+      return failWith(502, "Model çıktısı izin verilen çıktı token sınırına takılıp kesildi. Belge olağan dışı yoğun olabilir; sorun sürerse GEMINI_MODEL için daha yüksek çıktı kapasiteli bir model seçin.");
+    }
+    if (!responseText) return failWith(502, `Belge analizi için geçerli yapılandırılmış çıktı alınamadı${finishReason ? ` (finishReason: ${finishReason})` : ""}.`);
     let raw: RawExtraction;
     try {
       raw = JSON.parse(responseText) as RawExtraction;
     } catch {
-      return failWith(502, "Belge analizi şemaya uygun JSON olarak okunamadı.");
+      return failWith(502, `Belge analizi şemaya uygun JSON olarak okunamadı${finishReason ? ` (finishReason: ${finishReason})` : ""}.`);
     }
     // JSON.parse "null" gibi nesne olmayan gövdeleri de geçirir; böyle bir
     // gövde normalizasyonda patlar ve önbelleğe girerse her isteği düşürürdü.
@@ -470,11 +632,13 @@ export async function POST(request: Request) {
 
     const totalMs = Date.now() - startedAt;
     const usage = extractUsage(outcome.payload);
+    // Kullanım kaydı işlem başına tektir ve dürüst toplamı taşır:
+    // sınıflandırma + (varsa) OCR aktarım tokenları ve çağrı sayısı.
     recordUsage({
       model: modelUsed,
-      promptTokens: usage.prompt,
-      outputTokens: usage.output,
-      totalTokens: usage.total,
+      promptTokens: usage.prompt + ocrUsage.prompt,
+      outputTokens: usage.output + ocrUsage.output,
+      totalTokens: usage.total + ocrUsage.total,
       durationMs: totalMs,
       cached: false,
       error: false,
@@ -484,20 +648,25 @@ export async function POST(request: Request) {
     const result = buildResult(extraction, {
       totalMs,
       modelMs,
-      promptTokens: usage.prompt,
-      outputTokens: usage.output,
+      promptTokens: usage.prompt + ocrUsage.prompt,
+      outputTokens: usage.output + ocrUsage.output,
       cached: false,
       uploadMs: 0,
       // Gerçek istek sayısı; "1 dedik ama 6 gönderdik" durumu yaşanmaz.
       apiCalls,
-      documentTransfers: 0,
+      // Sınıflandırma çağrısı PDF taşımaz; OCR aktarımı yapıldıysa belge bir kez taşınmıştır.
+      documentTransfers: ocr.apiCalls > 0 ? 1 : 0,
       documentDelivery: "structured_text",
       coverageArtifactKey,
-    }, structure, selection);
+    }, structure, selection, ocr);
     await saveCriteriaExtractionRun(result, file.name, auth.account)
       .catch((historyError) => console.error("[workflow] analiz geçmişi kaydedilemedi", historyError));
     return Response.json(result);
   } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      // Akış sınırı: Content-Length beyanı olmayan büyük gövde de 413 alır (madde 9).
+      return Response.json({ error: "Gönderilen analiz isteği izin verilen boyutu aşıyor." }, { status: 413 });
+    }
     if (error instanceof PdfTextLayerError) {
       return Response.json({ error: error.message, code: "OCR_REQUIRED" }, { status: 422 });
     }

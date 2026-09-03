@@ -1,5 +1,6 @@
 import { handleError, json, jsonError, requirePermission } from "../../../../lib/admin-guard";
-import { addSubmissionVersion, reportBucket } from "../../../../lib/workflow-db";
+import { readFormDataWithLimit } from "../../../../lib/request-guard";
+import { addSubmissionVersion, markSimilarityResultsStale, reportBucket } from "../../../../lib/workflow-db";
 import { recordAudit } from "../../../../lib/admin-db";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -15,7 +16,8 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
   const applicationId = (await context.params).id;
   let objectKey = "";
   try {
-    const form = await request.formData();
+    // Boyut kapısı ayrıştırmadan ÖNCE (madde 9): 50 MB PDF + form alanları payı.
+    const form = await readFormDataWithLimit(request, MAX_REPORT_BYTES + 1024 * 1024);
     const file = form.get("file");
     if (!(file instanceof File)) return jsonError(400, "Yeni rapor PDF'i seçilmedi.");
     if (file.size <= 0 || file.size > MAX_REPORT_BYTES) return jsonError(413, "Yeni PDF boş olamaz ve en fazla 50 MB olabilir.");
@@ -43,6 +45,12 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
       action: "submission_version_added", targetType: "competition_application", targetId: applicationId,
       detail: file.name.slice(0, 240),
     }).catch((error) => console.error("[audit] submission version", error));
+    // Havuza yeni rapor sürümü geldi (madde 8): eşlerin benzerlik sonuçları
+    // "güncel değil" işaretlenir. Yazım BEKLENİR (Workers izolatı yanıttan
+    // sonra beklemeyen D1 yazımını tamamlamayabilir); defter tutma hatası
+    // yine de yüklemeyi düşürmez (.catch).
+    await markSimilarityResultsStale(result.competitionKey, "Havuza yeni rapor geldi; benzerlik analizini yenileyin.", applicationId)
+      .catch((staleError) => console.error("[similarity] havuz eskitme işareti yazılamadı", staleError));
     return json({ application: result }, 201);
   } catch (error) {
     return handleError(error);

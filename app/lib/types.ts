@@ -158,6 +158,31 @@ export function isControlTypeCompatible(stage: CheckStage, value: unknown): valu
   return isCriterionControlType(value) && criterionControlTypesForStage(stage).includes(value);
 }
 
+/**
+ * Aşamanın varsayılan kontrol yöntemi. `controlType` alanı eklenmeden önce
+ * yayımlanmış (eski) profil ve kriter sürümlerinde alan hiç bulunmaz; bu
+ * kayıtlar okunurken ve model istemine yazılırken aşamaya uygun varsayılan
+ * budur. headings_content için içerik varlığı seçilir: birebir başlık en katı,
+ * anlamsal uygunluk en gevşek yöntemdir; eski "zorunlu içerik" anlamına en
+ * yakın ve yanlış KRİTİK_HATA üretmeyen orta yol içerik varlığıdır.
+ */
+export function defaultControlTypeForStage(stage: CheckStage): CriterionControlType {
+  if (stage === "headings_content") return "ICERIK_VARLIGI";
+  if (stage === "category_similarity") return "ANLAMSAL_UYGUNLUK";
+  if (stage === "criteria_evidence") return "KANIT_KONTROLU";
+  return "KANIT_KONTROLU";
+}
+
+/**
+ * Kriterin kontrol yöntemini kesinleştirir: değer aşamayla uyumluysa korunur,
+ * eksik veya aşamayla uyumsuzsa aşamanın varsayılanına düşülür. Eski profiller
+ * reddedilmeden yüklenebilsin diye hoşgörülüdür; 2.0 doğrulamasındaki katı
+ * uyumsuzluk reddi ayrıca `validateProfileExport` içinde korunur.
+ */
+export function resolveControlType(stage: CheckStage, value: unknown): CriterionControlType {
+  return isControlTypeCompatible(stage, value) ? value : defaultControlTypeForStage(stage);
+}
+
 /* ------------------------------------------------------------------------- *
  * Kriterin PDF'den denetlenebilirliği
  *
@@ -237,6 +262,12 @@ export type Criterion = {
    */
   verifiability: CriterionVerifiability;
   /**
+   * Kaynak metin OCR (görüntü okuma) ile çıkarıldıysa true; eski profillerde
+   * bulunmaz ve metin katmanından çıkarılmış sayılır. Yönetici uyarısı analiz
+   * uyarılarında gösterilir; alan profilde kanıt kökeni izi olarak taşınır.
+   */
+  ocrDerived?: boolean;
+  /**
    * Geriye uyumluluk alanı: YENİ profillerde her zaman `true`.
    *
    * "Pasif kriter" kavramı kaldırıldı; Kriter Atölyesi'nde aktif/pasif anahtarı
@@ -278,8 +309,18 @@ export type AnalysisDiagnostics = {
   excludedCandidates?: number;
   rejectedSources?: number;
   duplicateCriteria?: number;
+  /** Model sayfası uyuşmayıp sunucu doğrulamalı sayfayla düzeltilen kriter sayısı. */
+  correctedPages?: number;
+  /** MAX_CRITERIA sınırı aşıldığı için alınmayan doğrulanmış kriter sayısı. */
+  droppedCriteria?: number;
   /** Tam kaynak/aday izi R2'de saklandıysa denetim nesnesinin anahtarı. */
   coverageArtifactKey?: string;
+  /** Metnin kaynağı: pdf.js metin katmanı (varsayılan, alan boş) ya da Gemini görüntü okuması. */
+  textExtraction?: "pdfjs" | "gemini_ocr";
+  /** OCR aktarımı için bu istekte yapılan üretim çağrısı sayısı (sabitlenmiş yapıda 0). */
+  ocrApiCalls?: number;
+  /** OCR aktarım çağrısının süresi (ms). */
+  ocrMs?: number;
 };
 
 /**
@@ -300,6 +341,50 @@ export type TemplateProfile = {
   notes: string[];
 };
 
+/**
+ * Otomatik taramada aday SEÇİLMEYEN tek bloğun yönetici inceleme kaydı.
+ *
+ * Deterministik seçici (criteria-candidates · selectCriteriaCandidates) bir
+ * bloğu aday seçmediğinde blok modele hiç gitmez; bu kayıt o bloğu Yarışma
+ * Yöneticisine görünür kılar (Spec §8: sessiz eleme yoktur).
+ */
+export type UnselectedBlockReviewItem = {
+  /** Deterministik taramanın doğrulanmış yapısal kaynak kimliği. */
+  sourceId: string;
+  /** PDF dosyasındaki 1 tabanlı sayfa numarası; kaynak bağlantısı bunu kullanır. */
+  page: number;
+  /** Bloğun bağlı olduğu bölüm başlığı; belge başında boş olabilir. */
+  sectionTitle: string;
+  /**
+   * Blok türü (bkz. pdf-structure · PdfBlockType: HEADING, NUMBERED_CLAUSE,
+   * PARAGRAPH, LIST_ITEM, TABLE_ROW, CAPTION). Bu sözleşme dosyası içe
+   * aktarımsız kaldığı için dizge olarak taşınır.
+   */
+  blockType: string;
+  /** Blok metni; UNSELECTED_REVIEW_TEXT_LIMIT üstü açıkça işaretlenerek kısaltılır. */
+  text: string;
+  /** true → metin kısaltıldı; tam metin kaynak sayfada ve R2 denetim kaydında durur. */
+  textTruncated: boolean;
+  /** Deterministik seçicinin bu blok için verdiği Türkçe gerekçe. */
+  reason: string;
+};
+
+/**
+ * Otomatik taramada seçilmeyen blokların yönetici görünümü.
+ *
+ * Hiçbir kesinti sessiz değildir: liste tavanına takılan kayıtlar
+ * `omittedCount` ile, kısaltılan metinler blok üstündeki `textTruncated` ile
+ * açıkça bildirilir ve arayüzde gösterilir. Tam iz R2 denetim kaydındadır
+ * (diagnostics.coverageArtifactKey).
+ */
+export type UnselectedBlocksReview = {
+  totalCount: number;
+  listedCount: number;
+  /** Blok tavanı nedeniyle listeye girmeyen kayıt sayısı; sıfır değilse arayüz açıkça yazar. */
+  omittedCount: number;
+  blocks: UnselectedBlockReviewItem[];
+};
+
 /** POST /api/analyze cevabı: tek LLM çağrısıyla çıkarılan dört aşamalı kriter seti. */
 export type AnalysisResult = {
   setup: SetupData;
@@ -311,6 +396,11 @@ export type AnalysisResult = {
   analyzedAt: string;
   analysisWarnings: string[];
   diagnostics?: AnalysisDiagnostics;
+  /**
+   * Otomatik taramada aday seçilmeyen blokların incelemesi; yönetici bunları
+   * görüp gerekirse kriteri elle ekler. Eski kayıtlarda bulunmaz (isteğe bağlı).
+   */
+  unselectedReview?: UnselectedBlocksReview;
 };
 
 export type ProfileExport = {
@@ -383,6 +473,13 @@ export type PreCheck = {
   method: EvaluationMethod;
   detail: string;
   evidence: EvidenceRef[];
+  /**
+   * YALNIZCA kind === "similarity" kontrollerinde: yapılandırılmış benzerlik
+   * sonucu. Oran ve en yakın takım BURADAN okunur; `detail` cümlesinden regex
+   * ile ASLA geri okunmaz (madde 6: takım adındaki "%98" oranı bozamaz).
+   * Eski kayıtlarda bulunmaz; okuyucular eksikliğe dayanıklıdır.
+   */
+  similarity?: { percent: number | null; closestTeam: string | null };
 };
 
 /** Tek kriter için AI bulgusu. Nihai karar her zaman hakemdedir. */
@@ -697,6 +794,20 @@ export type SimilarityMatch = {
   peerQuote: string;
   /** Bu hakem diğer başvuruyu görmeye yetkili mi? Bağlantı ancak o zaman gösterilir. */
   peerFileAccessible: boolean;
+  /* --- GÖREV 3 · isteğe bağlı katman alanları (eski kayıtlarda bulunmaz) --- */
+  /** Anlamsal eşleşmeyi ayakta tutan destek sinyalleri; doğrudan eşleşmede boş. */
+  corroboration?: string[];
+  /**
+   * Katman 3 (LLM açıklama kontrolü) sınıfı 1-6 (madde 5). Sayfa ve alıntılar
+   * HER ZAMAN deterministik eşleşme verisinden gelir; model yalnızca sınıf ve
+   * açıklama döndürür, yüzdeyi/eşleşmeyi değiştiremez.
+   */
+  llmClass?: number;
+  llmClassLabel?: string;
+  /** Modelin kısa açıklaması. */
+  llmExplanation?: string;
+  /** Benzerliğin neden normal veya incelemeye değer olduğu. */
+  llmAssessment?: string;
 };
 
 /** Rapor düzeyi benzerlik sonucu; AI kriter sonucundan bağımsızdır. */
@@ -716,4 +827,54 @@ export type SimilarityReport = {
   /** Yalnızca review/high seviyesinde; en fazla üç güçlü eşleşme. */
   matches: SimilarityMatch[];
   analyzedAt: string;
+  /* --- GÖREV 3 · isteğe bağlı denetim alanları: eski report_json kayıtları
+   * bu alanlar olmadan da parse edilir ve aynen gösterilir (geriye uyum). --- */
+  /** Karşılaştırılabilir (şablon dışı) özgün içerik kelime sayısı (aralık birleşimi; çift sayım yok). */
+  comparableWords?: number;
+  /** Eşleşen özgün içerik kelime sayısı (kuvvet ağırlıklı aralık birleşimi). */
+  matchedWords?: number;
+  /**
+   * Şablon/kimlik temizliği sonrası karşılaştırılabilir özgün içerik KALMADI:
+   * belge MinHash havuzuna alınmadı ve oran hesaplanmadı (madde 5 · Katman 1).
+   */
+  noComparableContent?: boolean;
+  /**
+   * Katman 3 (LLM açıklama kontrolü) durumu: completed · failed ("Açıklama
+   * kontrolü tamamlanamadı" notu eklenir; deterministik sonuç AYNEN kalır) ·
+   * skipped (kapatma anahtarı/uygunluk). Eski kayıtlarda bulunmaz.
+   */
+  llmStatus?: "completed" | "failed" | "skipped";
+  /** "Benzerlik puanına katılmayan ortak/şablon içeriği": gerekçe → kelime sayısı. */
+  excludedWords?: Partial<Record<SimilarityExclusionReason, number>>;
+  /**
+   * En yakın raporla eşleşmelerin türe göre sayısı (madde 7 · MinHash/anlamsal
+   * ayrımı) — en fazla üç eşleşmelik gösterim kesiminden ÖNCE sayılır.
+   */
+  directMatchCount?: number;
+  semanticMatchCount?: number;
+  /** Havuz üst sınırı aşıldı: yalnızca ilk N eş parça düzeyinde karşılaştırıldı (madde 8). */
+  poolTruncated?: boolean;
+  /** Parçalama kaynağı: sunucu yapısal ayrıştırması mı, sayfa metni yedeği mi? */
+  structureSource?: "structure" | "pages";
+  /** Analiz anındaki resmî şablon sürümü; şablon yüklenmemişse null/eksik. */
+  templateVersion?: number | null;
+  /** Sonuç "güncel değil" mi (şablon sürümü değişti veya havuza yeni rapor geldi)? */
+  stale?: boolean;
+  staleReason?: string;
 };
+
+/**
+ * Benzerlik ayıklama gerekçesi (bkz. similarity-text · ExclusionReason).
+ * types.ts bağımlılık almasın diye birebir kopyadır; iki liste ayrışırsa
+ * benzerlik birim testi kaynak üzerinden uyarır.
+ */
+export type SimilarityExclusionReason =
+  | "sablon"
+  | "baslik"
+  | "kimlik"
+  | "kapak-icindekiler"
+  | "sartname-alintisi"
+  | "kaynakca"
+  | "acik-alinti"
+  | "cok-kisa"
+  | "tavan";

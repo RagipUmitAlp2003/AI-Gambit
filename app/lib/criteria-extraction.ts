@@ -1,13 +1,11 @@
 import {
   CHECK_STAGE_IDS,
   CRITERION_CONTROL_TYPES,
-  criterionControlTypesForStage,
   isCheckStage,
-  isCriterionControlType,
   isCriterionVerifiability,
+  resolveControlType,
   type CheckStage,
   type Criterion,
-  type CriterionControlType,
   type CriterionVerifiability,
   type SetupData,
   type TemplateProfile,
@@ -281,6 +279,10 @@ export type NormalizedExtraction = {
     rejectedSources: number;
     duplicateCriteria: number;
     unansweredCandidates: number;
+    /** Model sayfası uyuşmayıp sunucu doğrulamalı blok sayfasıyla düzeltilen kriter sayısı. */
+    correctedPages: number;
+    /** MAX_CRITERIA sınırı nedeniyle alınmayan doğrulanmış kriter sayısı. */
+    droppedCriteria: number;
   };
 };
 
@@ -395,18 +397,6 @@ export function resolveVerifiability(
   return "PDF_DENETLENEBILIR";
 }
 
-function defaultControlType(stage: CheckStage): CriterionControlType {
-  if (stage === "category_similarity") return "ANLAMSAL_UYGUNLUK";
-  if (stage === "criteria_evidence") return "KANIT_KONTROLU";
-  return stage === "headings_content" ? "ICERIK_VARLIGI" : "KANIT_KONTROLU";
-}
-
-function compatibleControlType(stage: CheckStage, value: unknown): CriterionControlType {
-  return isCriterionControlType(value) && criterionControlTypesForStage(stage).includes(value)
-    ? value
-    : defaultControlType(stage);
-}
-
 export function normalizeCriteria(raw: unknown, pageCount: number): { criteria: Criterion[]; warnings: string[] } {
   const warnings: string[] = [];
   if (!Array.isArray(raw)) return { criteria: [], warnings: ["Model kriter listesi döndürmedi."] };
@@ -445,7 +435,7 @@ export function normalizeCriteria(raw: unknown, pageCount: number): { criteria: 
       violationOutcome: text(entry?.violationOutcome, "Belgede belirtilmemiş").slice(0, 240),
       sourceId: null,
       sourceIds: [],
-      controlType: compatibleControlType(stage, (entry as RawCandidateDecision)?.controlType),
+      controlType: resolveControlType(stage, (entry as RawCandidateDecision)?.controlType),
       sourcePage: page,
       sourceText,
       verifiability: resolveVerifiability(entry, name, sourceText, text(entry?.description, "")),
@@ -475,6 +465,17 @@ function stableCriterionId(sourceId: string, name: string): string {
   return `criterion-${sourceId.toLocaleLowerCase("tr-TR")}-${namePart}`.slice(0, 180);
 }
 
+/**
+ * Modern akış: aday kararlarını doğrular ve kriterlere çevirir.
+ *
+ * Kabul kapısı kaynak kimliği + birebir alıntıdır. Model sunucunun seçtiği bir
+ * kaynak bloğa işaret edip alıntısı o bloğun özgün metninde birebir
+ * doğrulanıyorsa, sayfa uyuşmazlığı kararı DÜŞÜRMEZ (şartname §9: sunucu
+ * doğrulamalı kaynak sayfası LLM tahminine tercih edilir): kritere bloğun
+ * sunucuda okunan sayfası yazılır ve düzeltme `correctedPages` sayacı +
+ * uyarıyla raporlanır. Alıntısı doğrulanamayan karar ise sayfası doğru olsa
+ * bile reddedilir.
+ */
 function normalizeCandidateDecisions(
   raw: unknown,
   sourceBlocks: readonly PdfStructureBlock[],
@@ -488,6 +489,10 @@ function normalizeCandidateDecisions(
   let excludedCandidates = 0;
   let rejectedSources = 0;
   let duplicateCriteria = 0;
+  /** Model sayfası blokla uyuşmayıp sunucu doğrulamalı sayfayla düzeltilen karar sayısı. */
+  let correctedPages = 0;
+  /** MAX_CRITERIA sınırı nedeniyle alınmayan doğrulanmış kriter sayısı; sessiz kayıp yok (bkz. MAX_CRITERIA). */
+  let droppedOverLimit = 0;
 
   for (const entry of rows) {
     const sourceId = text(entry?.sourceId, "");
@@ -509,10 +514,15 @@ function normalizeCandidateDecisions(
     const sourceHaystack = comparableQuote(source.originalText);
     const quoteNeedle = comparableQuote(sourceText);
     const returnedPage = nullableNumber(entry.sourcePage);
-    if (!name || !description || returnedPage !== source.pageNumber || !quoteNeedle || !sourceHaystack.includes(quoteNeedle)) {
+    if (!name || !description || !quoteNeedle || !sourceHaystack.includes(quoteNeedle)) {
       rejectedSources += 1;
       continue;
     }
+    // Şartname §9: sunucu doğrulamalı kaynak sayfası LLM tahminine tercih edilir.
+    // Kaynak kimliği geçerli ve alıntı bloğun özgün metninde birebir doğrulandıysa
+    // sayfa uyuşmazlığı kararı düşürmez; bloğun sunucuda okunan sayfası yazılır
+    // ve düzeltme ayrı bir tanılama sayacında raporlanır.
+    if (returnedPage !== source.pageNumber) correctedPages += 1;
     const stage: CheckStage = isCheckStage(entry.stage) ? entry.stage : "criteria_evidence";
     const key = `${stage}|${foldKey(name)}|${foldKey(description)}`;
     const existing = criteriaByKey.get(key);
@@ -521,7 +531,13 @@ function normalizeCandidateDecisions(
       duplicateCriteria += 1;
       continue;
     }
-    if (criteriaByKey.size >= MAX_CRITERIA) break;
+    // Sınırda `break` değil `continue`: kalan satırlar cevaplanmış sayılmaya
+    // devam eder, KAPSAM_DISI/tekrar/red sayaçları doğru işler ve kesinti
+    // sessiz kalmaz (bkz. MAX_CRITERIA sözleşmesi).
+    if (criteriaByKey.size >= MAX_CRITERIA) {
+      droppedOverLimit += 1;
+      continue;
+    }
     criteriaByKey.set(key, {
       id: stableCriterionId(source.sourceId, name),
       name,
@@ -530,7 +546,7 @@ function normalizeCandidateDecisions(
       description,
       sourceId: source.sourceId,
       sourceIds: [source.sourceId],
-      controlType: compatibleControlType(stage, entry.controlType),
+      controlType: resolveControlType(stage, entry.controlType),
       sourcePage: source.pageNumber,
       sourceText,
       verifiability: "PDF_DENETLENEBILIR",
@@ -544,8 +560,10 @@ function normalizeCandidateDecisions(
     : 0;
   if (!Array.isArray(raw)) warnings.push("Model aday kararları listesini döndürmedi.");
   if (rejectedSources) warnings.push(`${rejectedSources} sonuç, kaynak kimliği veya birebir alıntısı doğrulanamadığı için alınmadı.`);
+  if (correctedPages) warnings.push(`${correctedPages} kriterde modelin bildirdiği kaynak sayfası bloğun sunucuda doğrulanan sayfasıyla eşleşmedi; sunucu doğrulamalı sayfa kullanıldı.`);
   if (duplicateCriteria) warnings.push(`${duplicateCriteria} tekrar eden kriter birleştirildi; doğrulanmış kaynakları korundu.`);
   if (unansweredCandidates) warnings.push(`${unansweredCandidates} güçlü aday model tarafından cevapsız bırakıldı; bu parçalar denetim kaydında korunuyor.`);
+  if (droppedOverLimit) warnings.push(`${droppedOverLimit} kriter sınır aşıldığı için alınmadı (en fazla ${MAX_CRITERIA} kriter).`);
   return {
     criteria: [...criteriaByKey.values()],
     warnings,
@@ -555,6 +573,8 @@ function normalizeCandidateDecisions(
       rejectedSources,
       duplicateCriteria,
       unansweredCandidates,
+      correctedPages,
+      droppedCriteria: droppedOverLimit,
     },
   };
 }
@@ -581,6 +601,10 @@ export function normalizeExtraction(
             rejectedSources: 0,
             duplicateCriteria: 0,
             unansweredCandidates: 0,
+            // Eski (criteria) akış kendi sayaçlarını uyarı metinleriyle raporlar;
+            // yeni sayaçlar yalnızca modern karar akışında dolar.
+            correctedPages: 0,
+            droppedCriteria: 0,
           },
         };
       })();

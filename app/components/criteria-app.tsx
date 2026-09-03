@@ -14,8 +14,10 @@ import {
   clearLegacyTemplateFile,
   loadDraftFile,
   loadDraftSnapshot,
+  loadUnselectedReview,
   saveDraftFile,
   saveDraftSnapshot,
+  saveUnselectedReview,
 } from "../lib/draft-store";
 import { resolveVerifiability } from "../lib/criteria-extraction";
 import {
@@ -29,6 +31,8 @@ import {
   type ProfileExport,
   type SetupData,
   type Step,
+  type UnselectedBlockReviewItem,
+  type UnselectedBlocksReview,
 } from "../lib/types";
 
 const DEFAULT_SETUP: SetupData = {
@@ -98,6 +102,16 @@ const CONTROL_TYPE_LABELS: Record<CriterionControlType, string> = {
   ICERIK_VARLIGI: "İçerik varlığı",
   ANLAMSAL_UYGUNLUK: "Anlamsal uygunluk",
   KANIT_KONTROLU: "Teknik kanıt kontrolü",
+};
+
+/** Yapısal blok türlerinin Türkçe etiketleri (bkz. pdf-structure · PDF_BLOCK_TYPES). */
+const BLOCK_TYPE_LABELS: Record<string, string> = {
+  HEADING: "Başlık",
+  NUMBERED_CLAUSE: "Numaralı madde",
+  PARAGRAPH: "Paragraf",
+  LIST_ITEM: "Liste maddesi",
+  TABLE_ROW: "Tablo satırı",
+  CAPTION: "Şekil/tablo başlığı",
 };
 
 function formatBytes(bytes: number) {
@@ -199,11 +213,13 @@ function UploadStep({
   onSample,
   onAnalyze,
   onReanalyze,
+  onOcrAnalyze,
   analysisReady,
   loading,
   loadingMessage,
   error,
   errorRetryable,
+  errorOcrAvailable,
 }: {
   file: File | null;
   onFile: (file: File) => void;
@@ -211,12 +227,16 @@ function UploadStep({
   onAnalyze: () => void;
   /** Kayıtlı sonucu atlayıp modeli gerçekten yeniden çalıştırır. */
   onReanalyze: () => void;
+  /** Yönetici onayıyla OCR yedeğini başlatır (taranmış belge çıkmazı). */
+  onOcrAnalyze: () => void;
   analysisReady: boolean;
   loading: boolean;
   loadingMessage: string;
   error: string;
   /** Geçici model hatası: kullanıcıya "Yeniden dene" sunulur. */
   errorRetryable: boolean;
+  /** Sunucu taranmış belge için yönetici onaylı OCR yedeği önerdi. */
+  errorOcrAvailable: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -317,6 +337,18 @@ function UploadStep({
           {errorRetryable && file && !loading ? (
             <button type="button" className="secondary-button" onClick={onAnalyze}>Yeniden dene</button>
           ) : null}
+          {/* OCR yedeği yalnızca yöneticinin açık onayıyla çalışır; ek bir AI çağrısıdır. */}
+          {errorOcrAvailable && file && !loading ? (
+            <>
+              <span>
+                Belge taranmış görüntü olabilir. Yapay zekâ, görüntüden metni çıkarabilir; bu ek bir AI
+                çağrısıdır ve sonuçlar OCR uyarısıyla işaretlenir.
+              </span>
+              <button type="button" className="secondary-button" onClick={onOcrAnalyze}>
+                Görüntüden metni çıkar ve analiz et (OCR)
+              </button>
+            </>
+          ) : null}
         </div>
       ) : null}
 
@@ -351,6 +383,7 @@ function CriteriaReview({
   sourceName,
   pageCount,
   analysisWarnings,
+  unselectedReview,
   documentUrl,
   editingPublished,
   cacheNotice,
@@ -367,6 +400,12 @@ function CriteriaReview({
   sourceName: string;
   pageCount: number;
   analysisWarnings: string[];
+  /**
+   * Otomatik taramada aday seçilmeyen blokların özeti (Spec §8: sessiz eleme
+   * yok). Yalnızca taze analizde bulunur; geçmişten açılan profilde analiz
+   * verisi olmadığı için null gelir ve panel gösterilmez.
+   */
+  unselectedReview: UnselectedBlocksReview | null;
   /**
    * Kaynak şartnamenin açılabileceği adres.
    *
@@ -415,6 +454,21 @@ function CriteriaReview({
   const otherCount = active.length - requiredCount;
   const stageCounts = CHECK_STAGES.map((stage) => ({ stage, count: active.filter((item) => item.stage === stage.id).length }));
   const missingSource = active.filter((item) => item.sourcePage === null).length;
+
+  /**
+   * Seçilmeyen bloklar sayfaya göre gruplanır ve her sayfa kapalı bir
+   * <details> olarak açılır: 2000 bloğa kadar çıkabilen liste ilk çizimde
+   * DOM'u şişirmez. Bloklar belge sırasında geldiği için sayfa sırası korunur.
+   */
+  const unselectedPages = useMemo(() => {
+    const byPage = new Map<number, UnselectedBlockReviewItem[]>();
+    for (const item of unselectedReview?.blocks ?? []) {
+      const existing = byPage.get(item.page);
+      if (existing) existing.push(item);
+      else byPage.set(item.page, [item]);
+    }
+    return [...byPage.entries()].map(([page, items]) => ({ page, items }));
+  }, [unselectedReview]);
 
   const filtered = criteria.filter((item) => {
     const queryMatch = !query.trim()
@@ -611,6 +665,75 @@ function CriteriaReview({
         <ul className="analysis-warning-list" role="status">
           {analysisWarnings.map((warning) => <li key={warning}>{warning}</li>)}
         </ul>
+      ) : null}
+
+      {/*
+        SESSİZ ELEME YOK (Spec §8): deterministik taramanın aday SEÇMEDİĞİ
+        bloklar yöneticiden gizlenmez. Bu bir hata paneli değil denetim
+        yardımcısıdır: bloklar denetim kaydında OTOMATIK_TARAMADA_ADAY_SECILMEDI
+        durumuyla aynen saklıdır ve çoğu (başlık, şekil altı yazısı gibi) zaten
+        kural içermez. Yönetici burada bağlayıcı bir kural görürse kriteri
+        mevcut ekleme düğmeleriyle kendisi ekler; sistem kendiliğinden ikinci
+        bir AI taraması başlatmaz (AI taslak çıkarır, karar yöneticidedir).
+      */}
+      {unselectedReview && unselectedReview.totalCount > 0 ? (
+        <details className="unselected-review">
+          <summary>Otomatik taramada seçilmeyen bölümler ({unselectedReview.totalCount})</summary>
+          <p className="page-note">
+            Bu bölümler, deterministik taramada kriter adayı için yeterli sinyal taşımadığından
+            yapay zekâya GÖNDERİLMEDİ; denetim kaydında aynen saklanıyor. Aralarında bağlayıcı
+            bir kural görürseniz onu yukarıdaki <strong>Zorunlu / Zorunlu Olmayan Kriter Ekle</strong>{" "}
+            düğmeleriyle kendiniz ekleyin; sistem kendiliğinden ikinci bir AI taraması yapmaz.
+          </p>
+          {unselectedReview.blocks.length < unselectedReview.listedCount ? (
+            /* Taslak geri yüklendi ama ayrıntı listesi tarayıcı deposundan gelmedi:
+               sayılar korunur, liste için belge 1. adımdan yeniden analiz edilir. */
+            <p className="page-note unselected-review-note" role="status">
+              Ayrıntı listesi tarayıcı deposundan geri yüklenemedi. Görmek için belgeyi 1. adımdan
+              yeniden analiz edin; bu şartname daha önce analiz edildiği için genellikle kayıtlı
+              sonuç kullanılır ve yapay zekâ çağrılmaz.
+            </p>
+          ) : (
+            <div className="unselected-review-pages">
+              {unselectedPages.map(({ page, items }) => (
+                <details key={page} className="unselected-review-page">
+                  <summary>Sayfa {page} · {items.length} bölüm</summary>
+                  <ul>
+                    {items.map((item) => (
+                      <li key={item.sourceId}>
+                        <span className="unselected-block-head">
+                          {documentUrl ? (
+                            <a
+                              className="source-page-link"
+                              href={`${documentUrl}#page=${item.page}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              title="Şartnameyi bu sayfada aç"
+                            >s. {item.page} ↗</a>
+                          ) : <span>s. {item.page}</span>}
+                          <span>{BLOCK_TYPE_LABELS[item.blockType] ?? item.blockType}</span>
+                          {item.sectionTitle ? <span>{item.sectionTitle}</span> : null}
+                        </span>
+                        <p className="unselected-block-text">
+                          {item.text}
+                          {item.textTruncated ? <em> … (metin kısaltıldı; tamamı kaynak sayfada)</em> : null}
+                        </p>
+                        <small className="unselected-block-reason">{item.reason}</small>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ))}
+            </div>
+          )}
+          {unselectedReview.omittedCount > 0 ? (
+            /* Blok tavanı da sessiz değildir: listelenmeyen kayıt açıkça sayılır. */
+            <p className="page-note unselected-review-note" role="status">
+              İlk {unselectedReview.listedCount} blok listelendi; {unselectedReview.omittedCount} blok
+              daha sunucudaki denetim kaydında saklanıyor.
+            </p>
+          ) : null}
+        </details>
       ) : null}
 
       <div className="review-grid">
@@ -1017,6 +1140,8 @@ export default function CriteriaApp() {
   const [loadingMessage, setLoadingMessage] = useState("");
   const [error, setError] = useState("");
   const [errorRetryable, setErrorRetryable] = useState(false);
+  /** Sunucu 422 OCR_REQUIRED + ocrFallbackAvailable döndürdü: OCR düğmesi gösterilir. */
+  const [errorOcrAvailable, setErrorOcrAvailable] = useState(false);
   /** Sonuç kayıttan geldiyse (önbellek isabeti) inceleme adımında gösterilen bilgi notu. */
   const [cacheNotice, setCacheNotice] = useState("");
   const [approvalError, setApprovalError] = useState("");
@@ -1073,12 +1198,17 @@ export default function CriteriaApp() {
       }
       const snapshot = loadDraftSnapshot("workspace");
       const storedFile = await loadDraftFile("workspace");
+      // Seçilmeyen blok listesi anlık görüntüde blokları soyulmuş taşınır;
+      // ayrıntılar IndexedDB'den okunup burada yeniden birleştirilir.
+      const storedReview = await loadUnselectedReview("workspace");
       // Eski sürümde saklanmış rapor şablonu artık kullanılmıyor; tarayıcıdan silinir.
       clearLegacyTemplateFile().catch(() => undefined);
       if (!active) return;
       if (snapshot) {
         setSetup(snapshot.result?.setup ?? snapshot.setup ?? DEFAULT_SETUP);
-        setResult(snapshot.result);
+        setResult(snapshot.result
+          ? { ...snapshot.result, unselectedReview: storedReview ?? snapshot.result.unselectedReview }
+          : snapshot.result);
         setCriteria(snapshot.criteria);
         setProfile(snapshot.profile);
       }
@@ -1103,7 +1233,15 @@ export default function CriteriaApp() {
   useEffect(() => {
     // Geçmişten açılan yayımlanmış profil yerel taslağın üstüne yazılmaz.
     if (!draftReady || editedProfile) return;
-    saveDraftSnapshot({ step, setup, result, criteria, profile }, draftScope);
+    // Seçilmeyen blok listesi anlık görüntüye GÖMÜLMEZ: bu efekt her kriter
+    // tuşlamasında eşzamanlı çalışır; yüzlerce blok metni tuşlama başına
+    // takılma ve kota aşımı riski olurdu. Sayılar korunur (soyulmuş durum
+    // `blocks.length < listedCount` ile ayırt edilir), bloklar aşağıdaki
+    // efektle IndexedDB'ye yazılır. Kopya değişmezdir; state bozulmaz.
+    const snapshotResult = result?.unselectedReview
+      ? { ...result, unselectedReview: { ...result.unselectedReview, blocks: [] } }
+      : result;
+    saveDraftSnapshot({ step, setup, result: snapshotResult, criteria, profile }, draftScope);
   }, [criteria, draftReady, draftScope, editedProfile, profile, result, setup, step]);
 
   useEffect(() => {
@@ -1111,9 +1249,18 @@ export default function CriteriaApp() {
     saveDraftFile(file, draftScope).catch(() => undefined);
   }, [draftReady, draftScope, editedProfile, file]);
 
+  useEffect(() => {
+    if (!draftReady || editedProfile) return;
+    // Analiz başına bir kez yazılır; sonuç temizlenince (yeni belge/yeniden
+    // başlatma) kayıt da silinir. Yazılamazsa taslak düşmez, yalnızca geri
+    // yüklemede ayrıntı listesi eksik kalır ve arayüz bunu açıkça söyler.
+    saveUnselectedReview(result?.unselectedReview ?? null, draftScope).catch(() => undefined);
+  }, [draftReady, draftScope, editedProfile, result]);
+
   function chooseFile(nextFile: File) {
     setError("");
     setErrorRetryable(false);
+    setErrorOcrAvailable(false);
     if (nextFile.type !== "application/pdf" && !nextFile.name.toLocaleLowerCase("tr-TR").endsWith(".pdf")) {
       setError("Kaynak değerlendirme belgesi PDF olmalıdır. Lütfen PDF biçiminde bir belge seçin.");
       return;
@@ -1133,24 +1280,27 @@ export default function CriteriaApp() {
     setCacheNotice("");
   }
 
-  async function analyze(forceRefresh = false) {
+  async function analyze(forceRefresh = false, useOcr = false) {
     if (!file || loading) return;
     // Yeniden analizde kayıtlı sonuca dönülmez; model gerçekten yeniden çalışır.
-    if (!forceRefresh && result && criteria.length) {
+    if (!forceRefresh && !useOcr && result && criteria.length) {
       setStep(2);
       return;
     }
     setLoading(true);
     setError("");
     setErrorRetryable(false);
+    setErrorOcrAvailable(false);
     try {
       setLoadingMessage("PDF sayfa yapısı doğrulanıyor…");
       const pageCount = await getPdfPageCount(file);
-      setLoadingMessage(forceRefresh
-        ? "Kayıtlı sonuç atlanıyor; belge baştan analiz ediliyor…"
-        : "Belge yapısal olarak taranıyor; güçlü adaylar tek AI çağrısıyla sınıflandırılıyor…");
+      setLoadingMessage(useOcr
+        ? "Belge görüntüsünden metin çıkarılıyor (OCR); ardından adaylar tek AI çağrısıyla sınıflandırılıyor…"
+        : forceRefresh
+          ? "Kayıtlı sonuç atlanıyor; belge baştan analiz ediliyor…"
+          : "Belge yapısal olarak taranıyor; güçlü adaylar tek AI çağrısıyla sınıflandırılıyor…");
       // Sunucu tek `generateContent` isteği yapar; burada da yeniden deneme yoktur.
-      const analysis = await analyzeWithGemini(file, pageCount, forceRefresh);
+      const analysis = await analyzeWithGemini(file, pageCount, forceRefresh, useOcr);
       setLoadingMessage("Kriterler kaynak sayfalarıyla eşleştiriliyor…");
       if (!analysis.criteria.length) {
         throw new Error("Belgede PDF aşamasında kontrol edilebilecek bir kriter bulunamadı.");
@@ -1180,9 +1330,13 @@ export default function CriteriaApp() {
       // Geçici model hatasında kullanıcıya "Yeniden dene" sunulur; sistem
       // kendiliğinden ikinci bir çağrı yapmaz.
       const retryable = analysisError instanceof AnalysisRequestError && analysisError.retryable;
+      // Taranmış belge çıkmazı: sunucu OCR yedeğini önerdi; karar yöneticinin.
+      const ocrAvailable = analysisError instanceof AnalysisRequestError && analysisError.ocrFallbackAvailable === true;
       const message = analysisError instanceof Error ? analysisError.message : "Bilinmeyen bir hata oluştu.";
       setErrorRetryable(retryable);
-      setError(retryable ? message : `${message} API bağlantısını, kotayı veya kaynak belgenin geçerliliğini kontrol edin.`);
+      setErrorOcrAvailable(ocrAvailable);
+      // OCR önerilen durumda sunucu mesajı kendi yönlendirmesini taşır; genel ek yazılmaz.
+      setError(retryable || ocrAvailable ? message : `${message} API bağlantısını, kotayı veya kaynak belgenin geçerliliğini kontrol edin.`);
     } finally {
       setLoading(false);
     }
@@ -1214,13 +1368,22 @@ export default function CriteriaApp() {
 
   /** İnceleme adımının kaynak künyesi: taze analiz ya da geçmişten açılan profil. */
   const source = result && file
-    ? { name: file.name, pages: result.pageCount, analyzedAt: result.analyzedAt, warnings: result.analysisWarnings }
+    ? {
+      name: file.name,
+      pages: result.pageCount,
+      analyzedAt: result.analyzedAt,
+      warnings: result.analysisWarnings,
+      // Seçilmeyen blok incelemesi yalnızca analiz verisiyle birlikte gösterilir.
+      unselectedReview: result.unselectedReview ?? null,
+    }
     : editedProfile
       ? {
         name: editedProfile.sourceDocument.name,
         pages: editedProfile.sourceDocument.pages,
         analyzedAt: editedProfile.sourceDocument.analyzedAt,
         warnings: [] as string[],
+        // Geçmişten açılan profilde analiz verisi yoktur; panel gösterilmez.
+        unselectedReview: null,
       }
       : null;
 
@@ -1284,11 +1447,13 @@ export default function CriteriaApp() {
     setEditedProfile(null);
     setError("");
     setErrorRetryable(false);
+    setErrorOcrAvailable(false);
     setCacheNotice("");
     setApprovalError("");
     setPublishSummary(null);
     clearDraftSnapshot(draftScope);
     saveDraftFile(null, draftScope).catch(() => undefined);
+    saveUnselectedReview(null, draftScope).catch(() => undefined);
     setEditingProfileId(null);
     // Geçmiş profil düzenleme adresinden çıkılır; yenilemede taslak geri gelmesin.
     if (new URLSearchParams(window.location.search).has("profile")) {
@@ -1332,11 +1497,13 @@ export default function CriteriaApp() {
             onSample={(sampleFile) => chooseFile(sampleFile)}
             onAnalyze={() => analyze(false)}
             onReanalyze={() => analyze(true)}
+            onOcrAnalyze={() => analyze(false, true)}
             analysisReady={Boolean(result && criteria.length)}
             loading={loading}
             loadingMessage={loadingMessage}
             error={error}
             errorRetryable={errorRetryable}
+            errorOcrAvailable={errorOcrAvailable}
           />
         ) : null}
         {step === 2 && source ? (
@@ -1345,6 +1512,7 @@ export default function CriteriaApp() {
             sourceName={source.name}
             pageCount={source.pages || 1}
             analysisWarnings={source.warnings}
+            unselectedReview={source.unselectedReview}
             documentUrl={sourceDocumentUrl}
             editingPublished={savedBefore}
             cacheNotice={cacheNotice}

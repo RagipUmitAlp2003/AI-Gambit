@@ -63,6 +63,14 @@ export const PERMISSIONS = {
    */
   toggle_competition_activation: ["01", "04"],
   /**
+   * Resmî rapor şablonunu yükleme/okuma — YALNIZCA yarışmanın sahibi Yarışma
+   * Yöneticisi (uç ayrıca sahiplik doğrular). Bu şablon KRİTER ÜRETMEZ ve
+   * rapor uygunluğu kararı VERMEZ; yalnızca benzerlik analizindeki beklenen
+   * ortak metni ayıklar (GÖREV 3 · madde 3). En az yetki: 04 dahil hiçbir
+   * başka rol okuyamaz.
+   */
+  manage_similarity_template: ["01"],
+  /**
    * Eski yarışmayı arşivleme (soft delete, madde 11).
    * Yalnızca yarışmanın sahibi Yarışma Yöneticisi arşivleyebilir; kayıt
    * silinmez, işlem gerekçesiyle denetim izine yazılır.

@@ -183,6 +183,12 @@ test("MAX_CRITERIA üstü kesilir ve uyarı yazılır", () => {
   const { criteria, warnings } = normalizeCriteria(many, 5);
   assert.equal(criteria.length, MAX_CRITERIA);
   assert.ok(warnings.some((warning) => /^5 kriter/.test(warning) && warning.includes("sınır aşıldığı")));
+
+  // Eski (criteria) akışın stats dolgusu: yeni sayaçlar modern karar akışına
+  // özeldir; burada sabit 0 döner, kesinti eskisi gibi uyarı metniyle bildirilir.
+  const legacy = normalizeExtraction({ criteria: many }, 5);
+  assert.equal(legacy.stats.droppedCriteria, 0);
+  assert.equal(legacy.stats.correctedPages, 0);
 });
 
 test("boş liste ve liste olmayan girdi uyarıları", () => {

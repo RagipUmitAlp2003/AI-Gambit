@@ -8,6 +8,7 @@ import {
   type NumberMatch,
 } from "./criteria-dictionary";
 import type { PdfStructureBlock } from "./pdf-structure";
+import type { UnselectedBlocksReview } from "./types";
 
 export const CANDIDATE_SELECTOR_VERSION = "candidate-selector-v1";
 
@@ -169,6 +170,43 @@ export function selectCriteriaCandidates(
       dictionaryVersion: DICTIONARY_VERSION,
       selectorVersion: CANDIDATE_SELECTOR_VERSION,
     },
+  };
+}
+
+/** İnceleme özetine alınan en fazla blok sayısı; üstü `omittedCount` ile açıkça bildirilir. */
+export const UNSELECTED_REVIEW_BLOCK_LIMIT = 2000;
+/** Özetteki tek blok metninin karakter tavanı; kesinti blok üstünde `textTruncated` ile işaretlenir. */
+export const UNSELECTED_REVIEW_TEXT_LIMIT = 600;
+
+/**
+ * Seçilmeyen blokların yönetici inceleme özeti (Spec §8: hiçbir blok sessizce
+ * kapsam dışı sayılmaz; karar insanda kalır).
+ *
+ * Özet BİLEREK hiçbir sinyal filtresi uygulamaz: sözlük dışı bir ifadeyle
+ * yazılmış bağlayıcı kural tam da hiç sinyal almadığı için seçilmemiştir;
+ * özeti sinyale göre süzmek onu yeniden görünmez kılardı. Belge sırası
+ * korunur ve kesintiler sessiz değildir — metin kısaltması blok üstünde
+ * `textTruncated`, liste tavanı `omittedCount` ile taşınır; ikisi de arayüzde
+ * gösterilir. Tam iz her durumda R2 denetim kaydındadır.
+ */
+export function summarizeUnselectedBlocks(
+  unselected: readonly UnselectedCriteriaBlock[],
+  limit = UNSELECTED_REVIEW_BLOCK_LIMIT,
+): UnselectedBlocksReview {
+  const blocks = unselected.slice(0, limit).map((item) => ({
+    sourceId: item.block.sourceId,
+    page: item.block.pageNumber,
+    sectionTitle: item.block.sectionTitle,
+    blockType: item.block.blockType,
+    text: item.block.originalText.slice(0, UNSELECTED_REVIEW_TEXT_LIMIT),
+    textTruncated: item.block.originalText.length > UNSELECTED_REVIEW_TEXT_LIMIT,
+    reason: item.selectionReason,
+  }));
+  return {
+    totalCount: unselected.length,
+    listedCount: blocks.length,
+    omittedCount: unselected.length - blocks.length,
+    blocks,
   };
 }
 

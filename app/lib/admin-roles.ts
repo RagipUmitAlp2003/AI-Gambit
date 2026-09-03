@@ -132,6 +132,7 @@ export const WORKFLOW_EVENT_LABELS: Record<WorkflowEventName, string> = {
   competition_stage_changed: "Yarışma süreci güncellendi",
   criteria_version_published: "Yeni kriter sürümü yayımlandı",
   criteria_source_locked: "Kaynak sayfa/alıntı değişikliği reddedildi",
+  criteria_source_lock_unmatched: "Kaynak kilidi eşleşmeyen kriter yayımı",
   competition_activated: "Yarışma aktifleştirildi",
   competition_deactivated: "Yarışma pasifleştirildi",
   competition_archived: "Yarışma arşivlendi",

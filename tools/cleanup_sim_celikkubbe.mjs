@@ -16,19 +16,17 @@
  *   node tools/cleanup_sim_celikkubbe.mjs --apply   # gerçekten siler
  */
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import path from "node:path";
+import { assertExplicitDevelopment } from "./env_guard.mjs";
 
 const LOCAL_D1_DIR = ".wrangler/state/v3/d1/miniflare-D1DatabaseObject";
 const COMPETITION_NAME = "Çelikkubbe Hava Savunma Sistemleri Yarışması";
 const apply = process.argv.includes("--apply");
 
-const fromEnv = (process.env.APP_ENV ?? process.env.NODE_ENV ?? "").toLowerCase();
-if (fromEnv === "production"
-  || (existsSync(".env.local") && /^\s*APP_ENV\s*=\s*production\s*$/m.test(readFileSync(".env.local", "utf8")))) {
-  console.error("REDDEDİLDİ: üretim ortamında çalışmaz.");
-  process.exit(1);
-}
+// FAIL-CLOSED ortam kilidi (ortak: tools/env_guard.mjs): production reddi
+// korunur; APP_ENV hiç tanımlı değilse de reddedilir.
+assertExplicitDevelopment("cleanup_sim_celikkubbe");
 
 let entries;
 try { entries = readdirSync(LOCAL_D1_DIR); } catch { console.error("Yerel D1 yok."); process.exit(1); }

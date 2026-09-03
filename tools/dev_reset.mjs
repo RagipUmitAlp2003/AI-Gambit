@@ -30,8 +30,9 @@
  * hiçbir hata üretmez.
  */
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import path from "node:path";
+import { assertExplicitDevelopment } from "./env_guard.mjs";
 
 const LOCAL_D1_DIR = ".wrangler/state/v3/d1/miniflare-D1DatabaseObject";
 const LOCAL_R2_DIR = ".wrangler/state/v3/r2";
@@ -39,20 +40,13 @@ const LOCAL_R2_DIR = ".wrangler/state/v3/r2";
 const apply = process.argv.includes("--apply");
 const purgeCache = process.argv.includes("--purge-cache");
 
-/** Üretim ortamında çalışmayı reddeder. */
+/**
+ * Üretim ortamında çalışmayı reddeder (FAIL-CLOSED, ortak: tools/env_guard.mjs):
+ * production reddi korunur; APP_ENV hiç tanımlı değilse de reddedilir —
+ * sıfırlama yalnızca AÇIKÇA development işaretli ortamda çalışır.
+ */
 function assertNotProduction() {
-  const fromEnv = (process.env.APP_ENV ?? process.env.NODE_ENV ?? "").toLowerCase();
-  if (fromEnv === "production") {
-    console.error("REDDEDİLDİ: APP_ENV/NODE_ENV 'production'. Bu betik yalnızca geliştirme ortamında çalışır.");
-    process.exit(1);
-  }
-  if (existsSync(".env.local")) {
-    const local = readFileSync(".env.local", "utf8");
-    if (/^\s*APP_ENV\s*=\s*production\s*$/m.test(local)) {
-      console.error("REDDEDİLDİ: .env.local içinde APP_ENV=production yazıyor.");
-      process.exit(1);
-    }
-  }
+  assertExplicitDevelopment("dev_reset");
 }
 
 /** Yalnızca yerel miniflare veri tabanını bulur; uzak bağlantı desteklenmez. */

@@ -1,5 +1,6 @@
 import { ProfileOwnershipError, findProfile, listProfiles, reportBucket, submitProfileForReview } from "../../lib/workflow-db";
 import { handleError, json, jsonError, readJson, requirePermission } from "../../lib/admin-guard";
+import { readFormDataWithLimit } from "../../lib/request-guard";
 import { validateProfileExport } from "../../lib/profile-loader";
 import { pdfIntegrityError } from "../../lib/pdf-integrity";
 import { recordAudit } from "../../lib/admin-db";
@@ -26,7 +27,8 @@ async function readPublishRequest(request: Request): Promise<{ profile: unknown;
     const body = await readJson(request);
     return { profile: body.profile, sourceFile: null };
   }
-  const form = await request.formData();
+  // Boyut kapısı ayrıştırmadan ÖNCE (madde 9): şartname PDF'i + profil JSON payı.
+  const form = await readFormDataWithLimit(request, MAX_SOURCE_BYTES + 2 * 1024 * 1024);
   const raw = form.get("profile");
   if (typeof raw !== "string") return { profile: undefined, sourceFile: null };
   let parsed: unknown;
@@ -121,7 +123,7 @@ export async function POST(request: Request): Promise<Response> {
       if (uploadedKey) { try { await reportBucket().delete(uploadedKey); } catch { /* Asıl hata korunur. */ } }
       return jsonError(403, "Bu kriter profilini yalnızca onu hazırlayan Yarışma Yöneticisi güncelleyebilir.");
     }
-    const { profile, criteriaVersion, versionCreated, sourceLockReverted } = published;
+    const { profile, criteriaVersion, versionCreated, sourceLockReverted, sourceLockOrphaned } = published;
     await recordAudit({
       actorId: auth.account.id,
       actorEmail: auth.account.email,
@@ -132,7 +134,8 @@ export async function POST(request: Request): Promise<Response> {
       detail: `${profile.competitionName} · kriter sürümü v${criteriaVersion.criteriaVersion}`
         + ` (${criteriaVersion.criteriaCount} kriter, özet ${criteriaVersion.criteriaHash.slice(0, 12)})`
         + `${versionCreated ? "" : " · içerik değişmedi, sürüm korundu"}`
-        + `${sourceLockReverted.length ? ` · ${sourceLockReverted.length} kriterde kaynak değişikliği reddedildi` : ""}`,
+        + `${sourceLockReverted.length ? ` · ${sourceLockReverted.length} kriterde kaynak değişikliği reddedildi` : ""}`
+        + `${sourceLockOrphaned.length ? ` · ${sourceLockOrphaned.length} kilitli kriter yeni yayımda eşleşmedi` : ""}`,
     }).catch((auditError) => console.error("[audit] profile_published", auditError));
     return json({
       profile,

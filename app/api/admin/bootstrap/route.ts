@@ -1,11 +1,13 @@
 import { env } from "cloudflare:workers";
 import {
-  ConflictError,
+  LOGIN_FAILURE_LIMIT,
   countAccounts,
   countActiveModerators,
+  countRecentLoginFailures,
   findAccountByUsername,
   insertAccount,
   recordAudit,
+  recordLoginFailure,
 } from "../../../lib/admin-db";
 import {
   ValidationError,
@@ -16,7 +18,7 @@ import {
   readJson,
   requiredText,
 } from "../../../lib/admin-guard";
-import { authConfigured, isProduction } from "../../../lib/session";
+import { authConfigured, hashToken, isExplicitDevelopment, isProduction } from "../../../lib/session";
 import { PASSWORD_LENGTH, generatePassword, hashPassword } from "../../../lib/password";
 
 /**
@@ -24,12 +26,18 @@ import { PASSWORD_LENGTH, generatePassword, hashPassword } from "../../../lib/pa
  *
  * İKİ MOD:
  *
- *   production   `MODERATOR_BOOTSTRAP_TOKEN` + isim + e-posta ile bir kez
- *                çalışır; şifre sistem tarafından üretilir ve yalnızca yanıtta
- *                döner. Kurulumdan sonra uç 409 verir.
+ *   production   `MODERATOR_BOOTSTRAP_TOKEN` + isim + e-posta ile YALNIZCA
+ *                sistemde hiç hesap yokken çalışır; şifre sistem tarafından
+ *                üretilir ve yalnızca yanıtta döner. Kurulum tamamlandıktan
+ *                sonra uç hiçbir durum bilgisi sızdırmaz: POST nötr 404
+ *                "Kurulum ucu kapalı." döner, GET anahtar yapılandırmasını
+ *                raporlamaz.
  *
  *   development  Tek tıkla GEÇİCİ bootstrap hesabı: kullanıcı adı `admin`,
- *                şifre `1234`. Yalnızca üretim DIŞI ortamda çalışır.
+ *                şifre `1234`. DÖRT kilit birlikte sağlanmalıdır (aşağıdaki
+ *                devBootstrapPermitted): açık development ortamı + açık yerel
+ *                izin bayrağı + loopback istek + üretim DEĞİL. Beşinci koşul
+ *                (hiç aktif Admin yok) createDevAdmin içinde denetlenir.
  *
  * IDEMPOTENT (madde 7): her iki modda da sistemde aktif bir Admin varsa YENİ
  * hesap AÇILMAZ. Geliştirme modu ikinci çağrıda `created: false` ile mevcut
@@ -58,16 +66,55 @@ function constantTimeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-export async function GET(): Promise<Response> {
+/** Yerel/loopback adresler; hem istek ana bilgisayarı hem gerçek istemci IP'si denetlenir. */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+
+function isLoopbackRequest(request: Request): boolean {
+  let hostname = "";
+  try {
+    hostname = new URL(request.url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (!LOOPBACK_HOSTS.has(hostname)) return false;
+  // Proxy arkasından gelen gerçek istemci IP'si loopback DEĞİLSE reddedilir.
+  const connectingIp = (request.headers.get("cf-connecting-ip") ?? "").trim().toLowerCase();
+  if (connectingIp && !LOOPBACK_HOSTS.has(connectingIp)) return false;
+  return true;
+}
+
+/**
+ * Geliştirme bootstrap kilidi — koşulların HEPSİ birlikte sağlanmalıdır:
+ *   1. Üretim ortamı DEĞİL (fail-closed: eksik APP_ENV/NODE_ENV üretim sayılır).
+ *   2. AÇIK geliştirme işareti (APP_ENV=development).
+ *   3. AÇIK yerel izin bayrağı: ALLOW_LOCAL_ADMIN_BOOTSTRAP=on.
+ *   4. Yerel/loopback istek.
+ * Beşinci koşul (hiç aktif Admin yok) createDevAdmin içinde ayrıca denetlenir.
+ * Ek tek kullanımlık token dev modu için BİLİNÇLİ olarak istenmez (karar kaydı).
+ */
+function devBootstrapPermitted(request: Request): boolean {
+  if (isProduction()) return false;
+  if (!isExplicitDevelopment()) return false;
+  const allow = (env.ALLOW_LOCAL_ADMIN_BOOTSTRAP ?? "").trim().toLowerCase();
+  if (allow !== "on" && allow !== "true" && allow !== "1") return false;
+  return isLoopbackRequest(request);
+}
+
+export async function GET(request: Request): Promise<Response> {
   try {
     const [total, moderators] = await Promise.all([countAccounts(), countActiveModerators()]);
+    const required = total === 0;
+    const devBootstrapAvailable = devBootstrapPermitted(request) && moderators === 0;
     return json({
-      required: total === 0,
-      tokenConfigured: Boolean(env.MODERATOR_BOOTSTRAP_TOKEN),
+      required,
+      // SIZINTI KAPALI: anahtar yapılandırması yalnızca sıfır hesaplı kurulum
+      // evresinde raporlanır; kurulumdan sonra uç nötrdür.
+      tokenConfigured: required ? Boolean(env.MODERATOR_BOOTSTRAP_TOKEN) : false,
       authConfigured: authConfigured(),
-      // Geliştirme kurulumu yalnızca üretim dışında ve hiç aktif Admin yokken sunulur.
-      devBootstrapAvailable: !isProduction() && moderators === 0,
-      devUsername: DEV_ADMIN.username,
+      // Geliştirme kurulumu yalnızca dev kilitleri sağlanınca ve hiç aktif
+      // Admin yokken sunulur; kullanıcı adı da yalnızca o zaman söylenir.
+      devBootstrapAvailable,
+      devUsername: devBootstrapAvailable ? DEV_ADMIN.username : "",
     });
   } catch (error) {
     return handleError(error);
@@ -75,9 +122,11 @@ export async function GET(): Promise<Response> {
 }
 
 /** Geliştirme/demo bootstrap Admini; ikinci çağrıda ikinci hesap AÇMAZ. */
-async function createDevAdmin(): Promise<Response> {
-  if (isProduction()) {
-    return jsonError(404, "Geliştirme kurulumu üretim ortamında kullanılamaz.");
+async function createDevAdmin(request: Request): Promise<Response> {
+  if (!devBootstrapPermitted(request)) {
+    // Hangi koşulun eksik olduğu istemciye SÖYLENMEZ; ayrıntı sunucu logunda kalır.
+    console.error("[bootstrap] geliştirme kurulumu koşulları sağlanmadı; istek reddedildi.");
+    return jsonError(404, "Geliştirme kurulumu bu ortamda kullanılamaz.");
   }
   const existing = await findAccountByUsername(DEV_ADMIN.username);
   if (existing) {
@@ -100,8 +149,10 @@ async function createDevAdmin(): Promise<Response> {
     roleCode: "00",
     password: await hashPassword(DEV_ADMIN.password),
     createdBy: "geliştirme kurulumu",
-    // Geçici şifre olduğu açıkça işaretlenir.
-    mustChangePassword: true,
+    // admin/1234 yerel kolaylığı zorunlu parola değişimine TAKILMAZ (onaylı
+    // karar): hesap zaten yalnızca açık dev kilitleriyle açılabilir ve
+    // DEV_WARNING üretim öncesi kaldırılmasını söyler.
+    mustChangePassword: false,
   });
   await recordAudit({
     actorId: null,
@@ -130,21 +181,33 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     const body = await readJson(request);
-    if (body.mode === "development") return await createDevAdmin();
+    if (body.mode === "development") return await createDevAdmin(request);
+
+    // ÜRETİM KURULUM EVRESİ (orta yol): token akışı YALNIZCA sistemde hiç
+    // hesap yokken çalışır. Kurulum tamamlandıktan sonra uç, hesap varlığı
+    // dahil hiçbir durum bilgisi sızdırmadan nötr 404 döner.
+    if ((await countAccounts()) > 0) {
+      return jsonError(404, "Kurulum ucu kapalı.");
+    }
 
     const expected = env.MODERATOR_BOOTSTRAP_TOKEN;
     if (!expected || expected.trim().length < 8) {
-      console.error("[bootstrap] MODERATOR_BOOTSTRAP_TOKEN tanımlı değil; kurulum reddedildi.");
-      return jsonError(503, "Kurulum anahtarı tanımlı değil.");
-    }
-
-    if ((await countAccounts()) > 0) {
-      throw new ConflictError("Sistemde hesap var; kurulum ucu kapalıdır.");
+      // Yapılandırma eksikliği istemciye AYNI nötr yanıtla döner; ayrıntı logda.
+      console.error("[bootstrap] MODERATOR_BOOTSTRAP_TOKEN tanımlı değil veya çok kısa; kurulum reddedildi.");
+      return jsonError(404, "Kurulum ucu kapalı.");
     }
 
     const token = requiredText(body, "token", "Kurulum anahtarı", 200);
+
+    // Kurulum anahtarı denemeleri de D1 sayacıyla sınırlanır (izolatlar arası).
+    const ip = request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for") ?? "local";
+    const throttleKey = await hashToken(`${ip}|bootstrap`);
+    if ((await countRecentLoginFailures(throttleKey)) >= LOGIN_FAILURE_LIMIT) {
+      return jsonError(429, "Çok fazla başarısız deneme. Lütfen bir süre sonra tekrar deneyin.");
+    }
     if (!constantTimeEqual(token, expected)) {
       console.error("[bootstrap] geçersiz kurulum anahtarı denemesi");
+      await recordLoginFailure(throttleKey);
       return jsonError(401, "Kurulum anahtarı geçersiz.");
     }
 

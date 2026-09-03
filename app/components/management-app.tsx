@@ -8,6 +8,7 @@ import CompetitionStagePanel from "./competition-stage-panel";
 import JudgeQueuePanel from "./judge-queue-panel";
 import OperationsPanel from "./operations-panel";
 import ParticipantPortal from "./participant-portal";
+import PasswordChangeGate from "./password-change-gate";
 import ManagerProfileHistory from "./manager-profile-history";
 import { AdminApiError, adminApi } from "../lib/admin-client";
 import { PARTICIPANT_ROLE, ROLES, roleByCode } from "../lib/admin-roles";
@@ -134,6 +135,17 @@ export default function ManagementApp() {
     return <main className="session-check"><span className="session-spinner" /><p>Güvenli oturum denetleniyor…</p></main>;
   }
   if (!session) return <AccessLogin onSignedIn={signedIn} />;
+  // ZORUNLU PAROLA DEĞİŞİMİ (madde 10): geçici şifreli hesap, rolü ne olursa
+  // olsun (yarışmacı dahil) panele geçmeden önce kendi şifresini belirler.
+  if (session.mustChangePassword) {
+    return (
+      <PasswordChangeGate
+        account={session}
+        onChanged={(account) => setSession(account)}
+        onSignOut={signOut}
+      />
+    );
+  }
   if (session.roleCode === PARTICIPANT_ROLE) return <ParticipantPortal account={session} onSignOut={signOut} />;
 
   const role = roleByCode(session.roleCode);

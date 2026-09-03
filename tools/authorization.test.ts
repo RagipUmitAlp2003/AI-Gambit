@@ -369,6 +369,16 @@ test("başvuru durumunu yarışma sahibi (01) belirler, 04 yalnızca izler", () 
   assert.ok(can(account("01"), "manage_competition_stage"), "01 kendi yarışmasını yönetir.");
 });
 
+test("resmî şablon (benzerlik filtresi) yalnızca yarışmanın sahibi Yarışma Yöneticisindedir", () => {
+  // GÖREV 3 · madde 3: şablon kriter üretmez, uygunluk kararı vermez; okuma
+  // dahil hiçbir erişim 04'e (veya başka role) açılmaz — en az yetki.
+  assert.deepEqual([...PERMISSIONS.manage_similarity_template], ["01"]);
+  for (const role of ["00", "02", "03", "04"] as const) {
+    assert.ok(!can(account(role), "manage_similarity_template"), `${role} resmî şablona erişememeli.`);
+  }
+  assert.ok(can(account("01"), "manage_similarity_template"));
+});
+
 test("ÖNCELİKLİ işareti yalnızca Değerlendirme Yöneticisindedir", () => {
   assert.deepEqual([...PERMISSIONS.flag_competition_priority], ["04"]);
   for (const role of ["00", "01", "02", "03"] as const) {
@@ -468,5 +478,7 @@ test("hakem ekranında kaynak satıra git düğmesi ve aşama ikonları var", ()
   const evaluation = readFileSync("app/components/evaluation-app.tsx", "utf8");
   assert.match(evaluation, /Kaynak Satıra Git/, "Kanıta gitme düğmesi bulunmalıdır.");
   assert.match(evaluation, /function StageIcon/, "Aşamalar yeşil/sarı/kırmızı ikonla gösterilmelidir.");
-  assert.match(evaluation, /ŞÜPHELİ/, "Benzerlik taraması Şüpheli/Normal olarak işaretlenmelidir.");
+  // GÖREV 3 · madde 7: benzerlik dört aşamanın parçası DEĞİLDİR; aşama
+  // şeridindeki "ŞÜPHELİ/Normal" satırı kaldırıldı, bağımsız kart gösterir.
+  assert.match(evaluation, /Raporlar arası benzerlik/, "Bağımsız benzerlik kartı bulunmalıdır.");
 });

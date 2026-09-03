@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { handleError, json, jsonError, readJson, requirePermission } from "../../../lib/admin-guard";
+import { configuredByteLimit } from "../../../lib/request-guard";
 import {
   archiveApplication,
   coordinateApplication,
@@ -175,7 +176,9 @@ export async function GET(request: Request, context: RouteContext): Promise<Resp
 export async function PATCH(request: Request, context: RouteContext): Promise<Response> {
   try {
     const id = (await context.params).id;
-    const body = await readJson(request);
+    // `save_evaluation` gövdesi (bulgular + kanıt alıntıları) 2 MB varsayılanı
+    // aşabilir; akışlı bayt kapısı yine parse'tan ÖNCE çalışır (madde 9).
+    const body = await readJson(request, configuredByteLimit("EVALUATION_JSON_MAX_BYTES", 4 * 1024 * 1024));
     if (body.action === "assign_judge") {
       // Kapatılan uç: hangi rol çağırırsa çağırsın manuel atama yapılamaz.
       return jsonError(403,

@@ -20,24 +20,22 @@
  */
 import { DatabaseSync } from "node:sqlite";
 import { pbkdf2Sync, randomBytes, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import path from "node:path";
+import { assertExplicitDevelopment } from "./env_guard.mjs";
 
 const LOCAL_D1_DIR = ".wrangler/state/v3/d1/miniflare-D1DatabaseObject";
 const PASSWORD = "1234";
 const ITERATIONS = 150_000;
 const apply = process.argv.includes("--apply");
 
+/**
+ * FAIL-CLOSED ortam kilidi (ortak: tools/env_guard.mjs): production reddi
+ * korunur; APP_ENV hiç tanımlı değilse de artık reddedilir — test hesapları
+ * yalnızca AÇIKÇA development işaretli ortamda açılır.
+ */
 function assertNotProduction() {
-  const fromEnv = (process.env.APP_ENV ?? process.env.NODE_ENV ?? "").toLowerCase();
-  if (fromEnv === "production") {
-    console.error("REDDEDİLDİ: APP_ENV/NODE_ENV 'production'. Test hesapları yalnızca geliştirme ortamında açılır.");
-    process.exit(1);
-  }
-  if (existsSync(".env.local") && /^\s*APP_ENV\s*=\s*production\s*$/m.test(readFileSync(".env.local", "utf8"))) {
-    console.error("REDDEDİLDİ: .env.local içinde APP_ENV=production yazıyor.");
-    process.exit(1);
-  }
+  assertExplicitDevelopment("seed_demo_users");
 }
 
 function locateLocalDatabase() {
