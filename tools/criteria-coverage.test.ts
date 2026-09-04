@@ -196,14 +196,15 @@ test("doğrulanmış teknik ve haricî kriter korunur; modelin dışladığı ad
  * hataya çevriliyor.
  */
 test("çıktı tavanı ölçülen ihtiyacın üstündedir ve kesilme açık hata üretir", () => {
-  const route = readFileSync("app/api/analyze/route.ts", "utf8");
-  const cap = Number(route.match(/const MAX_OUTPUT_TOKENS = ([\d_]+);/)?.[1]?.replace(/_/g, "") ?? 0);
+  const route = readFileSync("app/lib/criteria-priority.ts", "utf8");
+  const cap = Number(route.match(/const CRITERIA_OUTPUT_TOKENS = ([\d_]+);/)?.[1]?.replace(/_/g, "") ?? 0);
   assert.ok(cap >= 32_768, `Çıktı tavanı ölçülen ihtiyacın (25.564) belirgin üstünde olmalıdır; şu an ${cap}.`);
-  assert.match(route, /finishReason === "MAX_TOKENS"/, "Kesilme tespit edilmelidir.");
-  assert.match(route, /token sınırına ulaştığı için kesildi/, "Kullanıcıya sebep açıkça söylenmelidir.");
+  const runner = readFileSync("app/lib/criteria-generation.ts", "utf8");
+  assert.match(runner, /finishReason === "MAX_TOKENS"/, "Kesilme tespit edilmelidir.");
+  assert.match(runner, /queue.unshift\(group.slice/, "Yalnızca taşan grup bölünmelidir.");
   // Kesilme kontrolü bozuk JSON dalından ÖNCE gelmelidir; yoksa yanıltıcı mesaj döner.
   assert.ok(
-    route.indexOf("truncatedByTokenLimit(outcome.payload)") < route.indexOf("şemaya uygun JSON olarak okunamadı"),
+    runner.indexOf('finishReason === "MAX_TOKENS"') < runner.indexOf("JSON.parse(text)"),
     "Kesilme, genel JSON hatasından önce raporlanmalıdır.",
   );
 });
@@ -252,10 +253,10 @@ test("çok satırlı zorunlu başlık listesinde sonraki maddeler kaçırılmaz"
   assert.equal(result.criteria.length, 1);
 });
 
-test("şartname üretimi beş dakika bekler ve bu bütçeyi tek çağrıya aktarır", () => {
+test("şartname toplam 80 saniyede kesilmez, ağ isteği güvenlik sınırı korunur", () => {
   const route = readFileSync("app/api/analyze/route.ts", "utf8");
-  assert.match(route, /const GENERATION_TIMEOUT_MS = 300_000;/);
-  assert.match(route, /timeoutMs: GENERATION_TIMEOUT_MS/);
+  assert.doesNotMatch(route, /80_000|CRITERIA_TOTAL_TIMEOUT_MS/);
+  assert.match(route, /generatePrioritizedCriteria/);
   const client = readFileSync("app/lib/gemini-analyzer.ts", "utf8");
   assert.doesNotMatch(client, /AbortSignal\.timeout|setTimeout\(/);
 });
@@ -263,8 +264,12 @@ test("şartname üretimi beş dakika bekler ve bu bütçeyi tek çağrıya aktar
 test("çıktı şeması yalnızca gerçek aday kimliklerini kabul eder ve eksik kapsam başarı sayılmaz", async () => {
   const { extractionSchemaForCandidates } = await import("../app/lib/criteria-extraction.ts");
   const schema = extractionSchemaForCandidates(["SAYFA-01-BLOK-001", "SAYFA-02-BLOK-003"]);
-  assert.deepEqual(schema.properties.decisions.items.properties.sourceId.enum, ["SAYFA-01-BLOK-001", "SAYFA-02-BLOK-003"]);
-  assert.deepEqual(schema.properties.decisions.items.properties.stage.enum, ["language_template", "headings_content", "category_similarity", "criteria_evidence"]);
+  for (const variant of schema.properties.decisions.items.anyOf) {
+    assert.deepEqual(variant.properties.sourceId.enum, ["SAYFA-01-BLOK-001", "SAYFA-02-BLOK-003"]);
+  }
+  const criterion = schema.properties.decisions.items.anyOf.find((variant) => "stage" in variant.properties)!;
+  assert.ok("stage" in criterion.properties);
+  assert.deepEqual(criterion.properties.stage.enum, ["language_template", "headings_content", "category_similarity", "criteria_evidence"]);
 
   const route = readFileSync("app/api/analyze/route.ts", "utf8");
   assert.match(route, /coverageCheck\.stats\.unansweredCandidates > 0/);
@@ -273,4 +278,22 @@ test("çıktı şeması yalnızca gerçek aday kimliklerini kabul eder ve eksik 
     route.indexOf("coverageCheck.stats.unansweredCandidates > 0") < route.indexOf("const extraction: CachedExtraction"),
     "Kapsam kontrolü önbelleğe alma ve kayıt işleminden önce yapılmalıdır.",
   );
+});
+
+test("kapsam dışı çıktı şeması iki alanlıdır; gerçek kriterin kanıt alanları zorunlu kalır", async () => {
+  const { EXTRACTION_SCHEMA, EXTRACTION_SYSTEM_INSTRUCTION, buildExtractionPrompt } = await import("../app/lib/criteria-extraction.ts");
+  const [criterion, excluded] = EXTRACTION_SCHEMA.properties.decisions.items.anyOf;
+  assert.deepEqual(Object.keys(excluded.properties).sort(), ["result", "sourceId"]);
+  assert.deepEqual([...excluded.required].sort(), ["result", "sourceId"]);
+  assert.equal(excluded.additionalProperties, false);
+  assert.deepEqual(excluded.properties.result.enum, ["KAPSAM_DISI"]);
+  assert.deepEqual(criterion.properties.result.enum, ["KRITER"]);
+  for (const field of ["sourceText", "sourcePage", "description", "required", "stage", "classificationReason"]) {
+    assert.ok((criterion.required as readonly string[]).includes(field));
+  }
+  assert.match(EXTRACTION_SYSTEM_INSTRUCTION, /KAPSAM_DISI kararında gerekçe yazma/);
+  assert.doesNotMatch(EXTRACTION_SYSTEM_INSTRUCTION, /kapsam dışı kararların gerekçeli|şemayı tamamlayan sabit yer tutucular/);
+  const prompt = buildExtractionPrompt({pageCount: 2, totalBlocks: 4, candidateCount: 3, documentContext: "", candidatesText: "örnek"});
+  assert.match(prompt, /gerekçe veya boş alan ekleme/);
+  assert.doesNotMatch(prompt, /KAPSAM_DISI olarak gerekçelendir/);
 });

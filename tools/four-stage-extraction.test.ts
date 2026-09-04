@@ -206,7 +206,7 @@ test("13) somut yarışma kapsamı category_similarity kriteri olur", () => {
 
 test("yeni çıkarım ve seçici sürümleri eski sonuç önbelleğini kullanmaz", () => {
   assert.deepEqual([...EXTRACTION_STAGE_IDS], ["language_template", "headings_content", "category_similarity", "criteria_evidence"]);
-  assert.equal(EXTRACTION_PROMPT_VERSION, "v43-preliminary-local-context");
+  assert.equal(EXTRACTION_PROMPT_VERSION, "v45-core-first-total-28");
   assert.equal(CANDIDATE_SELECTOR_VERSION, "candidate-selector-v4-local-context-hints");
   assert.equal(DICTIONARY_VERSION, "sozluk-v6-four-stages-scope-gates");
 });
@@ -247,15 +247,30 @@ test("video dosya özelliği saklanır fakat mevcut PDF değerlendirme kapsamın
   assert.equal(scope.outsidePdf,1);
 });
 
-test("modelin kapsam dışı kararları gerekçeleriyle ham yanıtta kalır ve kritere dönüşmez", () => {
+test("iki alanlı kapsam dışı kararlar cevapsız sayılmaz ve kritere dönüşmez", () => {
   const texts=["Yarışma günü geç kalanlara ceza uygulanır.","Videoda kalkış ve iniş gösterilmelidir.","KYS üzerinden yükleyiniz.","Final değerlendirme sunumu yapılacaktır."];
   const blocks=texts.map((value,i)=>block("SAYFA-05-BLOK-"+i,value,5));
-  const rows=blocks.map(source=>decision(source,{result:"KAPSAM_DISI",classificationReason:"Rapor ön elemesi değil, dış süreç."}));
+  const rows=blocks.map(source=>({sourceId:source.sourceId,result:"KAPSAM_DISI"}));
   const result=run(blocks,rows);
   assert.equal(result.criteria.length,0);
   assert.equal(result.stats.excludedCandidates,4);
   assert.equal(result.stats.unansweredCandidates,0);
-  assert.ok(rows.every(row=>row.classificationReason));
+  assert.ok(rows.every(row=>Object.keys(row).length===2));
+  // Eski kayıtlar okunabilir; yeni üretim artık gerekçe alanı istemez.
+  const legacy=run(blocks,rows.map(row=>({...row,classificationReason:"Eski açıklama",sourcePage:5})));
+  assert.deepEqual(legacy.stats,result.stats);
+  assert.equal(legacy.criteria.length,0);
+});
+
+test("kısa kapsam dışı kararda sahte kimlik ve bilinmeyen sonuç kapsamı kapatamaz", () => {
+  const source=block("SAYFA-05-BLOK-001","Yarışma günü geç kalanlara ceza uygulanır.",5);
+  const result=run([source],[
+    {sourceId:"SAHTE",result:"KAPSAM_DISI"},
+    {sourceId:source.sourceId,result:"BELIRSIZ"},
+  ]);
+  assert.equal(result.criteria.length,0);
+  assert.equal(result.stats.unansweredCandidates,1);
+  assert.equal(result.stats.excludedCandidates,0);
 });
 
 test("sahte alıntı veya kaynak kimliği kapsam esnekliğinden yararlanamaz", () => {

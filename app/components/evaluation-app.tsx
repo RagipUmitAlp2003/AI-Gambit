@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import TopbarSession from "./topbar-session";
 import { formatDateTime } from "../lib/admin-client";
@@ -119,6 +119,11 @@ function aiCounts(findings: CriterionFinding[]) {
  *   - Geçici hata (429/503) → aynı düğmeyle yeniden denenebilir
  *   - Kalıcı hata           → sunucunun gerekçesi olduğu gibi gösterilir
  */
+/** Benzerlik koşusunun (kriter analizinden bağımsız) istemci durumu. */
+type SimilarityRunState = { state: "running" | "partial" | "failed"; message: string };
+/** Benzerlik ucunun yanıt tipi; tek kaynak workflow-client'tır. */
+type SimilarityCheckResult = Awaited<ReturnType<typeof workflowApi.similarityCheck>>;
+
 function analysisFailureMessage(caught: unknown): string {
   if (caught instanceof ReportEngineError) {
     if (caught.code === "OCR_REQUIRED") {
@@ -375,9 +380,15 @@ function StageIcon({ verdict }: { verdict: RuleVerdict | null }) {
  * Benzerlik sonucu bu kartlardan ÇIKARILDI; ayrı bir sistem olarak kriter
  * listesinin altında kendi kartında durur (bkz. SimilarityCard).
  */
-function StageStrip({ stages, findings }: { stages: StageResult[]; findings: CriterionFinding[] }) {
+function StageStrip({ stages, findings, outsidePdfCount = 0 }: {
+  stages: StageResult[];
+  findings: CriterionFinding[];
+  /** PDF dışı kanıt gerektirdiği için rapor analizine girmeyen kriter sayısı. */
+  outsidePdfCount?: number;
+}) {
   return (
-    <div className="eval-stage-strip" aria-label="Dört aşamalı kontrol özeti">
+    // Bu şerit AI ÖN DEĞERLENDİRMESİDİR; hakemin kesinleşen sayaçları ayrıdır.
+    <div className="eval-stage-strip" aria-label="AI ön değerlendirme özeti — dört aşamalı kontrol">
       {CHECK_STAGES.map((definition) => {
         const stage = stages.find((item) => item.stage === definition.id);
         /**
@@ -452,7 +463,17 @@ function StageStrip({ stages, findings }: { stages: StageResult[]; findings: Cri
         }
 
         if (definition.id === "criteria_evidence" && notApplicable) {
-          rows.push({ label: "Durum", value: "Bu profilde teknik kriter tanımlı değil; aşama uygulanmıyor." });
+          /*
+           * "Bulgu gelmedi" ile "profilde teknik kriter yok" AYNI ŞEY DEĞİLDİR
+           * (madde 7). Elimizdeki veri bunu kesin ayırmaya yetmiyorsa kart
+           * kesin bir iddia kurmaz; PDF dışı kriter varsa bunu sayıyla söyler.
+           */
+          rows.push({
+            label: "Durum",
+            value: outsidePdfCount > 0
+              ? `Bu analizde PDF'den değerlendirilebilen teknik kriter bulgusu yok; ${outsidePdfCount} kriter PDF dışı kanıt gerektirdiği için rapor analizine girmedi.`
+              : "Bu analizde teknik kriter bulgusu yok; profilde PDF'den değerlendirilebilen teknik kriter tanımlı olmayabilir.",
+          });
         } else if (stage && definition.id === "criteria_evidence") {
           rows.push({ label: "Kriter bulguları", value: stage.summary || "Aşağıdaki listede", tone: undefined });
         }
@@ -508,14 +529,18 @@ type RejectDraft = {
  * altta hakemin bağımsız kararı (Karar bekliyor / Onay / Ret). Geçerli kriter
  * sonucu YALNIZCA hakem kararıdır.
  */
-function CriterionDecisionCard({ finding, decision, specSourcePage, locked, rejectDraft, rejectError, onApprove, onOpenReject, onRejectDraft, onConfirmReject, onCancelReject, onReset, onShowEvidence }: {
+function CriterionDecisionCard({ finding, decision, specSourcePage, reportPages, locked, rejectDraft, rejectError, rejectFieldErrors, onApprove, onOpenReject, onRejectDraft, onConfirmReject, onCancelReject, onReset, onShowEvidence }: {
   finding: CriterionFinding;
   decision: JudgeCriterionDecision;
   /** Kriterin ŞARTNAMEDEKİ sabit kaynak sayfası (varsa); "Raporda bulunamadı" kararında gösterilir. */
   specSourcePage: number | null;
+  /** Katılımcı PDF'inin sayfa sayısı; sayfa girişi bu aralıkta olmalıdır. */
+  reportPages: number;
   locked: boolean;
   rejectDraft: RejectDraft | null;
   rejectError: string;
+  /** Alan bazlı hata mesajları; anahtar = alan adı (madde 5). */
+  rejectFieldErrors: Record<string, string>;
   onApprove: () => void;
   onOpenReject: () => void;
   onRejectDraft: (patch: Partial<RejectDraft>) => void;
@@ -634,60 +659,87 @@ function CriterionDecisionCard({ finding, decision, specSourcePage, locked, reje
                 değiştirebilirsiniz. Açıklamanız yalnızca bu kriterin kapsamıyla ilgili olmalıdır.
                 AI&apos;nin özgün analizi silinmez; denetim kaydında ayrı tutulur.
               </p>
-              {/* Hakemin kendi sonucu: kriterin kesinleşecek değeri. */}
-              <div className="eval-reject-mode" role="radiogroup" aria-label="Hakem sonucu">
-                <label>
-                  <input
-                    type="radio"
-                    name={`judge-result-${finding.criterionId}`}
-                    checked={rejectDraft!.judgeResult === "UYGUN"}
-                    onChange={() => onRejectDraft({ judgeResult: "UYGUN" })}
-                  />
-                  <span><strong>UYGUN</strong> — kriter, hakem değerlendirmesine göre karşılanıyor</span>
-                </label>
-                <label>
-                  <input
-                    type="radio"
-                    name={`judge-result-${finding.criterionId}`}
-                    checked={rejectDraft!.judgeResult === "OLUMSUZ"}
-                    onChange={() => onRejectDraft({ judgeResult: "OLUMSUZ" })}
-                  />
-                  <span><strong>OLUMSUZ</strong> — kriter, hakem değerlendirmesine göre karşılanmıyor</span>
-                </label>
-              </div>
-              <div className="eval-reject-mode" role="radiogroup" aria-label="Dayanak türü">
-                <label>
-                  <input
-                    type="radio"
-                    name={`evidence-mode-${finding.criterionId}`}
-                    checked={rejectDraft!.evidenceMode === "PDF_KONUMU"}
-                    onChange={() => onRejectDraft({ evidenceMode: "PDF_KONUMU" })}
-                  />
-                  <span>PDF konumu — değerlendirme katılımcı PDF&apos;inin belirli bir kısmına dayanıyor</span>
-                </label>
-                <label>
-                  <input
-                    type="radio"
-                    name={`evidence-mode-${finding.criterionId}`}
-                    checked={rejectDraft!.evidenceMode === "RAPORDA_BULUNAMADI"}
-                    onChange={() => onRejectDraft({ evidenceMode: "RAPORDA_BULUNAMADI" })}
-                  />
-                  <span>Raporda bulunamadı — aranan bölüm/içerik raporda hiç yok (sahte sayfa/alıntı istenmez)</span>
-                </label>
-              </div>
+              {/*
+                İKİ AYRI SORU (madde 5): "Kriter sonucu" ile "Dayanak" tek soru
+                gibi dört seçenek olarak gösterilmez. Seçenekler kompakt ve yan
+                yanadır; gerçek radio semantiği (klavye, odak, ekran okuyucu)
+                korunur, yalnızca görünüm sadeleştirilir.
+              */}
+              <fieldset className="eval-choice-group" aria-describedby={rejectFieldErrors.judgeResult ? `judge-result-error-${finding.criterionId}` : undefined}>
+                <legend className="field-label">Kriter sonucu</legend>
+                <div className="eval-choice-options">
+                  <label className={rejectDraft!.judgeResult === "UYGUN" ? "selected" : ""}>
+                    <input
+                      type="radio"
+                      name={`judge-result-${finding.criterionId}`}
+                      checked={rejectDraft!.judgeResult === "UYGUN"}
+                      onChange={() => onRejectDraft({ judgeResult: "UYGUN" })}
+                    />
+                    <span>Uygun</span>
+                  </label>
+                  <label className={rejectDraft!.judgeResult === "OLUMSUZ" ? "selected" : ""}>
+                    <input
+                      type="radio"
+                      name={`judge-result-${finding.criterionId}`}
+                      checked={rejectDraft!.judgeResult === "OLUMSUZ"}
+                      onChange={() => onRejectDraft({ judgeResult: "OLUMSUZ" })}
+                    />
+                    <span>Olumsuz</span>
+                  </label>
+                </div>
+                <small>Kriterin kesinleşecek sonucu; başvurunun onay/ret kararı değildir.</small>
+                {rejectFieldErrors.judgeResult ? (
+                  <p className="field-error" id={`judge-result-error-${finding.criterionId}`} role="alert">{rejectFieldErrors.judgeResult}</p>
+                ) : null}
+              </fieldset>
+              <fieldset className="eval-choice-group">
+                <legend className="field-label">Dayanak</legend>
+                <div className="eval-choice-options">
+                  <label className={rejectDraft!.evidenceMode === "PDF_KONUMU" ? "selected" : ""}>
+                    <input
+                      type="radio"
+                      name={`evidence-mode-${finding.criterionId}`}
+                      checked={rejectDraft!.evidenceMode === "PDF_KONUMU"}
+                      onChange={() => onRejectDraft({ evidenceMode: "PDF_KONUMU" })}
+                    />
+                    <span>PDF&apos;de bulunan bilgi</span>
+                  </label>
+                  <label className={rejectDraft!.evidenceMode === "RAPORDA_BULUNAMADI" ? "selected" : ""}>
+                    <input
+                      type="radio"
+                      name={`evidence-mode-${finding.criterionId}`}
+                      checked={rejectDraft!.evidenceMode === "RAPORDA_BULUNAMADI"}
+                      onChange={() => onRejectDraft({ evidenceMode: "RAPORDA_BULUNAMADI" })}
+                    />
+                    <span>Raporda bulunmayan içerik</span>
+                  </label>
+                </div>
+                <small>
+                  {rejectDraft!.evidenceMode === "PDF_KONUMU"
+                    ? "Sayfa, bölüm ve doğrudan alıntı istenir."
+                    : "Sahte sayfa veya alıntı istenmez; yalnızca aranan içeriği yazın."}
+                </small>
+              </fieldset>
               {rejectDraft!.evidenceMode === "PDF_KONUMU" ? (
                 <div className="eval-reject-grid">
-                  <label className="field">
+                  <label className="field eval-reject-page">
                     <span className="field-label">Katılımcı PDF sayfası</span>
                     <input
                       type="number"
                       min={1}
+                      max={reportPages > 0 ? reportPages : undefined}
+                      step={1}
                       value={rejectDraft!.page}
                       placeholder="Örn. 6"
+                      aria-invalid={rejectFieldErrors.page ? true : undefined}
+                      aria-describedby={rejectFieldErrors.page ? `page-error-${finding.criterionId}` : undefined}
                       onChange={(event) => onRejectDraft({ page: event.target.value })}
                     />
+                    {rejectFieldErrors.page ? (
+                      <span className="field-error" id={`page-error-${finding.criterionId}`} role="alert">{rejectFieldErrors.page}</span>
+                    ) : reportPages > 0 ? <span className="field-hint">Rapor {reportPages} sayfa.</span> : null}
                   </label>
-                  <label className="field">
+                  <label className="field eval-reject-section">
                     <span className="field-label">Kaynak bölüm / madde (isteğe bağlı)</span>
                     <input
                       value={rejectDraft!.section}
@@ -702,20 +754,30 @@ function CriterionDecisionCard({ finding, decision, specSourcePage, locked, reje
                       value={rejectDraft!.quote}
                       maxLength={1200}
                       placeholder="Örn. “Sistem boyutu 104 cm olarak belirlenmiştir.”"
+                      aria-invalid={rejectFieldErrors.quote ? true : undefined}
+                      aria-describedby={rejectFieldErrors.quote ? `quote-error-${finding.criterionId}` : undefined}
                       onChange={(event) => onRejectDraft({ quote: event.target.value })}
                     />
+                    {rejectFieldErrors.quote ? (
+                      <span className="field-error" id={`quote-error-${finding.criterionId}`} role="alert">{rejectFieldErrors.quote}</span>
+                    ) : null}
                   </label>
                 </div>
               ) : (
                 <div className="eval-reject-grid">
-                  <label className="field">
-                    <span className="field-label">Aranan bölüm / başlık</span>
+                  <label className="field eval-reject-quote">
+                    <span className="field-label">Raporda aranan bölüm / içerik</span>
                     <input
                       value={rejectDraft!.missingContent}
                       maxLength={400}
                       placeholder="Örn. Yapısal analiz sonuçları bölümü"
+                      aria-invalid={rejectFieldErrors.missingContent ? true : undefined}
+                      aria-describedby={rejectFieldErrors.missingContent ? `missing-error-${finding.criterionId}` : undefined}
                       onChange={(event) => onRejectDraft({ missingContent: event.target.value })}
                     />
+                    {rejectFieldErrors.missingContent ? (
+                      <span className="field-error" id={`missing-error-${finding.criterionId}`} role="alert">{rejectFieldErrors.missingContent}</span>
+                    ) : null}
                   </label>
                   <p className="eval-reject-note">
                     Olmayan içerik için katılımcı PDF sayfası ve alıntı İSTENMEZ.
@@ -723,20 +785,25 @@ function CriterionDecisionCard({ finding, decision, specSourcePage, locked, reje
                   </p>
                 </div>
               )}
-              <label className="field">
+              <label className="field eval-reject-reason">
                 <span className="field-label">Hakem gerekçesi ve açıklaması</span>
                 <textarea
                   value={rejectDraft!.reason}
                   maxLength={2000}
                   placeholder="Örn. Şartnamede izin verilen azami boyut 100 cm'dir; rapor 104 cm bildiriyor."
+                  aria-invalid={rejectFieldErrors.reason ? true : undefined}
+                  aria-describedby={rejectFieldErrors.reason ? `reason-error-${finding.criterionId}` : undefined}
                   onChange={(event) => onRejectDraft({ reason: event.target.value })}
                 />
+                {rejectFieldErrors.reason ? (
+                  <span className="field-error" id={`reason-error-${finding.criterionId}`} role="alert">{rejectFieldErrors.reason}</span>
+                ) : null}
               </label>
               {rejectError ? <p className="approval-error" role="alert">{rejectError}</p> : null}
               <div className="eval-reject-actions">
                 {/* Vazgeç yalnızca formu kapatır; önceden verilmiş karar korunur. */}
                 <button type="button" className="text-button" onClick={onCancelReject}>Vazgeç</button>
-                <button type="button" className="danger-button" onClick={onConfirmReject}>Hakem değerlendirmesini kaydet</button>
+                <button type="button" className="primary-button" onClick={onConfirmReject}>Hakem değerlendirmesini kaydet</button>
               </div>
             </div>
           ) : (
@@ -783,6 +850,21 @@ function CriterionDecisionCard({ finding, decision, specSourcePage, locked, reje
  * cümlesinden asla yüzde geri ayrıştırılmaz ("%98'li takım adı" oranı bozamaz).
  * Eski kayıtlarda bulunmayan alanların satırları gizlenir (geriye uyum).
  */
+/**
+ * Sonuç durumu tek cümleyle ve DOĞRU biçimde adlandırılır (madde 3):
+ * karşılaştırılamayan, kısmi ya da anlamsal katmanı düşmüş bir koşu "Normal"
+ * denmez. "ŞÜPHELİ" gibi suçlayıcı ifade yerine "İnceleme önerilir" kullanılır;
+ * karar her durumda hakemindir.
+ */
+function similarityStatusLabel(report: SimilarityReport): string {
+  if (report.noComparableContent) return "karşılaştırılabilir özgün içerik bulunamadı";
+  if (report.level === "none" || report.comparedCount === 0) return "karşılaştırılabilecek başka rapor yok";
+  if (report.level === "review" || report.level === "high") return "inceleme önerilir";
+  if (report.poolTruncated) return "kısmen tamamlandı · belirgin eşleşme yok";
+  if (report.method === "minhash-only") return "yalnız doğrudan metin karşılaştırması · belirgin eşleşme yok";
+  return "tamamlandı · belirgin eşleşme yok";
+}
+
 function SimilarityCard({ report, application }: { report: SimilarityReport; application: CompetitionApplication }) {
   const flagged = report.level === "review" || report.level === "high";
   const stale = application.similarityStale || report.stale;
@@ -794,7 +876,7 @@ function SimilarityCard({ report, application }: { report: SimilarityReport; app
         (madde 3): benzerlik ayrı bir sistemdir, aşama sonuçlarına ve kriter
         sayaçlarına karışmaz ve hiçbir kararı otomatik değiştirmez.
       */}
-      <h3 className="eval-similarity-title">Raporlar arası benzerlik — {flagged ? "ŞÜPHELİ" : "Normal"}</h3>
+      <h3 className="eval-similarity-title">Raporlar arası benzerlik — {similarityStatusLabel(report)}</h3>
       {stale ? (
         <p className="eval-similarity-stale">
           Bu sonuç güncel değil: {application.similarityStaleReason || report.staleReason || "havuza yeni rapor geldi."}{" "}
@@ -804,7 +886,25 @@ function SimilarityCard({ report, application }: { report: SimilarityReport; app
       <p>{report.note}</p>
       {report.level !== "none" ? (
         <dl className="eval-similarity-facts">
-          <div><dt>Karşılaştırılan rapor</dt><dd>{report.comparedCount}{report.poolTruncated ? " (havuz üst sınırı uygulandı)" : ""}</dd></div>
+          <div>
+            <dt>Matematiksel olarak karşılaştırılan rapor</dt>
+            <dd>{report.comparedCount}{report.poolTruncated ? " (havuz üst sınırı uygulandı; tarama tamamlanmadı)" : ""}</dd>
+          </div>
+          {/*
+            Tarama, kanıt seçimi ve AI açıklaması AYRI sayılardır (madde 3):
+            tek bir "incelendi" sayısında birleştirilmez. AI açıklaması yalnızca
+            seçilen eşleşme kanıtları için, en yakın TEK rapor üzerinden üretilir.
+          */}
+          <div>
+            <dt>AI açıklaması için seçilen kanıt</dt>
+            <dd>
+              {report.matches.length
+                ? `${Math.min(3, report.matches.length)} eşleşme · 1 rapor`
+                : "0 eşleşme · AI açıklaması istenmedi"}
+              {report.llmStatus === "failed" ? " · açıklama üretilemedi" : ""}
+              {report.llmStatus === "skipped" ? " · açıklama kapalı/uygun değil" : ""}
+            </dd>
+          </div>
           {typeof report.comparableWords === "number" ? (
             <div><dt>Karşılaştırılabilir özgün içerik</dt><dd>{report.comparableWords} kelime</dd></div>
           ) : null}
@@ -858,7 +958,7 @@ function SimilarityCard({ report, application }: { report: SimilarityReport; app
         <p className="eval-similarity-llmfail">Açıklama kontrolü tamamlanamadı; MinHash ve anlamsal sonuç geçerlidir.</p>
       ) : null}
       {/* Madde 7: uyarı her durumda AYRI bir öğe olarak gösterilir. */}
-      <p className="eval-similarity-disclaimer">Bu sonuç intihal kararı değildir.</p>
+      <p className="eval-similarity-disclaimer">Bu sonuç intihal veya otomatik ret kararı değildir.</p>
     </section>
   );
 }
@@ -877,12 +977,12 @@ function LegacySimilarityCard({ similarity }: { similarity: NonNullable<StageRes
           ? "Karşılaştırılabilecek başka güncel rapor henüz bulunmuyor."
           : `Önceki analizde ${similarity.percent === null || similarity.percent === undefined ? "benzerlik oranı hesaplanmadı" : `yaklaşık %${similarity.percent} benzerlik bulundu`}${similarity.closestTeam ? ` (en yakın: ${similarity.closestTeam})` : ""}. Ayrıntı için analizi yenileyin.`}
       </p>
-      <p className="eval-similarity-disclaimer">Bu sonuç intihal kararı değildir.</p>
+      <p className="eval-similarity-disclaimer">Bu sonuç intihal veya otomatik ret kararı değildir.</p>
     </section>
   );
 }
 
-function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunning, progress, onAnalyze, onFinalize, onReopen, onDeleteAnalysis, onArchive }: {
+function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunning, progress, similarityRun, onAnalyze, onRetrySimilarity, onReviewSaved, onFinalize, onReopen, onDeleteAnalysis, onArchive }: {
   application: CompetitionApplication;
   /** Yarışmanın yayımlı profili; kriterlerin şartname kaynak sayfası buradan okunur. */
   profile: CompetitionProfile | null;
@@ -894,7 +994,13 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
    */
   otherAnalysisRunning: boolean;
   progress: string;
+  /** Benzerlik koşusu kriter analizinden bağımsız ilerler; null iken sonuç yerindedir. */
+  similarityRun: SimilarityRunState | null;
   onAnalyze: (application: CompetitionApplication, force?: boolean) => void;
+  /** Yalnızca benzerliği yeniden çalıştırır; kriter analizine dokunmaz. */
+  onRetrySimilarity: (application: CompetitionApplication) => Promise<void>;
+  /** Taslak kaydından dönen güncel başvuru; listeyi tazeler, gezinme YAPMAZ. */
+  onReviewSaved: (application: CompetitionApplication) => void;
   onFinalize: (application: CompetitionApplication, review: JudgeReview) => Promise<boolean>;
   /** Kesinleşmiş kararı sunucuda yeniden açar. */
   onReopen: (application: CompetitionApplication) => Promise<void>;
@@ -904,14 +1010,37 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
   onArchive: (application: CompetitionApplication, reason: string) => Promise<void>;
 }) {
   const evaluation = usableEvaluation(application);
+  /** Katılımcı PDF'inin sayfa sayısı; hakem sayfa girişi bu aralıkla denetlenir. */
+  const reportPages = evaluation?.report.pages ?? 0;
   // PDF dışı kurallar hakem ekranına HİÇ gelmez (madde 2).
   const findings = useMemo(() => evaluation ? visibleFindingsOf(evaluation) : [], [evaluation]);
   const completed = application.status === "completed" && application.review?.status === "completed";
+  /**
+   * Taslak kapsamı (madde 6): kaydedilmiş TASLAK kararlar yalnızca üretildikleri
+   * analize aittir. Yeni analizden sonra eski taslak OTOMATİK uygulanmaz;
+   * kayıt silinmez, yalnızca geri yüklenmez. Kesinleşmiş karar (completed)
+   * her zaman geri yüklenir: o artık taslak değil, kaydın kendisidir.
+   */
+  const storedReview = application.review ?? null;
+  const draftMatchesAnalysis = storedReview?.status === "completed"
+    || !storedReview?.draftScope
+    || (storedReview.draftScope.analyzedAt === (evaluation?.analyzedAt ?? "")
+      && storedReview.draftScope.pdfHash === (evaluation?.report.pdfHash ?? null)
+      && storedReview.draftScope.criteriaVersion === (application.evaluationCriteriaVersion ?? null));
   const [decisions, setDecisions] = useState<JudgeCriterionDecision[]>(
-    () => restoreCriterionDecisions(findings, application.review?.criterionDecisions),
+    () => restoreCriterionDecisions(findings, draftMatchesAnalysis ? storedReview?.criterionDecisions : []),
+  );
+  /** Sunucuya yazılmış son taslağın damgası; iki sekme çakışmasında kullanılır. */
+  const draftStamp = useRef<string | null>(storedReview?.draftSavedAt ?? null);
+  const draftQueue = useRef<Promise<boolean>>(Promise.resolve(true));
+  const latestDecisions = useRef(decisions);
+  const [draftState, setDraftState] = useState<{ state: "idle" | "saving" | "saved" | "error"; message: string }>(
+    { state: "idle", message: "" },
   );
   const [rejectDraft, setRejectDraft] = useState<RejectDraft | null>(null);
   const [rejectError, setRejectError] = useState("");
+  /** Alan bazlı hata mesajları (madde 5); anahtar = alan adı. */
+  const [rejectFieldErrors, setRejectFieldErrors] = useState<Record<string, string>>({});
   const [pendingOutcome, setPendingOutcome] = useState<Outcome | null>(null);
   const [note, setNote] = useState(application.review?.outcomeNote ?? "");
   const [saving, setSaving] = useState(false);
@@ -973,10 +1102,67 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
   // yine verilebilir; kilitli kalmaz. Bekleyen karar varsa bölüm açılmaz.
   const allDecided = counts.pending === 0;
 
-  function patchDecision(criterionId: string, patch: Partial<JudgeCriterionDecision>) {
-    setDecisions((current) => current.map((item) => item.criterionId === criterionId ? { ...item, ...patch } : item));
+  /**
+   * TASLAK KAYDI (madde 6).
+   *
+   * Kriter kararları eskiden yalnızca React durumunda duruyordu ve sunucuya
+   * ancak NİHAİ işlemde yazılıyordu: geri dönmek, başvuru değiştirmek veya
+   * sayfayı yenilemek çalışmayı sessizce siliyordu. Artık her karar sunucuya
+   * `in_progress` TASLAK olarak yazılır:
+   *   - nihai karar ÜRETMEZ (outcome "pending", katılımcıya bildirim gitmez),
+   *   - "Kaydedildi" yalnızca sunucu onayladıktan sonra yazılır,
+   *   - başarısızlıkta form kapanmaz ve hata görünür,
+   *   - başka sekmede yapılan düzenleme sunucudaki damgayla korunur.
+   */
+  async function persistDraft(next: JudgeCriterionDecision[]): Promise<boolean> {
+    if (!evaluation || completed) return true;
+    setDraftState({ state: "saving", message: "" });
+    const draft: JudgeReview = {
+      status: "in_progress",
+      outcome: "pending",
+      outcomeNote: "",
+      decisions: [],
+      criterionDecisions: next,
+      overallNote: "",
+      finalFeedback: buildJudgeFeedback(findings, next),
+      feedbackApproved: false,
+      completedAt: null,
+      draftScope: {
+        analyzedAt: evaluation.analyzedAt,
+        pdfHash: evaluation.report.pdfHash ?? null,
+        criteriaVersion: application.evaluationCriteriaVersion ?? null,
+      },
+      draftSavedAt: draftStamp.current,
+    };
+    try {
+      const saved = await workflowApi.updateApplication(application.id, "save_review", { review: draft });
+      draftStamp.current = saved.application.review?.draftSavedAt ?? null;
+      setDraftState({ state: "saved", message: "" });
+      onReviewSaved(saved.application);
+      return true;
+    } catch (caught) {
+      setDraftState({
+        state: "error",
+        message: caught instanceof Error ? caught.message : "Kriter kararı kaydedilemedi.",
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Kararı önce ekranda uygular, sonra sunucuya yazar. Yazma başarısızsa karar
+   * ekranda KALIR (hakemin yazdığı kaybolmaz) ama "kaydedilmedi" uyarısı görünür.
+   */
+  async function patchDecision(criterionId: string, patch: Partial<JudgeCriterionDecision>): Promise<boolean> {
+    const next = latestDecisions.current.map((item) => item.criterionId === criterionId ? { ...item, ...patch } : item);
+    latestDecisions.current = next;
+    setDecisions(next);
     setPendingOutcome(null);
     setSaveError("");
+    // Aynı ekrandaki hızlı tıklamalar tek sırada ve son sunucu damgasıyla yazılır.
+    const queued = draftQueue.current.then(() => persistDraft(next));
+    draftQueue.current = queued;
+    return queued;
   }
 
   function approve(criterionId: string) {
@@ -985,12 +1171,13 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
      * uygun, OLUMSUZ dediyse kesin sonuç olumsuz olur; AI'nin kaynağı ve
      * gerekçesi korunur, hakemin ek açıklama yazması zorunlu değildir.
      */
-    patchDecision(criterionId, {
+    void patchDecision(criterionId, {
       judgeVerdict: "approved", judgeResult: null, rejectionReason: "", evidenceMode: null,
       evidencePage: null, evidenceSection: "", evidenceQuote: "", missingContent: "",
     });
     setRejectDraft(null);
     setRejectError("");
+    setRejectFieldErrors({});
   }
 
   /**
@@ -1021,11 +1208,46 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
       missingContent: previous?.missingContent ?? "",
     });
     setRejectError("");
+    setRejectFieldErrors({});
+  }
+
+  /**
+   * ALAN BAZLI DENETİM (madde 5): hata ilgili alanın yanında gösterilir, ilk
+   * hatalı alana odaklanılır. Sayfa numarası TAM SAYI ve belge aralığında
+   * olmalıdır; ondalık sessizce yuvarlanmaz (eskiden Math.round ediliyordu).
+   */
+  function rejectFieldErrorsOf(draft: RejectDraft): Record<string, string> {
+    const errors: Record<string, string> = {};
+    if (draft.judgeResult !== "UYGUN" && draft.judgeResult !== "OLUMSUZ") {
+      errors.judgeResult = "Kriter sonucunu seçin.";
+    }
+    if (draft.evidenceMode === "PDF_KONUMU") {
+      const raw = draft.page.trim();
+      if (!raw) errors.page = "Sayfa numarası zorunludur.";
+      else if (!/^\d+$/.test(raw)) errors.page = "Sayfa numarası tam sayı olmalıdır (ör. 6).";
+      else if (Number(raw) < 1 || (reportPages > 0 && Number(raw) > reportPages)) {
+        errors.page = reportPages > 0
+          ? `Sayfa numarası 1 ile ${reportPages} arasında olmalıdır.`
+          : "Sayfa numarası 1 veya daha büyük olmalıdır.";
+      }
+      if (!draft.quote.trim()) errors.quote = "Doğrudan alıntı zorunludur.";
+    } else if (!draft.missingContent.trim()) {
+      errors.missingContent = "Raporda aranan bölüm/başlık adını yazın.";
+    }
+    if (!draft.reason.trim()) errors.reason = "Hakem gerekçesi zorunludur.";
+    return errors;
   }
 
   function confirmReject() {
     if (!rejectDraft) return;
-    const page = rejectDraft.page.trim() ? Math.round(Number(rejectDraft.page)) : null;
+    const fieldErrors = rejectFieldErrorsOf(rejectDraft);
+    if (Object.keys(fieldErrors).length) {
+      setRejectFieldErrors(fieldErrors);
+      setRejectError("");
+      return;
+    }
+    setRejectFieldErrors({});
+    const page = rejectDraft.page.trim() ? Number(rejectDraft.page.trim()) : null;
     const candidate: JudgeCriterionDecision = {
       ...(decisions.find((item) => item.criterionId === rejectDraft.criterionId)!),
       judgeVerdict: "rejected",
@@ -1039,13 +1261,20 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
     };
     const error = criterionDecisionError(candidate);
     if (error) { setRejectError(error); return; }
-    patchDecision(candidate.criterionId, candidate);
-    setRejectDraft(null);
-    setRejectError("");
+    // Form YALNIZCA kayıt gerçekten kalıcılaştıysa kapanır (madde 6).
+    void patchDecision(candidate.criterionId, candidate).then((persisted) => {
+      if (!persisted) {
+        setRejectError("Karar sunucuya kaydedilemedi; form açık bırakıldı. Yeniden deneyin.");
+        return;
+      }
+      setRejectDraft(null);
+      setRejectError("");
+      setRejectFieldErrors({});
+    });
   }
 
   function resetDecision(criterionId: string) {
-    patchDecision(criterionId, {
+    void patchDecision(criterionId, {
       judgeVerdict: "pending", judgeResult: null, rejectionReason: "", evidenceMode: null,
       evidencePage: null, evidenceSection: "", evidenceQuote: "", missingContent: "",
     });
@@ -1069,6 +1298,11 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
     if (!evaluation || !pendingOutcome) return;
     setSaving(true);
     setSaveError("");
+    if (!await draftQueue.current) {
+      setSaveError("Son kriter kararı kaydedilemedi. Taslağı kaydedip yeniden deneyin.");
+      setSaving(false);
+      return;
+    }
     const review: JudgeReview = {
       status: "completed",
       outcome: pendingOutcome,
@@ -1079,6 +1313,12 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
       finalFeedback: buildJudgeFeedback(findings, decisions),
       feedbackApproved: true,
       completedAt: new Date().toISOString(),
+      draftSavedAt: draftStamp.current,
+      draftScope: {
+        analyzedAt: evaluation.analyzedAt,
+        pdfHash: evaluation.report.pdfHash ?? null,
+        criteriaVersion: application.evaluationCriteriaVersion ?? null,
+      },
     };
     try {
       const ok = await onFinalize(application, review);
@@ -1175,7 +1415,12 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
             </div>
           ) : null}
 
-          <StageStrip stages={evaluation.stages} findings={evaluation.findings} />
+          <p className="eval-stage-kicker">AI ön değerlendirme özeti — kesinleşen kriter sonuçları aşağıdaki sayaçlardadır.</p>
+          <StageStrip
+            stages={evaluation.stages}
+            findings={evaluation.findings}
+            outsidePdfCount={evaluation.criteriaScope?.outsidePdf ?? 0}
+          />
           {/* AI sonucunun HEMEN ALTINDA; altbilgide kaybolmaz (madde 10). */}
           <AiDisclaimer />
 
@@ -1239,11 +1484,26 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
             AI bulguları (bilgi amaçlı): {ai.uygun} Uygun · {ai.olumsuz} Olumsuz
             {counts.findingsApproved || counts.findingsRejected
               ? ` — hakem ${counts.findingsApproved} bulguyu onayladı, ${counts.findingsRejected} bulguyu reddedip kendi değerlendirmesini yazdı.`
-              : ". Onayla/Ret düğmeleri AI bulgusunun kabulünü belirtir; kesin sonuç yukarıdaki sayaçlardadır."}
+              : ". “AI bulgusunu aynen kullan” ve “Hakem değerlendirmesi gir” düğmeleri yalnızca AI bulgusunun kabulünü belirler; kesin sonuç yukarıdaki sayaçlardadır."}
           </p>
 
           <div className="eval-result-group">
             <h3>Kriter kararları <span>{counts.total}</span></h3>
+            {/*
+              KAYIT DURUMU (madde 6): "Kaydedildi" YALNIZCA sunucu onayladıktan
+              sonra yazılır; kaydedilemeyen çalışma sessizce kaybolmuş gibi
+              görünmez. Taslak nihai karar DEĞİLDİR ve katılımcıya gitmez.
+            */}
+            {!locked ? (
+              <p className={`eval-draft-state ${draftState.state}`} role="status" aria-live="polite">
+                {draftState.state === "saving" ? "Kriter kararı kaydediliyor…"
+                  : draftState.state === "error"
+                    ? `Kaydedilemedi: ${draftState.message} Kararlarınız ekranda duruyor; yeniden deneyin.`
+                    : application.review?.draftSavedAt
+                      ? `Kriter kararlarınız taslak olarak kaydedildi (${formatDateTime(application.review.draftSavedAt)}). Taslak nihai karar değildir; yarışmacıya iletilmez.`
+                      : "Verdiğiniz her kriter kararı taslak olarak sunucuya kaydedilir."}
+              </p>
+            ) : null}
             {/*
               GERİYE UYUM: kriter bazlı karar akışından ÖNCE tamamlanmış
               kayıtlarda hakem kararı alanları boştur; nihai sonuç aşağıdaki
@@ -1267,10 +1527,12 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
                       finding={finding}
                       decision={decision}
                       specSourcePage={specPageOf.get(finding.criterionId) ?? null}
+                      reportPages={reportPages}
                       onShowEvidence={setEvidenceView}
                       locked={locked}
                       rejectDraft={rejectDraft?.criterionId === finding.criterionId ? rejectDraft : null}
                       rejectError={rejectDraft?.criterionId === finding.criterionId ? rejectError : ""}
+                      rejectFieldErrors={rejectDraft?.criterionId === finding.criterionId ? rejectFieldErrors : {}}
                       onApprove={() => approve(finding.criterionId)}
                       onOpenReject={() => openReject(finding)}
                       onRejectDraft={(patch) => setRejectDraft((current) => current ? { ...current, ...patch } : current)}
@@ -1284,8 +1546,30 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
             ) : <p className="eval-result-empty">Bu analizde PDF&apos;den değerlendirilebilen kriter yok.</p>}
           </div>
 
-          {/* Benzerlik kontrolü: bütün kriter analizlerinin EN ALTINDA (madde 9.9). */}
-          {similarityReport
+          {/* Benzerlik kontrolü: bütün kriter analizlerinin EN ALTINDA (madde 9.9).
+              Kriter analizinden BAĞIMSIZ ilerler (madde 4): süren, kısmi ve
+              başarısız durumlar birbirinden ayrı gösterilir, hiçbiri "Normal"
+              diye sunulmaz ve hakem kararlarını beklet(me)mez. */}
+          {similarityRun ? (
+            <section className="eval-similarity-note level-normal" aria-label="Raporlar arası benzerlik">
+              <h3 className="eval-similarity-title">
+                Raporlar arası benzerlik — {similarityRun.state === "running"
+                  ? "karşılaştırma sürüyor"
+                  : similarityRun.state === "partial" ? "kısmen tamamlandı" : "tamamlanamadı"}
+              </h3>
+              <p>
+                {similarityRun.state === "running"
+                  ? "Aynı yarışmadaki güncel başvurularla karşılaştırma sürüyor. Kriter kararlarınızı vermek için beklemeniz gerekmez."
+                  : similarityRun.message}
+              </p>
+              {similarityRun.state === "running" ? null : (
+                <button type="button" className="secondary-button" onClick={() => { void onRetrySimilarity(application); }}>
+                  Benzerliği yenile
+                </button>
+              )}
+              <p className="eval-similarity-disclaimer">Bu sonuç intihal veya otomatik ret kararı değildir.</p>
+            </section>
+          ) : similarityReport
             ? <SimilarityCard report={similarityReport} application={application} />
             : legacySimilarity ? <LegacySimilarityCard similarity={legacySimilarity} /> : null}
 
@@ -1463,6 +1747,11 @@ export default function EvaluationApp() {
   const [competitionKey, setCompetitionKey] = useState<string | null>(null);
   const [applicationId, setApplicationId] = useState<string | null>(null);
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
+  /**
+   * Benzerlik, kriter analizinden BAĞIMSIZ ilerler (madde 4); durumu başvuru
+   * kimliğine göre burada tutulur ve kendi kartında gösterilir.
+   */
+  const [similarityState, setSimilarityState] = useState<Record<string, SimilarityRunState>>({});
   const [progress, setProgress] = useState("");
 
   useEffect(() => {
@@ -1504,6 +1793,121 @@ export default function EvaluationApp() {
     setError("");
   }
 
+  /** Sahipsiz reddedilmiş söz bırakmadan koşuyu sonuçlanmış hâle getirir. */
+  function settledSimilarity(
+    run: Promise<SimilarityCheckResult>,
+  ): Promise<{ ok: true; value: SimilarityCheckResult } | { ok: false; error: unknown }> {
+    return run.then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
+  }
+
+  /**
+   * BENZERLİĞİN BAĞIMSIZ TAKİBİ (madde 4).
+   *
+   * Kriter analizi kaydedildikten SONRA çalışır: sonucu geldiğinde sunucudaki
+   * yetkili kaydı `attach_similarity` ile analize iliştirir, gelmezse durumu
+   * kendi kartında gösterir. Hakem kararlarına, başka bir başvuruya ve daha
+   * yeni bir analiz sürümüne DOKUNMAZ — sunucu bunları CAS ile korur.
+   */
+  async function trackSimilarity(
+    applicationId: string,
+    /*
+     * Koşu, kriter analizi beklenirken de sürdüğü için SONUÇLANMIŞ biçimde
+     * (hata dâhil) geçilir: hiçbir aşamada sahipsiz reddedilmiş söz kalmaz.
+     */
+    run: Promise<{ ok: true; value: SimilarityCheckResult } | { ok: false; error: unknown }>,
+    rerun: () => Promise<SimilarityCheckResult>,
+  ): Promise<void> {
+    setSimilarityState((current) => ({ ...current, [applicationId]: { state: "running", message: "" } }));
+    let result: SimilarityCheckResult | null = null;
+    let failure = "";
+    const settled = await run;
+    if (settled.ok) {
+      result = settled.value;
+    } else {
+      const caught = settled.error;
+      failure = caught instanceof Error ? caught.message : "bilinmeyen hata";
+      if (caught instanceof WorkflowApiError && caught.status === 429) failure = `429 · ${failure}`;
+    }
+    // 429 / embedding kotası: kısa gecikmeyle BİR KEZ daha denenir (kontrolsüz tekrar yok).
+    const rateLimited = failure ? failure.includes("429") : result?.embeddingRateLimited === true;
+    if (rateLimited && !result?.similarity) {
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      try {
+        result = await rerun();
+        failure = "";
+      } catch (retryCaught) {
+        failure = retryCaught instanceof Error ? retryCaught.message : "bilinmeyen hata";
+      }
+    }
+
+    if (result?.similarity) {
+      try {
+        const attached = await workflowApi.updateApplication(applicationId, "attach_similarity");
+        // Bu yanıt hazırlanırken yeni hakem taslağı kaydedilmiş olabilir.
+        // Bütün başvuruyu değiştirmek yerine yalnız aynı analizin benzerliğini al.
+        setApplications((current) => current.map((item) => {
+          const incoming = attached.application;
+          if (item.id !== applicationId || !item.evaluation || !incoming.evaluation
+            || item.evaluation.analyzedAt !== incoming.evaluation.analyzedAt
+            || item.evaluation.report.pdfHash !== incoming.evaluation.report.pdfHash) return item;
+          return {
+            ...item,
+            evaluation: { ...item.evaluation, similarityReport: incoming.evaluation.similarityReport },
+            similarityStale: incoming.similarityStale,
+            similarityStaleReason: incoming.similarityStaleReason,
+          };
+        }));
+        setSimilarityState((current) => {
+          const next = { ...current };
+          delete next[applicationId];
+          return next;
+        });
+        return;
+      } catch (attachError) {
+        failure = attachError instanceof Error ? attachError.message : "bilinmeyen hata";
+      }
+    }
+    setSimilarityState((current) => ({
+      ...current,
+      [applicationId]: result?.status === "partial" && !failure
+        ? { state: "partial", message: "Havuz taraması bu oturumda tamamlanamadı; benzerliği yenileyerek sürdürebilirsiniz." }
+        : { state: "failed", message: failure || "Benzerlik karşılaştırması tamamlanamadı." },
+    }));
+  }
+
+  /**
+   * "Benzerliği yenile" (madde 4): YALNIZCA benzerlik yeniden çalışır. Kriter
+   * analizi yeniden başlatılmaz, hakem kararları sıfırlanmaz; sonuç geldiğinde
+   * yalnızca `similarityReport` alanı güncellenir.
+   */
+  async function retrySimilarity(application: CompetitionApplication): Promise<void> {
+    if (similarityState[application.id]?.state === "running") return;
+    setSimilarityState((current) => ({ ...current, [application.id]: { state: "running", message: "" } }));
+    try {
+      const file = await workflowApi.applicationFile(application.id, application.fileName ?? "basvuru.pdf");
+      const pdfHash = await sha256HexOf(await file.arrayBuffer());
+      const extracted = await extractPdfText(file);
+      const runSimilarity = async () => {
+        let result = await workflowApi.similarityCheck(application.id, { pages: extracted.pages, pdfHash });
+        for (let attempt = 0; attempt < 12 && result.status === "partial" && result.resumeRunId; attempt += 1) {
+          result = await workflowApi.similarityCheck(application.id, {
+            pages: extracted.pages, pdfHash, resumeRunId: result.resumeRunId,
+          });
+        }
+        return result;
+      };
+      await trackSimilarity(application.id, settledSimilarity(runSimilarity()), runSimilarity);
+    } catch (caught) {
+      setSimilarityState((current) => ({
+        ...current,
+        [application.id]: {
+          state: "failed",
+          message: caught instanceof Error ? caught.message : "Benzerlik karşılaştırması tamamlanamadı.",
+        },
+      }));
+    }
+  }
+
   /**
    * Yapay Zekâ Analizi (madde 9.1).
    *
@@ -1511,11 +1915,12 @@ export default function EvaluationApp() {
    * yalnızca başvuru kimliği gider; kriter seti (son yayımlanan sürüm) ve
    * rapor PDF'i (R2'deki geçerli sürüm) sunucuda çözülür.
    *
-   * PDF metni BİR KEZ çıkarılır ve iki işlem paylaşır: kriter analizi ile
-   * benzerlik karşılaştırması `Promise.allSettled` ile PARALEL yürütülür.
-   * Benzerlik başarısız olsa bile kriter analizi kaybolmaz; embedding 429
-   * aldıysa benzerlik, kriter analizinin hemen arkasından kısa gecikmeyle
-   * BİR KEZ daha denenir (kontrolsüz tekrar yok).
+   * PDF metni BİR KEZ çıkarılır ve iki işlem paylaşır. İkisi PARALEL başlar
+   * ama BİRLİKTE BEKLENMEZ (madde 4): kriter analizi biter bitmez kendi
+   * bütünlük kapılarından geçip kaydedilir ve hakem çalışmaya başlayabilir.
+   * Benzerlik kendi hızında sürer; bittiğinde sonucunu `attach_similarity`
+   * ile kayda iliştirir. Böylece uzun süren ya da başarısız olan bir
+   * benzerlik taraması hakem analizini BEKLETMEZ.
    *
    * @param force "Analizi yenile": sunucudaki kayıtlı sonuç atlanır.
    */
@@ -1553,47 +1958,21 @@ export default function EvaluationApp() {
         }
         return result;
       };
-      const [evaluationResult, similarityResult] = await Promise.allSettled([
-        evaluateReport({ applicationId: current.id, pages: extracted.pages, pageCount: extracted.pageCount, force }),
-        runSimilarity(),
-      ]);
-      // Kriter analizi başarısızsa akış durur; benzerlik tek başına sonuç değildir.
-      if (evaluationResult.status === "rejected") throw evaluationResult.reason;
-      let evaluation = evaluationResult.value;
+      // Benzerlik BAŞLATILIR ama beklenmez; hatası burada yutulmaz, aşağıdaki
+      // bağımsız takip zincirinde ele alınır.
+      const similarityPromise = settledSimilarity(runSimilarity());
+      const evaluation = await evaluateReport({
+        applicationId: current.id, pages: extracted.pages, pageCount: extracted.pageCount, force,
+      });
 
-      let similarity = similarityResult.status === "fulfilled" ? similarityResult.value : null;
-      const rateLimited = (similarityResult.status === "rejected"
-        && similarityResult.reason instanceof WorkflowApiError && similarityResult.reason.status === 429)
-        || (similarity?.embeddingRateLimited === true);
-      if (rateLimited) {
-        // 429: kriter analizi bitti; benzerlik kısa gecikmeyle BİR KEZ daha denenir.
-        setProgress("Benzerlik karşılaştırması kısa gecikmeyle yeniden deneniyor…");
-        await new Promise((resolve) => setTimeout(resolve, 2_500));
-        try { similarity = await runSimilarity(); } catch { /* MinHash/ilk sonuç neyse o kalır. */ }
-      }
-      /*
-       * Benzerlik ARTIK 3. aşama şeridine yazılmaz (madde 7): sonuç yalnızca
-       * bağımsız `similarityReport` alanında taşınır; sayaçlara ve karara
-       * katılmaz. Sunucu kayıtta zaten kendi yetkili kopyasını kullanır.
-       */
-      if (similarity?.similarity) {
-        evaluation = { ...evaluation, similarityReport: similarity.similarity };
-      } else {
-        const reason = similarityResult.status === "rejected" && similarityResult.reason instanceof Error
-          ? similarityResult.reason.message
-          : similarity?.status === "partial"
-            ? "büyük havuz taraması bu oturumda tamamlanamadı; analizi yenileyerek sürdürebilirsiniz"
-            : "bilinmeyen hata";
-        evaluation = { ...evaluation, similarityReport: null };
-        evaluation.analysisWarnings.push(`Benzerlik kontrolü tamamlanamadı: ${reason}. Kriter analizi bundan etkilenmedi.`);
-      }
-
-      setProgress("AI analizi ve benzerlik sonucu kaydediliyor…");
+      setProgress("AI analizi kaydediliyor…");
       const saved = await workflowApi.updateApplication(current.id, "save_evaluation", { evaluation });
       replaceApplication(saved.application);
       // Hakem analiz sürerken BAŞKA bir başvuruya geçmiş olabilir; oradaki
       // kaydedilmemiş kriter kararlarını silecek zorla gezinme yapılmaz.
       setApplicationId((currentId) => currentId === null || currentId === current.id ? saved.application.id : currentId);
+      // Kriter analizi elde: hakem benzerliği beklemeden çalışabilir.
+      trackSimilarity(current.id, similarityPromise, runSimilarity);
     } catch (caught) {
       /*
        * ANLAMLI HATA (madde 11): "API'yi kontrol edin" gibi genel bir metin
@@ -1725,13 +2104,16 @@ export default function EvaluationApp() {
                   <p className="library-empty">Soldan bir yarışma seçin.</p>
                 ) : selected ? (
                   <ApplicationDetail
-                    key={`${selected.id}-${selected.evaluation?.analyzedAt ?? ""}-${selected.status}`}
+                    key={`${selected.id}-${selected.evaluation?.analyzedAt ?? ""}-${selected.status === "completed"}`}
                     application={selected}
                     profile={selectedProfile}
                     analyzing={analyzingId === selected.id}
                     otherAnalysisRunning={analyzingId !== null && analyzingId !== selected.id}
                     progress={progress}
+                    similarityRun={similarityState[selected.id] ?? null}
                     onAnalyze={analyze}
+                    onRetrySimilarity={retrySimilarity}
+                    onReviewSaved={replaceApplication}
                     onFinalize={finalize}
                     onReopen={reopen}
                     onDeleteAnalysis={deleteAnalysis}

@@ -89,7 +89,8 @@ test("çok kısa veya yalnızca başlıktan oluşan parçalar atlanır", () => {
 });
 
 test("işlem sürümü yapısal sürüme bileşiktir: pdf-structure değişince benzerlik önbelleği de eskir", () => {
-  assert.ok(SIMILARITY_PIPELINE_VERSION.startsWith("sim-v2:"), "Yapısal parçalama sim-v2 damgası taşımalıdır.");
+  assert.ok(SIMILARITY_PIPELINE_VERSION.startsWith("sim-v3-frontmatter-furniture:"),
+    "Ayıklama kuralı değiştiğinde damga artmalıdır: eski parça önbelleği yeni kurallarla karışamaz.");
   assert.ok(SIMILARITY_PIPELINE_VERSION.includes(PDF_STRUCTURE_VERSION),
     "Boru hattı sürümü PDF yapı sürümünü içermelidir (bileşik sürüm).");
 });
@@ -147,6 +148,87 @@ test("içindekiler bölümü ve çok kısa artıklar ayıklanır", () => {
   assert.ok(excluded.some((block) => block.reason === "kapak-icindekiler" && block.text === "Giriş 3"));
   assert.ok(excluded.some((block) => block.reason === "cok-kisa" && block.text === "Üç kelimelik metin"));
   assert.equal(included.length, 1, "Yalnızca gerçek içerik paragraf olarak kalır.");
+});
+
+/* --- Gerçek belge doğrulaması (madde 2): numaralı başlık, kapak, altbilgi --- */
+
+test("numaralı kaynakça başlığı ('8.3 Kaynakça') tanınır; karma üst başlık bölümün TAMAMINI kaynakça yapmaz", () => {
+  const risk = paragraph("risk", 40);
+  const takvim = paragraph("takvim", 40);
+  const { included, excluded } = classifyBlocks([
+    structBlock({ blockType: "HEADING", text: "8. Risk, Takvim ve Kaynakça", page: 10, ordinal: 0 }),
+    structBlock({ blockType: "HEADING", text: "8.1 Başlıca riskler", page: 10, ordinal: 1 }),
+    structBlock({ text: risk, page: 10, ordinal: 2 }),
+    structBlock({ blockType: "HEADING", text: "8.2 Kalan takvim", page: 10, ordinal: 3 }),
+    structBlock({ text: takvim, page: 10, ordinal: 4 }),
+    structBlock({ blockType: "HEADING", text: "8.3 Kaynakça", page: 10, ordinal: 5 }),
+    structBlock({ blockType: "LIST_ITEM", text: "• IEC 60204-1, Safety of machinery - Electrical equipment of machines.", page: 10, ordinal: 6 }),
+  ]);
+  assert.deepEqual(included.map((block) => block.text), [risk, takvim],
+    "Risk ve takvim alt bölümleri karşılaştırmada KALMALIDIR; yalnızca kaynakça alt bölümü ayıklanır.");
+  assert.ok(excluded.some((block) => block.reason === "kaynakca" && block.text.includes("IEC 60204-1")),
+    "Numaralı kaynakça başlığı altındaki kaynak satırı 'kaynakca' gerekçesiyle ayıklanmalıdır.");
+});
+
+test("numaralı içindekiler başlığı altındaki tablo ayıklanır; aynı bölümün gerçek beyanı KORUNUR", () => {
+  const beyan = paragraph("beyan", 40);
+  const kapsam = paragraph("kapsam", 40);
+  const { included, excluded } = classifyBlocks([
+    structBlock({ blockType: "HEADING", text: "0. İçindekiler ve Beyan", page: 2, ordinal: 0 }),
+    structBlock({ blockType: "TABLE_ROW", text: "3 Sistem Mimarisi 5", page: 2, ordinal: 1 }),
+    structBlock({ blockType: "HEADING", text: "0.1 Özgünlük ve kaynak beyanı", page: 2, ordinal: 2 }),
+    structBlock({ text: beyan, page: 2, ordinal: 3 }),
+    structBlock({ blockType: "HEADING", text: "0.3 Rapor kapsamı", page: 2, ordinal: 4 }),
+    structBlock({ text: kapsam, page: 2, ordinal: 5 }),
+  ]);
+  assert.ok(excluded.some((block) => block.reason === "kapak-icindekiler" && block.text === "3 Sistem Mimarisi 5"),
+    "İçindekiler tablosu satırı karşılaştırmaya girmemelidir.");
+  assert.deepEqual(included.map((block) => block.text), [beyan, kapsam],
+    "Komşu olduğu için gerçek beyan ve rapor kapsamı SİLİNMEZ.");
+});
+
+test("sayfaların çoğunda tekrarlanan altbilgi, sayfa numarası değişse bile ayıklanır", () => {
+  const blocks: SimilarityBlockInput[] = [];
+  for (let page = 1; page <= 6; page += 1) {
+    blocks.push(structBlock({ blockType: "HEADING", text: `${page}. Bölüm`, page, ordinal: blocks.length }));
+    blocks.push(structBlock({ text: paragraph(`icerik${page}`, 40), page, ordinal: blocks.length }));
+    blocks.push(structBlock({ text: `Sentetik test raporu · Benzerlik modülü doğrulaması Sayfa ${page}`, page, ordinal: blocks.length }));
+  }
+  const { included, excluded } = classifyBlocks(blocks);
+  assert.equal(excluded.filter((block) => block.reason === "tekrarlanan-altbilgi").length, 6,
+    "Her sayfadaki altbilgi ayıklanmalıdır (sayfa numarası anahtarın parçası olmamalı).");
+  assert.ok(included.every((block) => !block.text.includes("Sentetik test raporu")),
+    "Altbilgi hiçbir karşılaştırma bloğunda kalmamalıdır.");
+});
+
+test("kapak: numaralı ilk bölüme kadar olan 1. sayfa üst verisi uzun olsa da karşılaştırmaya girmez", () => {
+  const govde = paragraph("govde", 40);
+  const { included, excluded } = classifyBlocks([
+    structBlock({ blockType: "HEADING", text: "KRİTİK TASARIM RAPORU", page: 1, ordinal: 0 }),
+    structBlock({ text: "Rapor kodu HN26-KTR-v1.0 Takım kaptanı Elif Su Demir Danışman Dr. Kerem Aydın Rapor türü Kritik Tasarım Raporu Sürüm 1.0", page: 1, ordinal: 1 }),
+    structBlock({ blockType: "HEADING", text: "1. Yönetici Özeti", page: 3, ordinal: 2 }),
+    structBlock({ text: govde, page: 3, ordinal: 3 }),
+  ]);
+  assert.ok(excluded.some((block) => block.reason === "kapak-icindekiler" && block.text.startsWith("Rapor kodu")),
+    "Kapak künyesi kelime sayısına bakılmaksızın ayıklanmalıdır.");
+  assert.deepEqual(included.map((block) => block.text), [govde]);
+});
+
+test("başlık sanılan kaydırılmış gövde cümlesi başlık SAYILMAZ ve kaynakça durumunu bozmaz", () => {
+  const kaynak = "• ISO 13850, Safety of machinery - Emergency stop function.";
+  const govdeParcasi = "Doğrulama planı, her şartname maddesini ölçülebilir bir kabul koşuluna bağlar. Testler kapalı";
+  const { included, excluded } = classifyBlocks([
+    structBlock({ blockType: "HEADING", text: "7. Doğrulama ve Testler", page: 9, ordinal: 0 }),
+    structBlock({ blockType: "HEADING", text: govdeParcasi, page: 9, ordinal: 1 }),
+    structBlock({ text: paragraph("devam", 40), page: 9, ordinal: 2 }),
+    structBlock({ blockType: "HEADING", text: "8.3 Kaynakça", page: 10, ordinal: 3 }),
+    structBlock({ blockType: "LIST_ITEM", text: kaynak, page: 10, ordinal: 4 }),
+  ]);
+  assert.ok(included.some((block) => block.text === govdeParcasi),
+    "Gövde cümlesi 'baslik' gerekçesiyle karşılaştırma dışı bırakılamaz.");
+  assert.ok(!excluded.some((block) => block.reason === "baslik" && block.text === govdeParcasi));
+  assert.ok(excluded.some((block) => block.reason === "kaynakca" && block.text === kaynak),
+    "Sahte başlık, sonraki gerçek kaynakça başlığının çalışmasını engellememelidir.");
 });
 
 test("takım/yarışma adları sökülür; '%98' içeren takım adı hiçbir orana sızamaz", () => {
@@ -294,7 +376,7 @@ test("parça tavanı ortam değişkeniyle ayarlanabilir; geçersiz değer varsay
 });
 
 test("ayıklama gerekçe listesi types.ts kopyasıyla birebir aynıdır", () => {
-  const reasons = ["sablon", "baslik", "kimlik", "kapak-icindekiler", "sartname-alintisi", "kaynakca", "acik-alinti", "cok-kisa", "tavan"];
+  const reasons = ["sablon", "baslik", "kimlik", "kapak-icindekiler", "sartname-alintisi", "kaynakca", "acik-alinti", "cok-kisa", "tekrarlanan-altbilgi", "tavan"];
   const extract = (source: string, marker: string) => {
     const start = source.indexOf(marker);
     assert.ok(start >= 0, `${marker} bulunmalıdır.`);
@@ -510,16 +592,45 @@ test("aynı PDF sürümü için embedding ikinci kez üretilmez; yeni sürüm es
     "Önbellek anahtarı PDF sürümü ve özetiyle nitelenmelidir.");
 });
 
-test("kriter analizi ile benzerlik aynı akışta paralel başlar; benzerlik hatası analizi düşürmez", () => {
+test("kriter analizi benzerliği BEKLEMEZ: sonuç hemen kaydedilir, benzerlik kendi kartında ilerler", () => {
   const app = readFileSync("app/components/evaluation-app.tsx", "utf8");
-  assert.match(app, /Promise\.allSettled\(\[\s*evaluateReport\(/, "İki işlem allSettled ile paralel yürümelidir.");
+  const analyzeBody = app.slice(app.indexOf("async function analyze("));
+  // Kriter analizi ile benzerlik BİRLİKTE beklenemez: eskiden Promise.allSettled
+  // ikisini de bekliyordu ve uzun süren benzerlik hakem analizini bekletiyordu.
+  assert.ok(!/Promise\.allSettled\(\[\s*evaluateReport\(/.test(app),
+    "Kriter analizi benzerlikle birlikte beklenmemelidir (madde 4).");
+  const startIndex = analyzeBody.indexOf("runSimilarity()");
+  const evaluateIndex = analyzeBody.indexOf("await evaluateReport(");
+  const saveIndex = analyzeBody.indexOf('"save_evaluation"');
+  const trackIndex = analyzeBody.indexOf("trackSimilarity(");
+  assert.ok(startIndex >= 0 && startIndex < evaluateIndex, "Benzerlik kriter analiziyle PARALEL başlamalıdır.");
+  assert.ok(evaluateIndex < saveIndex && saveIndex < trackIndex,
+    "Kriter sonucu, benzerlik takibinden ÖNCE kaydedilmelidir.");
   assert.match(app, /extractPdfText\(file\)/, "PDF metni BİR KEZ çıkarılmalıdır.");
-  assert.ok(!/extractPdfText\([^)]*\)[\s\S]*extractPdfText\(/.test(app.slice(app.indexOf("async function analyze"))),
+  assert.ok(!/extractPdfText\([^)]*\)[\s\S]*extractPdfText\(/.test(analyzeBody.slice(0, analyzeBody.indexOf("async function"))),
     "Aynı PDF iki işlem için tekrar okunmamalıdır.");
   assert.match(app, /status === 429/, "429'da kontrollü yeniden deneme bulunmalıdır.");
-  assert.match(app, /Benzerlik kontrolü tamamlanamadı/, "Benzerlik hatası yalnızca uyarı üretmelidir.");
+  assert.match(app, /"attach_similarity"/, "Geç gelen benzerlik sonucu ayrı bir uçla kayda iliştirilmelidir.");
+  assert.match(app, /Benzerliği yenile/, "Benzerlik için BAĞIMSIZ yenileme eylemi bulunmalıdır.");
+  const retryBody = app.slice(app.indexOf("async function retrySimilarity("), app.indexOf("async function analyze("));
+  assert.ok(!/evaluateReport\(|start_analysis/.test(retryBody),
+    "Benzerliği yenilemek kriter analizini yeniden başlatmamalıdır.");
   // Benzerlik sonucu hakem sayaçlarına girmez ve otomatik karar üretmez.
   assert.ok(!/similarityReport[\s\S]{0,120}judgeDecisionCounts/.test(app), "Benzerlik, hakem sayaçlarına karışmamalıdır.");
+});
+
+test("geç gelen benzerlik sonucu hakem kararlarını, başka başvuruyu ve yeni analizi EZEMEZ", () => {
+  const db = readFileSync("app/lib/workflow-db.ts", "utf8");
+  const attach = db.slice(db.indexOf("export async function attachSimilarityToEvaluation"));
+  const body = attach.slice(0, attach.indexOf("\nexport "));
+  assert.match(body, /findSimilarityResult\(id, current\.evaluation_pdf_hash\)/,
+    "Sonuç yalnızca kaydın bağlı olduğu PDF sürümü için aranmalıdır.");
+  assert.match(body, /evaluation_json = \?[\s\S]{0,200}status <> 'completed' AND evaluation_json = \?/,
+    "Yazma, okunan sürümle karşılaştırmalı (CAS) olmalıdır: arada yeni analiz kaydedildiyse düşer.");
+  assert.ok(!/review_json/.test(body), "Hakem kararları (review_json) bu yazmadan ETKİLENMEMELİDİR.");
+  assert.match(body, /decisions_locked === 1/, "Dondurulmuş yarışmada kayıt değişmemelidir.");
+  const route = readFileSync("app/api/applications/[id]/route.ts", "utf8");
+  assert.match(route, /body\.action === "attach_similarity"/, "Uç, ayrı eylemi tanımalıdır.");
 });
 
 test("AI analizi silindiğinde benzerlik sonucu da kaldırılır; embedding önbelleği kalır", () => {
@@ -921,7 +1032,8 @@ test("benzerlik 3. aşama şeridinden çıkarıldı; bağımsız kart bütün ma
   assert.ok(!/label: "Benzerlik taraması"/.test(app),
     "Benzerlik satırı aşama şeridinde OLMAMALIDIR (madde 7: dört aşamanın parçası değildir).");
   assert.match(app, /Raporlar arası benzerlik/, "Kart başlığı 'Raporlar arası benzerlik' olmalıdır.");
-  assert.match(app, /Bu sonuç intihal kararı değildir\./, "Uyarı her durumda ayrı öğe olarak gösterilmelidir.");
+  assert.match(app, /Bu sonuç intihal veya otomatik ret kararı değildir\./,
+    "Uyarı her durumda ayrı öğe olarak gösterilmeli ve otomatik ret kararı olmadığını da söylemelidir.");
   assert.match(app, /Karşılaştırılabilir özgün içerik/, "Karşılaştırılabilir içerik miktarı gösterilmelidir.");
   assert.match(app, /doğrudan \(MinHash\)/, "MinHash/anlamsal eşleşme ayrımı gösterilmelidir.");
   assert.match(app, /Açıklama kontrolü tamamlanamadı; MinHash ve anlamsal sonuç geçerlidir\./,
@@ -1033,4 +1145,30 @@ test("koşu tablosu ve işaret izi sütunu hem migration'da hem çalışma anı 
   assert.match(db, /CREATE TABLE IF NOT EXISTS similarity_runs/, "Koşu tablosu çalışma anı şemasında olmalıdır.");
   assert.match(db, /\{ name: "embedding_sketch", definition: "TEXT" \}/,
     "İşaret izi sütunu SIMILARITY_CHUNK_COLUMNS listesinde olmalıdır.");
+});
+
+test("durum adlandırması: başarısız/eksik/yapılmamış karşılaştırma 'Normal' DENMEZ", () => {
+  const app = readFileSync("app/components/evaluation-app.tsx", "utf8");
+  const label = app.slice(app.indexOf("function similarityStatusLabel"));
+  const body = label.slice(0, label.indexOf("\nfunction SimilarityCard"));
+  assert.match(body, /karşılaştırılabilecek başka rapor yok/, "Havuz boşsa bu açıkça söylenmelidir.");
+  assert.match(body, /karşılaştırılabilir özgün içerik bulunamadı/, "Boş içerik ayrı durumdur.");
+  assert.match(body, /kısmen tamamlandı/, "Kısmi tarama tamamlanmış gibi gösterilemez.");
+  assert.match(body, /yalnız doğrudan metin karşılaştırması/, "Anlamsal katman düşünce bu söylenmelidir.");
+  assert.match(body, /inceleme önerilir/, "Suçlayıcı 'ŞÜPHELİ' yerine inceleme önerisi kullanılır.");
+  assert.ok(!/"Normal"/.test(body), "Hiçbir durum ham 'Normal' etiketiyle geçiştirilemez.");
+  // Tarama, kanıt seçimi ve AI açıklaması tek sayıda birleştirilmez (madde 3).
+  assert.match(app, /Matematiksel olarak karşılaştırılan rapor/, "Tarama sayısı ayrı gösterilmelidir.");
+  assert.match(app, /AI açıklaması için seçilen kanıt/, "AI açıklamasına giden kanıt ayrı gösterilmelidir.");
+});
+
+test("LLM maliyet kapısı: havuz büyüse de açıklama TEK rapor ve en fazla 3 kanıt üzerinden istenir", () => {
+  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
+  assert.match(route, /best\.matches\.slice\(0, 3\)/, "En fazla üç eşleşme kanıtı seçilmelidir.");
+  assert.match(route, /llmInputs\.slice\(0, thresholds\.llmTopK\)/, "Kanıt sayısı yapılandırılabilir tavanla sınırlıdır.");
+  assert.match(route, /level !== "normal" && matches\.length > 0 && llmInputs\.length > 0/,
+    "Güçlü eşleşme yoksa LLM çağrısı YAPILMAZ (0 çağrı).");
+  // Havuzdaki her rapor için ayrı çağrı döngüsü kurulamaz.
+  assert.ok(!/for\s*\([^)]*peers[^)]*\)\s*\{[\s\S]{0,400}annotateSimilarityMatches/.test(route),
+    "Havuza yayılmış LLM çağrı döngüsü kurulmamalıdır.");
 });

@@ -4,6 +4,7 @@ import { configuredByteLimit } from "../../../lib/request-guard";
 import {
   archiveApplication,
   coordinateApplication,
+  attachSimilarityToEvaluation,
   deleteApplicationEvaluation,
   findApplication,
   findSimilarityResult,
@@ -165,7 +166,8 @@ export async function GET(request: Request, context: RouteContext): Promise<Resp
 
 /**
  * Başvuru üzerindeki işlemler ayrı yetkilere bölünür (bkz. authorization.ts):
- *   AI ön değerlendirmesi  (start_analysis / save_evaluation / analysis_failed / delete_analysis) → run_ai_prescreen (02)
+ *   AI ön değerlendirmesi  (start_analysis / save_evaluation / attach_similarity /
+ *                           analysis_failed / delete_analysis)                    → run_ai_prescreen (02)
  *   Nihai uzman kararı     (save_review / reopen_review)                          → final_judgement (02)
  *   Koordinasyon           (remind / requeue / request_document)                  → coordinate_evaluation (04)
  *
@@ -267,6 +269,19 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
         pdfHash: expectedHash,
         submissionVersionId: context.submissionVersionId,
       });
+    } else if (body.action === "attach_similarity") {
+      /*
+       * BENZERLİK SONUCUNU KAYITLI ANALİZE İLİŞTİR (madde 4).
+       *
+       * Kriter analizi benzerliği beklemeden kaydedilir; benzerlik bitince
+       * istemci bu eylemi çağırır. Yetkili sonuç yine SUNUCUDAN okunur
+       * (istemci rapor gönderemez) ve yalnızca `similarityReport` alanı
+       * yazılır: hakem kararları, kriter kararları ve daha yeni bir analiz
+       * bu yazmayla EZİLMEZ.
+       */
+      const attached = await attachSimilarityToEvaluation(id, auth.account);
+      if (attached === "not_found") return jsonError(404, "Başvuru bulunamadı.");
+      if (attached === "forbidden") return jsonError(403, "Bu başvuru size atanmadı.");
     } else if (body.action === "delete_analysis") {
       /*
        * AI ANALİZİNİ SİL (madde 5): yalnızca AI analizi, tamamlanmamış kriter

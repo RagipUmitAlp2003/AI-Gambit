@@ -821,6 +821,23 @@ export type JudgeReview = {
   finalFeedback: ParticipantFeedback;
   feedbackApproved: boolean;
   completedAt: string | null;
+  /**
+   * TASLAK KAPSAMI (hakem çalışması korunurken yanlış analize uygulanmasın):
+   * taslak kararlar, üretildikleri analizin künyesine bağlıdır. Yeni analiz
+   * (yeni PDF sürümü, yeni kriter sürümü ya da yeniden analiz) sonrasında
+   * eski taslak OTOMATİK uygulanmaz; kayıt silinmez, yalnızca geri yüklenmez.
+   * Eski kayıtlarda bulunmaz.
+   */
+  draftScope?: {
+    analyzedAt: string;
+    pdfHash: string | null;
+    criteriaVersion: number | null;
+  } | null;
+  /**
+   * Taslağın SUNUCUDA damgalanmış son kayıt anı. İki sekmede açık form,
+   * birbirinin çalışmasını sessizce ezmesin diye bu damga karşılaştırılır.
+   */
+  draftSavedAt?: string | null;
 };
 
 /* ------------------------------------------------------------------------- *
@@ -930,4 +947,5 @@ export type SimilarityExclusionReason =
   | "kaynakca"
   | "acik-alinti"
   | "cok-kisa"
+  | "tekrarlanan-altbilgi"
   | "tavan";

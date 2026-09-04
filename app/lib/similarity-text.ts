@@ -29,8 +29,12 @@ import {
  * v2: yapısal (başlık/paragraf/liste/tablo satırı/şekil açıklaması temelli)
  * parçalama; PDF yapı sürümü bileşiktir, pdf-structure değişince benzerlik
  * önbelleği de kendiliğinden eskir.
+ * v3: numaralı kaynakça/içindekiler başlığı, konuma dayalı kapak filtresi,
+ * tekrarlanan üstbilgi/altbilgi ayıklaması ve başlık şekli denetimi. Ayıklama
+ * kuralı değiştiği için ESKİ parça/metin önbelleği bu etiketle düşer: eski
+ * temizlenmiş metin yeni kurallarla üretilmiş parçalarla KARŞILAŞTIRILMAZ.
  */
-export const SIMILARITY_PIPELINE_VERSION = `sim-v2:${PDF_STRUCTURE_VERSION}`;
+export const SIMILARITY_PIPELINE_VERSION = `sim-v3-frontmatter-furniture:${PDF_STRUCTURE_VERSION}`;
 
 /** Anlamsal karşılaştırma modeli ve boyutu; farklı modellerin vektörleri karşılaştırılmaz. */
 export const SIMILARITY_EMBEDDING_MODEL = "gemini-embedding-001";
@@ -227,6 +231,7 @@ export type ExclusionReason =
   | "kaynakca"
   | "acik-alinti"
   | "cok-kisa"
+  | "tekrarlanan-altbilgi"
   | "tavan";
 
 /** Ayıklanan içeriğin denetim etiketi (madde 3). */
@@ -269,6 +274,95 @@ const FRONT_MATTER_HEADINGS = new Set([
   "tablolar listesi", "sekiller listesi", "resimler listesi",
   "kisaltmalar", "kisaltmalar listesi", "semboller listesi",
 ]);
+
+/**
+ * Başlık filtreleri madde/bölüm numarasını YOK SAYAR: "8.3 Kaynakça" kaynakça,
+ * "0. İçindekiler ve Beyan" içindekiler bölümüdür. Numara sökülmezse tam metin
+ * eşleşmesi bu başlıkları kaçırır ve kaynakça satırları ile içindekiler tablosu
+ * karşılaştırmaya sızar (gerçek belge doğrulaması, madde 2).
+ */
+function stripLeadingSectionNumber(text: string): string {
+  return text.replace(/^\s*\d+(?:\.\d+){0,5}[.)]?\s+/, "");
+}
+
+/**
+ * Karma başlıkta ("Risk, Takvim ve Kaynakça") terim bağımsız bir kelime olarak
+ * geçiyorsa eşleşir; bu durum bölümün TAMAMINI kaynakça yapmaz, çünkü her
+ * başlık bu durumu yeniden hesaplar: bir SONRAKİ alt başlık ("8.1 Başlıca
+ * riskler") işareti anında geri alır, alt bölüm sınırları korunur.
+ */
+function headingMatchesKnownSection(headingFold: string, terms: Set<string>): boolean {
+  if (!headingFold) return false;
+  if (terms.has(headingFold)) return true;
+  const words = headingFold.split(" ").filter(Boolean);
+  for (const term of terms) {
+    if (term.includes(" ")) {
+      if (headingFold.includes(term)) return true;
+    } else if (words.includes(term)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Gerçek başlık üst kelime sınırı; üstü kaydırılmış gövde cümlesi sayılır. */
+const HEADING_MAX_WORDS = 14;
+/** Metnin ortasında cümle sonu + devam: gövde metninin kaydırılmış parçasıdır. */
+const MID_SENTENCE_BREAK = /[.!?]\s+\S/;
+
+/**
+ * Satır bazlı yazı tipi sezgisi, uzun bir paragrafın kaydırılmış satırlarını
+ * bazen başlık sanabilir (gerçek belge doğrulamasında görüldü: "…yalnızca son
+ * geçerli kayıt rapora alınmıştır." bölüm adı hâline gelmişti). Böyle bir blok
+ * başlık gibi işlenirse hem kendi metni karşılaştırma dışı kalır hem de
+ * kaynakça/içindekiler durumunu yanlış yönlendirir.
+ *
+ * Bu şekil denetimi YALNIZCA benzerlik katmanındadır; pdf-structure.ts ve
+ * kriter çıkarımı DEĞİŞMEZ. Şekli başlığa benzemeyen HEADING bloğu normal
+ * içerik gibi işlenir ve bölüm durumunu değiştirmez.
+ */
+function isPlausibleHeadingText(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (/[.!?;]$/.test(trimmed)) return false;
+  if (MID_SENTENCE_BREAK.test(trimmed)) return false;
+  return wordCountOf(trimmed) <= HEADING_MAX_WORDS;
+}
+
+/**
+ * Tekrarlanan üstbilgi/altbilgi eşiği: sayfaların çoğunda AYNEN görülen kısa
+ * satır ("… · Sürüm 1.0", "Sentetik test raporu … Sayfa 9") sayfa süslemesidir.
+ * normalizePages ile aynı ölçüt; yapısal yol da artık aynı korumayı alır.
+ */
+const REPEATED_LINE_MAX_WORDS = 15;
+
+/**
+ * Tekrar anahtarı: sayfa numarası satırdan sökülür, yoksa "… Sayfa 2" ile
+ * "… Sayfa 3" farklı satır sayılır ve altbilgi hiçbir sayfada yakalanmaz.
+ */
+function furnitureKey(text: string): string {
+  return foldLine(text)
+    .replace(/\s*(sayfa|page)?\s*\d{1,4}(\s*[/-]\s*\d{1,4})?$/i, "")
+    .trim();
+}
+
+function repeatedPageFurniture(blocks: SimilarityBlockInput[]): Set<string> {
+  const totalPages = new Set(blocks.map((block) => block.page)).size;
+  const threshold = Math.max(3, Math.ceil(totalPages * 0.6));
+  const pagesByLine = new Map<string, Set<number>>();
+  for (const block of blocks) {
+    if (block.blockType === "HEADING") continue;
+    if (wordCountOf(block.text) > REPEATED_LINE_MAX_WORDS) continue;
+    const key = furnitureKey(block.text);
+    if (!key) continue;
+    const pages = pagesByLine.get(key) ?? new Set<number>();
+    pages.add(block.page);
+    pagesByLine.set(key, pages);
+  }
+  return new Set(
+    [...pagesByLine.entries()].filter(([, pages]) => pages.size >= threshold).map(([key]) => key),
+  );
+}
 
 /** Şartname alıntısı sayılmak için asgari kelime sayısı. */
 const SPEC_QUOTE_MIN_WORDS = 8;
@@ -390,8 +484,16 @@ export function classifyBlocks(
     .filter((tokens) => tokens.length >= SPEC_QUOTE_MIN_WORDS);
   const included: SimilarityBlockInput[] = [];
   const excluded: ExcludedBlock[] = [];
+  const pageFurniture = repeatedPageFurniture(blocks);
   let inBibliography = false;
   let inFrontMatter = false;
+  /*
+   * Kapak: numaralı ilk bölüm başlığına ("0. İçindekiler", "1. Giriş") kadar
+   * gelen 1. sayfa içeriği rapor kimliğidir (rapor kodu, takım kaptanı,
+   * danışman, sürüm). Kelime sayısı ölçütü bu satırları kaçırıyordu; ölçüt
+   * artık KONUM: numaralı gövde başlamadan önceki kapak bloğu.
+   */
+  let inCoverPreamble = true;
 
   for (const block of blocks) {
     const section = sectionKeyOf(block);
@@ -401,17 +503,27 @@ export function classifyBlocks(
     };
 
     // a) Başlıklar bölüm bağlamını taşır ama tek başına parça içeriği DEĞİLDİR.
-    if (block.blockType === "HEADING") {
-      inBibliography = BIBLIOGRAPHY_HEADINGS.has(fold);
-      inFrontMatter = FRONT_MATTER_HEADINGS.has(fold);
+    // Şekli gerçek başlığa benzemeyen blok (kaydırılmış gövde cümlesi) başlık
+    // SAYILMAZ: bölüm/kaynakça/içindekiler durumunu değiştirmez, normal içerik
+    // gibi işlenmeye devam eder.
+    // Bölüm numarası şekil denetiminden ÖNCE sökülür: "1. Yönetici Özeti"
+    // içindeki numara noktası cümle sonu sanılmamalıdır.
+    const headingBody = block.blockType === "HEADING" ? stripLeadingSectionNumber(block.text) : "";
+    if (block.blockType === "HEADING" && isPlausibleHeadingText(headingBody)) {
+      if (/^\d/.test(block.text.trim())) inCoverPreamble = false;
+      const headingFold = foldLine(headingBody);
+      inBibliography = headingMatchesKnownSection(headingFold, BIBLIOGRAPHY_HEADINGS);
+      inFrontMatter = headingMatchesKnownSection(headingFold, FRONT_MATTER_HEADINGS);
       record(inBibliography ? "kaynakca" : inFrontMatter ? "kapak-icindekiler" : "baslik");
       continue;
     }
+    // a2) Sayfaların çoğunda aynen tekrarlanan kısa satır: üstbilgi/altbilgi.
+    if (pageFurniture.has(furnitureKey(block.text))) { record("tekrarlanan-altbilgi"); continue; }
     // b) Kaynakça: başlıktan bir sonraki başlığa kadar bütün bloklar.
     if (inBibliography) { record("kaynakca"); continue; }
-    // c) İçindekiler/listeler bölümü ve kapaktaki kısa kimlik/üst veri satırları.
+    // c) İçindekiler/listeler bölümü ve kapaktaki kimlik/üst veri satırları.
     if (inFrontMatter) { record("kapak-icindekiler"); continue; }
-    if (block.page === 1 && wordCountOf(block.text) < 8) { record("kapak-icindekiler"); continue; }
+    if (block.page === 1 && inCoverPreamble) { record("kapak-icindekiler"); continue; }
     // g) Resmî şablonda birebir geçen satır (madde 3). Şablon yokken hiçbir şey
     // yapılmaz; çoğunlukta birebir görülen parçaları isTemplateChunkHash yakalar.
     if (options.templateFilter && fold && options.templateFilter.foldedLines.has(fold)) {

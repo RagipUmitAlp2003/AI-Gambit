@@ -1,8 +1,10 @@
 /**
  * Gemini `generateContent` çağrılarının ortak katmanı — TEK ÇAĞRI politikası.
  *
- * Kural: bir kullanıcı işlemi (şartname analizi, rapor analizi) için modele
- * TAM OLARAK BİR üretim isteği gider. Gizli model turu, model taraması
+ * Kural: bu işlevin her çağrısında modele TAM OLARAK BİR üretim isteği gider.
+ * Rapor analizi tek çağrıdır; şartname analizinin sınırlı grup yürütücüsü
+ * aynı işlevi her grup için çağırır ve toplam kullanımı ayrıca ölçer.
+ * Bu taşıma katmanında gizli model turu, model taraması
  * (sweep), yedek model kademesi veya arka planda çalışan yeniden deneme
  * döngüsü YOKTUR. Daha önceki sürümlerde 2 turluk 3 modellik bir plan
  * çalışıyor, üstelik tanılamaya `apiCalls: 1` yazılıyordu; kullanıcı tek çağrı

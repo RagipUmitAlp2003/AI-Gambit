@@ -210,11 +210,21 @@ test("21 · criteria_evidence bulgusu olmayan değerlendirmede orderStages yine 
 test("21 · StageStrip 4. kartı: teknik kriter yoksa 'uygulanmıyor', varsa sonuç rozeti (kaynak sözleşmesi)", () => {
   assert.ok(STAGE_STRIP.length > 0, "StageStrip bulunmalıdır.");
   // Şerit bulguları alır ve 4. aşamayı bulgu varlığına göre çizer.
-  assert.match(STAGE_STRIP, /function StageStrip\(\{ stages, findings \}/, "StageStrip bulgu listesini almalıdır.");
+  assert.match(STAGE_STRIP, /function StageStrip\(\{ stages, findings, outsidePdfCount = 0 \}/,
+    "StageStrip bulgu listesini ve kapsam sayısını almalıdır.");
   assert.match(STAGE_STRIP, /findings\.some\(\(finding\) => finding\.stage === "criteria_evidence"\)/,
     "Uygulanmama kararı yalnızca 4. aşama bulgusunun yokluğuna bağlıdır.");
-  assert.match(STAGE_STRIP, /Bu profilde teknik kriter tanımlı değil; aşama uygulanmıyor\./,
-    "Teknik kriteri olmayan profilde 4. kart 'uygulanmıyor' satırı taşır.");
+  /*
+   * Madde 7: "bulgu gelmedi" ile "profilde teknik kriter yok" ayrılır. Kart
+   * artık doğrulayamadığı bir olguyu kesin biçimde İDDİA ETMEZ; PDF dışı
+   * kriter varsa bunu sayıyla söyler.
+   */
+  assert.ok(!/Bu profilde teknik kriter tanımlı değil/.test(STAGE_STRIP),
+    "Eksik veri, 'bu profilde teknik kriter yok' diye sunulamaz.");
+  assert.match(STAGE_STRIP, /PDF dışı kanıt gerektirdiği için rapor analizine girmedi/,
+    "PDF dışı kriter varsa aşamanın neden boş olduğu sayıyla söylenir.");
+  assert.match(STAGE_STRIP, /teknik kriter tanımlı olmayabilir/,
+    "Veri kesin ayrım yapmaya yetmiyorsa ifade temkinli olmalıdır.");
   // Uygulanmayan kart sonuç rengi/ikonu/rozeti taşımaz; mevcut sonuç yolu korunur.
   assert.match(STAGE_STRIP, /const verdict = notApplicable \? null : stage\?\.verdict \?\? null/,
     "Uygulanmayan aşamanın sonucu null'a düşer (chip 'none', ikon 'Sonuç yok').");
@@ -222,7 +232,10 @@ test("21 · StageStrip 4. kartı: teknik kriter yoksa 'uygulanmıyor', varsa son
     "Sonucu olan aşama rozetini korur; uygulanmayan aşama rozet basmaz.");
   assert.match(STAGE_STRIP, /label: "Kriter bulguları"/, "Teknik kriterli eski profil mevcut satırı korur.");
   // Çağrı yeri değerlendirmenin bulgularını geçirir.
-  assert.match(EVALUATION_APP, /<StageStrip stages=\{evaluation\.stages\} findings=\{evaluation\.findings\} \/>/);
+  assert.match(EVALUATION_APP, /<StageStrip\s+stages=\{evaluation\.stages\}\s+findings=\{evaluation\.findings\}\s+outsidePdfCount=\{evaluation\.criteriaScope\?\.outsidePdf \?\? 0\}/);
+  // Kutuların AI ÖN DEĞERLENDİRMESİ olduğu görünür biçimde yazılır (madde 7).
+  assert.match(EVALUATION_APP, /AI ön değerlendirme özeti — kesinleşen kriter sonuçları aşağıdaki sayaçlardadır\./);
+  assert.match(STAGE_STRIP, /aria-label="AI ön değerlendirme özeti/);
   // tools/authorization.test.ts sözleşmesi bozulmaz.
   assert.match(STAGE_STRIP, /CATEGORY_FIT_LABELS/);
   assert.doesNotMatch(STAGE_STRIP, /Benzerlik taraması|categoryScore/);

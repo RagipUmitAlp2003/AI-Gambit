@@ -2,7 +2,7 @@
 
 TEKNOFEST benzeri yarışmalarda organizatörün yüklediği şartname PDF'sini; kaynakları gösterilen, düzenlenebilir ve yayımlanabilir bir kriter profiline dönüştüren ve katılımcı raporlarını bu profile göre dört aşamada kontrol eden değerlendirme sistemidir. Sistem puan üretmez; her kural için **BAŞARILI / REVİZYON / KRİTİK HATA** sonucu, rapordan sayfa/paragraf numaralı alıntı ve gerekçe verir. Nihai karar her zaman hakemdedir.
 
-**Güncel dal:** `entegrasyon/umit-umut-2026-09-03` (3 Eylül 2026). Bu dal benzerlik motoru hattı ile PDF.js/hakem/katılımcı hattını birleştirir ve şartname çıkarımını yeniden dört aşamalı hâle getirir. Ayrıntılı entegrasyon raporu: [`ENTEGRASYON_RAPORU_2026-09-03.md`](ENTEGRASYON_RAPORU_2026-09-03.md) · durum ve ölçümler: [`PROJE_DURUMU.md`](PROJE_DURUMU.md).
+**Güncel dal:** `furkan_faruk_v1_bugfixing` (4 Eylül 2026). Bu dal, `entegrasyon/umit-umut-2026-09-03` üzerine benzerlik filtresi, hakem ekranı ve kayıt güvenilirliği düzeltmelerini ekler; kriter çıkarımı ve hakem AI değerlendirme mantığı değişmemiştir. Ne değişti: [`README_DEGISIKLIKLER_2026-09-04.md`](README_DEGISIKLIKLER_2026-09-04.md) · ölçümler ve teslim: [`BUGFIX_RAPORU_2026-09-04.md`](BUGFIX_RAPORU_2026-09-04.md) · önceki entegrasyon: [`ENTEGRASYON_RAPORU_2026-09-03.md`](ENTEGRASYON_RAPORU_2026-09-03.md) · durum ve ölçümler: [`PROJE_DURUMU.md`](PROJE_DURUMU.md).
 
 ## Rol bazlı yönetici girişi
 
@@ -49,20 +49,20 @@ Aynı belge aynı istem, sözlük, seçici ve yapı sürümüyle yeniden analiz 
 
 1. **Giriş:** Hakem **Değerlendirme Atölyesi** ya da **Geçmiş değerlendirmeler** seçer.
 2. **Yarışma → başvuru:** Yayımlı profili olan yarışmalar listelenir; seçilen yarışmanın hakeme atanmış başvuruları görünür. Başvuru D1'de, PDF özel R2 deposundadır; ilk başvuru ve revizyon yüklemeleri R2'den geri okunarak doğrulanır (uzunluk + SHA-256), çift tıklamayla mükerrer başvuru oluşmaz.
-3. **Yapay Zekâ Analizi:** Yayımlı kriterlerin her biri rapor PDF'iyle karşılaştırılır. Ekran dört sayıyı ayrı gösterir: yayımlı kriter, PDF üzerinden değerlendirilebilen, video/portal/fiziksel aşama gerektirdiği için analize katılmayan ve hakem kararı bekleyen. Dört aşama tek şerit hâlinde özetlenir; profilde teknik kriter yoksa 4. kart "aşama uygulanmıyor" olarak rozetsiz kalır. Taranmış (metin katmansız) rapor açık hata verir; başarısız yenilemede önceki başarılı analiz korunur.
+3. **Yapay Zekâ Analizi:** Yayımlı kriterlerin her biri rapor PDF'iyle karşılaştırılır. Ekran dört sayıyı ayrı gösterir: yayımlı kriter, PDF üzerinden değerlendirilebilen, video/portal/fiziksel aşama gerektirdiği için analize katılmayan ve hakem kararı bekleyen. Dört aşama tek şerit hâlinde özetlenir ve şeridin **AI ön değerlendirmesi** olduğu açıkça yazılır; hakemin kesinleşen sayaçlarıyla karıştırılmaz. Teknik bulgu gelmediğinde kart, doğrulayamadığı bir olguyu iddia etmez: PDF dışı kriter varsa sayısıyla açıklanır, yoksa temkinli ifade kullanılır. Kriter analizi **benzerliği beklemez**; sonuç hazır olur olmaz kaydedilir ve hakem çalışmaya başlar. Taranmış (metin katmansız) rapor açık hata verir; başarısız yenilemede önceki başarılı analiz korunur.
 4. **Kanıt:** Her bulguda **“Kanıtı PDF'de göster”** uygulama içi görüntüleyiciyi doğru sayfada açar ve alıntıyı vurgular; vurgulanamazsa bunu söyler.
-5. **Kriter kararları + nihai ONAY / RET:** Hakem her bulgu için **AI bulgusunu aynen kullan** (AI sonucu kesinleşir) ya da **Hakem değerlendirmesi gir** (AI verileriyle ön dolu form; hakem kendi sonucunu, sayfa/bölüm/alıntı ve gerekçesini yazar) seçer. Hakemin PDF konumu dayanağı sunucuda rapor metnine karşı doğrulanır. AI bulgusu ile hakem kararı ayrı tutulur; bütün kriterler sonuçlanmadan genel karar bölümü açılmaz. Nihai **RET** açıklaması reddedilen kriterlerden deterministik şablonla üretilir.
+5. **Kriter kararları + nihai ONAY / RET:** Hakem her bulgu için **AI bulgusunu aynen kullan** (AI sonucu kesinleşir) ya da **Hakem değerlendirmesi gir** seçer. Form iki ayrı soru sorar — *Kriter sonucu* (Uygun/Olumsuz) ve *Dayanak* (PDF'de bulunan bilgi / Raporda bulunmayan içerik) — ve AI verileriyle ön doldurulur; sayfa numarası tam sayı ve belge aralığında olmak zorundadır. Hakemin PDF konumu dayanağı sunucuda rapor metnine karşı doğrulanır. **Her karar sunucuya taslak olarak yazılır:** taslak nihai karar üretmez, katılımcıya gitmez, analiz künyesine bağlıdır (yeni analizden sonra otomatik uygulanmaz) ve "kaydedildi" yalnızca kayıt gerçekten kalıcılaştığında söylenir; iki sekmede yapılan düzenleme birbirini sessizce ezemez. AI bulgusu ile hakem kararı ayrı tutulur; bütün kriterler sonuçlanmadan genel karar bölümü açılmaz. Nihai **RET** açıklaması reddedilen kriterlerden deterministik şablonla üretilir.
 6. **Yarışmacı sonucu:** Portalda ONAY/RET, hakem açıklaması, **Güçlü Yönler** ve **Gelişime Açık Yönler** görünür.
 
 ### Raporlar arası benzerlik
 
-Benzerlik ayrı bir sistemdir; kriter, ihlal veya otomatik ret kararı üretmez ve aşama kartlarında yer almaz. Hakeme kendi notunda, "Bu sonuç intihal kararı değildir" uyarısıyla gösterilir:
+Benzerlik ayrı bir sistemdir; kriter, ihlal veya otomatik ret kararı üretmez ve aşama kartlarında yer almaz. Hakeme kendi notunda, "Bu sonuç intihal veya otomatik ret kararı değildir" uyarısıyla gösterilir. Kriter analizini **beklet(e)mez**: analiz sonucu hemen kaydedilir, benzerlik kendi kartında ilerler ve bittiğinde sonucu kayda iliştirilir; bağımsız "Benzerliği yenile" eylemi kriter analizini yeniden başlatmaz. Durum her zaman doğru adlandırılır — başarısız, eksik ya da hiç yapılmamış karşılaştırmaya "Normal" denmez; işaret suçlayıcı değildir ("inceleme önerilir"):
 
-- Yapısal parçalama (başlık/paragraf); kapak, içindekiler, üstbilgi/altbilgi, kaynakça, şartname alıntısı, resmî şablon metni ve çok kısa ortak ifadeler karşılaştırma dışı bırakılır ve "puana katılmayan içerik" olarak raporlanır.
+- Yapısal parçalama (başlık/paragraf); kapak (numaralı ilk bölüme kadarki 1. sayfa içeriği), içindekiler, tekrarlanan üstbilgi/altbilgi (sayfa numarası değişse bile), kaynakça, şartname alıntısı, resmî şablon metni ve çok kısa ortak ifadeler karşılaştırma dışı bırakılır ve "puana katılmayan içerik" olarak gerekçesiyle raporlanır. Başlık filtreleri bölüm numarasını yok sayar ("8.3 Kaynakça"); karma başlık ("Risk, Takvim ve Kaynakça") bölümün tamamını kaynakça yapmaz. Kaydırılmış bir gövde cümlesi başlık sayılmaz.
 - MinHash ile doğrudan kopya, `gemini-embedding-001` ile anlamı korunarak yeniden yazılmış içerik tespiti; ortak teknik kelimelerin etkisini azaltan ayırt edicilik ağırlığı; ardışık eşleşmelerin birleştirilmesi; kapsama oranında çift sayım yok.
 - Yalnızca aynı yarışma, yıl ve aşamadaki **güncel** raporlar karşılaştırılır; aynı takımın eski sürümü başka takım benzerliği sayılmaz.
 - PDF özeti, embedding modeli, şablon sürümü ve işlem sürümüne bağlı önbellek; havuza yeni rapor gelince eski sonuçlar "güncel değil" işaretlenir; embedding başarısız olursa MinHash sonucu korunur.
-- Sayfa, bölüm ve kısa alıntıyla açıklanabilir eşleşmeler; isteğe bağlı LLM açıklama katmanı yüzdeyi veya eşleşmeyi değiştiremez.
+- Sayfa, bölüm ve kısa alıntıyla açıklanabilir eşleşmeler; isteğe bağlı LLM açıklama katmanı yüzdeyi veya eşleşmeyi değiştiremez. Maliyet kapısı: güçlü eşleşme yoksa **hiç** çağrı yapılmaz, varsa en yakın **tek** rapor ve en fazla **3** kanıt çifti ile **tek** yapılandırılmış çağrı yapılır; havuz büyüdükçe çağrı sayısı artmaz. Tarama, kanıt seçimi ve AI açıklaması arayüzde ayrı sayılardır, tek "incelendi" sayısında birleştirilmez.
 
 ## Gemini yapılandırması
 
@@ -96,7 +96,7 @@ Canlı model çağrısı yapmayan kontroller:
 ```bash
 npx tsc --noEmit --incremental false   # tip kontrolü
 npm run lint
-npm run test:unit                       # 337 birim testi (node:test, node:sqlite ile gerçek göç dosyaları)
+npm run test:unit                       # 350 birim testi (node:test, node:sqlite ile gerçek göç dosyaları)
 npm run test:regressions                # 9 regresyon paketi
 npm run check:repo-safety               # izlenen dosyalarda API anahtarı taraması
 npm run build                           # üretim derlemesi (prebuild depo güvenliğini çalıştırır)
@@ -126,9 +126,22 @@ Canlı koşular (ücretli, açık izinle): `npm run check:gemini` erişimi doğr
 - `app/api/analyze/route.ts`: yapısal tarama + tek çağrılık çıkarım + kalıcı önbellek; `app/api/evaluate-report/route.ts`: dört aşamalı rapor değerlendirmesi
 - `app/api/applications/*`: başvuru, sürüm, dosya erişimi, benzerlik; `app/api/competitions/*`: yarışma ve benzerlik şablonu; `app/api/admin/*`: hesap, oturum, bootstrap, parola, denetim; `app/api/profiles/*`, `extractions`, `operations`, `participant/register`, `timeline`, `metrics`
 - `migrations/0001_admin.sql` … `0015_submission_integrity.sql`: D1 şema geçmişi (15 göç; çalışma zamanı şeması aynı sütunları ad bağımsız ekler)
-- `DESIGN.md`, `PRODUCT.md`, `NIHAI_SISTEM_AKISI.md`, `GUIDE.md`; raporlar: `ENTEGRASYON_RAPORU_2026-09-03.md`, `DEGISIKLIK_RAPORU_2026-09-03.md`, `SIMULASYON_RAPORU_CELIKKUBBE.md`, `TESLIM_RAPORU_NIHAI_HAKEM_AKISI.md`
+- `DESIGN.md`, `PRODUCT.md`, `NIHAI_SISTEM_AKISI.md`, `GUIDE.md`; raporlar: `README_DEGISIKLIKLER_2026-09-04.md`, `BUGFIX_RAPORU_2026-09-04.md`, `ENTEGRASYON_RAPORU_2026-09-03.md`, `DEGISIKLIK_RAPORU_2026-09-03.md`, `SIMULASYON_RAPORU_CELIKKUBBE.md`, `TESLIM_RAPORU_NIHAI_HAKEM_AKISI.md`
 
-## Güncel durum (3 Eylül 2026)
+## Güncel durum (4 Eylül 2026)
+
+Son yapılanlar (`furkan_faruk_v1_bugfixing`; ayrıntı: [`README_DEGISIKLIKLER_2026-09-04.md`](README_DEGISIKLIKLER_2026-09-04.md)):
+
+- **Benzerlik filtresi gerçek PDF'lerle düzeltildi.** İki sentetik test raporuyla beş kusur yeniden üretildi ve giderildi: kapak künyesi, "0. İçindekiler ve Beyan" tablosu, "8.3 Kaynakça" satırları, her sayfadaki altbilgi ve başlık sanılan gövde cümleleri artık karşılaştırmaya girmiyor; ayıklanan içerik gerekçesiyle denetimde duruyor. Başlık eşleşmesi bölüm numarasını yok sayıyor, karma başlık bölümün tamamını yutmuyor, gerçek proje beyanı korunuyor. `pdf-structure.ts` (ortak ayrıştırıcı) değiştirilmedi; uyarlama yalnızca benzerlik katmanında. İşlem sürümü `sim-v3-frontmatter-furniture` — eski parça önbelleği kendiliğinden düşer.
+- **Benzerlik hakem analizini bekletmiyor.** `Promise.allSettled` bağı kaldırıldı; kriter sonucu hemen kaydediliyor, benzerlik kendi kartında ilerliyor ve geç gelen sonuç yeni `attach_similarity` ucuyla, karşılaştırmalı (CAS) yazma ile iliştiriliyor — hakem kararlarını, başka başvuruyu veya yeni bir analizi ezemiyor. Bağımsız "Benzerliği yenile" eylemi eklendi.
+- **Hakem düzenleme formu.** Genel `input` kuralının radyoları dev yuvarlağa çevirmesi bu forma kapsamlı sıfırlamayla giderildi (`globals.css` değişmedi); dört seçenek iki ayrı soruya bölündü; alıntı ve gerekçe tam genişlikte; yüzey nötr, Kaydet birincil eylem; alan bazlı hata + `aria-invalid`/`aria-describedby`; sayfa numarası tam sayı ve belge aralığında (ondalık artık sessizce yuvarlanmıyor).
+- **Kriter kararları artık gerçekten kaydediliyor.** Her karar sunucuya `in_progress` taslak olarak yazılıyor (nihai karar üretmez, katılımcıya gitmez); "kaydedildi" yalnızca kalıcılaşınca deniyor, başarısızlıkta form kapanmıyor. Taslak analiz künyesi/PDF özeti/kriter sürümüyle kapsamlı — yeni analizden sonra otomatik uygulanmıyor; iki sekme çakışması sunucuda damgayla engelleniyor.
+- **Sunum:** "ŞÜPHELİ" yerine "inceleme önerilir"; başarısız/eksik koşuya "Normal" denmiyor (dokuz ayrı durum); uyarı "intihal **veya otomatik ret** kararı değildir"; tarama, kanıt seçimi ve AI açıklaması ayrı sayılar; dört kutunun AI ön değerlendirmesi olduğu yazılı.
+- **Madde 8'deki on "düzeltildi" bulgusu** güncel kodda ve regresyon paketlerinde yeniden doğrulandı; hiçbiri yeniden üretilemedi, hiçbiri yeniden yazılmadı.
+- Ölçüm (canlı model çağrısı YOK, yalnız yerel MinHash): A→B %94 (1077/1151 kelime), B→A %99. Eşleşmelerin tamamı birebir metin; kanıt olarak kapak/içindekiler/kaynakça değil, gerçek proje anlatımı seçiliyor.
+- Doğrulama: tsc ve lint temiz, birim **350/350** (13 yeni test), regresyon 9/9, depo güvenliği PASS, üretim derlemesi başarılı. **Canlı Gemini çağrısı yapılmadı.** Commit/push/merge yapılmadı.
+
+## Önceki durum (3 Eylül 2026)
 
 Son yapılanlar (`entegrasyon/umit-umut-2026-09-03`, commit `578f1d7` ve sonrası):
 
@@ -142,13 +155,14 @@ Son yapılanlar (`entegrasyon/umit-umut-2026-09-03`, commit `578f1d7` ve sonras�
 
 Önem sırasına göre:
 
+0. **Görsel doğrulama (yeni).** 4 Eylül'deki form ve kart değişiklikleri kaynak/CSS düzeyinde regresyonla kilitlendi ama tarayıcıda görülmedi: 360px / tablet / masaüstü / %200 yakınlaştırma, klavyeyle seçim ve odak, hata düzeltme akışı elle doğrulanmalı.
 1. **Canlı doğrulama (en kritik).** Yeni sürüm etiketleriyle Çelikkubbe ve İDA şartnamelerinin gerçek Gemini analizi; rapor değerlendirmesi ve OCR yolunun canlı koşusu. Çıkan her aktif kriter için: dört kapsamdan birinde mi, kaynak sayfası ve alıntısı doğru mu, şartnamenin kendi başlığı yanlış anlaşılmış mı, tavsiye kriter olmuş mu, teknik/yarışma-anı kuralı sızmış mı.
 2. **Benchmark beklentilerini yeni kapsama göre kalibre etme.** `docs/benchmarks/celikkubbe-expected.json` hâlâ video 720p/süre kuralını beklenen bulgu sayıyor (yeni kapsamda video kriter değildir); `docs/benchmarks/ida-ground-truth.json` boş. Canlı koşu sonrası `run_celikkubbe_benchmark.mjs` ile ölçüm.
 3. **`main`'e alma.** Entegrasyon dalı push edildi, PR açılmadı: `https://github.com/RagipUmitAlp2003/AI-Gambit/pull/new/entegrasyon/umit-umut-2026-09-03`. Gözden geçirip `main`'e alınmalı; ardından eski dallar temizlenebilir.
 4. **Eski yayımlı profiller.** Üç aşamalı (v35) veya daha eski istemle yayımlanmış profiller silinmez ama yeni kapsam için şartname **yeniden analiz edilmelidir**. Yayımlı profilde sürüm işareti yoktur; uyarı yalnızca taslak ve analiz sonuçları için üretilir. Profil dışa aktarımına çıkarım sürümü eklenmesi değerlendirilmeli.
 5. **Kapsam kapısı sınırları (canlı ölçümle ayarlanmalı).** `derece` puan ailesinde olduğu için "360 derece dönebilmelidir" gibi açı limitleri dışlanıyor; "yarışma sırasında …" ile başlayan tasarım limitleri yarışma-anı kuralı sayılıyor; işaretsiz saha prosedürlerinde ("güvenlik kurallarını tatbik ettikten sonra enerji verilebilir") son karar modelin KAPSAM_DISI sınıflamasına kalıyor.
 6. **Uçtan uca senaryo.** `npm run test:e2e` temiz veri tabanı ister; mevcut veriyi korumak için anlık görüntü → `dev_reset` → e2e → geri yükleme yöntemi kullanılmalı. Tekdüze giriş + 429 bölümü canlı koşulmadı.
-7. **Benzerlik kalibrasyonu.** Eşikler (doğrudan 0.55/0.30, anlamsal 0.90/0.82, rapor %55/%30) başlangıç değeri; kontrollü rapor çiftleriyle canlı embedding ve LLM açıklama katmanı ölçülmeli.
+7. **Benzerlik kalibrasyonu.** Eşikler (doğrudan 0.55/0.30, anlamsal 0.90/0.82, rapor %55/%30) başlangıç değeri; kontrollü rapor çiftleriyle canlı embedding ve LLM açıklama katmanı ölçülmeli. 4 Eylül ölçümü yalnız yerel MinHash ile yapıldı: anlamsal kanal **hiç çalıştırılmadı**, "0 anlamsal eşleşme" başarısızlık değildir. Ayrıca ortak ayrıştırıcının yanlış başlık ürettiği durumda bölüm adı sonraki bloklara yazılmış geliyor (kozmetik; karşılaştırma doğruluğunu bozmuyor) ve LLM kapsamını tek rapordan beş rapora çıkarmak ayrı bir ürün kararıdır.
 8. **Büyük şartnameler.** Çıkarım tek çağrıdır ve çıktı tavanı 65 536 token'dır; yüzlerce adaylı belgede kesilme açık hata verir ama bölümleme yoktur. Cloudflare Workers istek süre sınırı canlı ölçülmeli; gerekirse analiz arka plan işine alınmalı.
 9. **Dağıtım.** `APP_ENV` tanımsız ortam production sayılır (önizlemede giriş sessizce başarısız görünebilir); D1/R2 kaynakları, `migrations/0001–0015` uygulaması, `MODERATOR_BOOTSTRAP_TOKEN` ile gerçek Admin, `admin/1234` hesabının kaldırılması, `MODERATOR_SECRET` ve daha önce paylaşılmış `GEMINI_API_KEY`'in yenilenmesi.
 10. **Arayüz ve veri.** Dar ekran (360/768/1024 px) elle doğrulanmadı; favicon hâlâ eski kimlikte; kullanılmayan CSS seçicileri taranmalı; görevli belge havuzu tarayıcıya bağlı (ortak R2 havuzu yok); yarışma seçimi ad dizgesiyle taşınıyor (kalıcı `competitionId` bağlanmalı).

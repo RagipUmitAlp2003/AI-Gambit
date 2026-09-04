@@ -2834,7 +2834,7 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
   const completed = review.status === "completed";
   const timestamp = new Date().toISOString();
   const before = await database.prepare(
-    `SELECT a.status, a.evaluation_json, a.assigned_judge_id, a.evaluation_criteria_version,
+    `SELECT a.status, a.evaluation_json, a.review_json, a.assigned_judge_id, a.evaluation_criteria_version,
             a.file_key, c.decisions_locked,
             (SELECT MAX(cv.criteria_version) FROM criteria_profile_versions cv
               WHERE cv.competition_key = a.competition_key) AS current_criteria_version
@@ -2842,7 +2842,8 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
      LEFT JOIN competitions c ON c.competition_key = a.competition_key
      WHERE a.id = ?`,
   ).bind(id).first<{
-    status: string; evaluation_json: string | null; assigned_judge_id: string | null;
+    status: string; evaluation_json: string | null; review_json: string | null;
+    assigned_judge_id: string | null;
     evaluation_criteria_version: number | null; file_key: string | null;
     decisions_locked: number | null; current_criteria_version: number | null;
   }>();
@@ -2924,11 +2925,45 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
    * karar o durumu ezmemelidir. Koşul WHERE'de tutulur; ikinci ifade yalnızca
    * ilk güncelleme başarılıysa etkili olur (yeni durum üzerinden koşullanır).
    */
+  /*
+   * TASLAK EŞZAMANLILIĞI (madde 6): iki sekmede açık form birbirini SESSİZCE
+   * ezmemelidir. İstemci, üzerine yazdığı taslağın sunucudaki damgasını
+   * gönderir; damga arada değiştiyse yazma reddedilir ve hakem ne olduğunu
+   * görür. Damga sunucuda atılır (istemciden alınmaz).
+   */
+  const storedReview = parseJson<JudgeReview>(before.review_json);
+  const storedStamp = storedReview?.draftSavedAt ?? null;
+  if (storedStamp && (review.draftSavedAt ?? null) !== storedStamp) {
+    throw new ConflictError(
+      "Bu başvurunun kriter kararları başka bir sekmede veya oturumda güncellendi; "
+      + "çalışmanız yazılmadı. Sayfayı yenileyip güncel kararların üzerine devam edin.",
+    );
+  }
+  if (!completed && before.status === "completed") {
+    throw new ConflictError("Kesinleşmiş kararın üzerine taslak yazılamaz; önce kararı yeniden açın.");
+  }
+  const draftScope = evaluation ? {
+    analyzedAt: evaluation.analyzedAt,
+    pdfHash: evaluation.report.pdfHash ?? null,
+    criteriaVersion: before.evaluation_criteria_version ?? null,
+  } : null;
+  if (review.draftScope && (!draftScope
+    || review.draftScope.analyzedAt !== draftScope.analyzedAt
+    || review.draftScope.pdfHash !== draftScope.pdfHash
+    || review.draftScope.criteriaVersion !== draftScope.criteriaVersion)) {
+    throw new ConflictError("Analiz veya kriter sürümü değişti; eski taslak bu analize kaydedilemez.");
+  }
+  review = { ...review, draftScope, draftSavedAt: completed ? null : timestamp };
   const nextStatus = completed ? "completed" : "judge_in_review";
   const reviewBatch = await database.batch([database.prepare(
     `UPDATE competition_applications
      SET status = ?, review_json = ?, judge_id = ?, judge_name = ?, updated_at = ?, completed_at = ?
-     WHERE id = ? AND status IN ('awaiting_judge', 'judge_in_review', 'completed')`,
+     WHERE id = ? AND status IN ('awaiting_judge', 'judge_in_review', 'completed')
+       AND status = ? AND review_json IS ? AND file_key IS ?
+       AND assigned_judge_id IS ? AND evaluation_criteria_version IS ?
+       AND json_extract(evaluation_json, '$.analyzedAt') IS ?
+       AND NOT EXISTS (SELECT 1 FROM competitions c
+         WHERE c.competition_key = competition_applications.competition_key AND c.decisions_locked = 1)`,
   ).bind(
     nextStatus,
     JSON.stringify(review),
@@ -2937,11 +2972,17 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
     timestamp,
     completed ? timestamp : null,
     id,
+    before.status,
+    before.review_json,
+    before.file_key,
+    before.assigned_judge_id,
+    before.evaluation_criteria_version,
+    evaluation?.analyzedAt ?? null,
   ), database.prepare(
     `INSERT INTO application_submission_details
       (application_id, applicant_full_name, team_name, outcome, outcome_note, decided_at)
      SELECT id, participant_name, participant_name, ?, ?, ?
-     FROM competition_applications WHERE id = ? AND status = ?
+     FROM competition_applications WHERE id = ? AND status = ? AND changes() > 0
      ON CONFLICT(application_id) DO UPDATE SET
        outcome = excluded.outcome,
        outcome_note = excluded.outcome_note,
@@ -2997,6 +3038,60 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
         + (rejectedNames.length ? ` · bulgusu reddedilen: ${rejectedNames.slice(0, 5).join(", ")}` : ""),
     }).catch((auditError) => console.error("[audit] hakem kriter kararları", auditError));
   }
+}
+
+export type AttachSimilarityResult = "attached" | "unchanged" | "not_found" | "forbidden";
+
+/**
+ * GEÇ GELEN BENZERLİK SONUCUNU KAYITLI ANALİZE BAĞLAR (madde 4).
+ *
+ * Kriter analizi benzerliği BEKLEMEDEN kaydedilir; benzerlik kendi hızında
+ * biter ve sonucunu bu işlevle kayda iliştirir. Yalnızca `similarityReport`
+ * alanı yazılır:
+ *   - hakem kararları (`review_json`) ve kriter kararları BAŞKA sütundadır,
+ *     bu yazma onlara DOKUNMAZ;
+ *   - kaydın bağlı olduğu PDF özeti okunur, benzerlik sonucu yalnızca AYNI
+ *     PDF sürümü için aranır: geç gelen sonuç yeni bir analizin üzerine
+ *     yazamaz;
+ *   - güncelleme, okunan `evaluation_json` ile karşılaştırmalı (CAS) yapılır:
+ *     arada yeni analiz kaydedilmişse satır DEĞİŞMEZ ve "unchanged" döner;
+ *   - kesinleşmiş karar ve dondurulmuş yarışma korumaları aynen geçerlidir.
+ */
+export async function attachSimilarityToEvaluation(
+  id: string,
+  judge: AdminAccount,
+): Promise<AttachSimilarityResult> {
+  const database = await workflowDatabase();
+  const current = await database.prepare(
+    `SELECT a.status, a.assigned_judge_id, a.evaluation_json, a.evaluation_pdf_hash, c.decisions_locked
+     FROM competition_applications a
+     LEFT JOIN competitions c ON c.competition_key = a.competition_key
+     WHERE a.id = ?`,
+  ).bind(id).first<{
+    status: string; assigned_judge_id: string | null; evaluation_json: string | null;
+    evaluation_pdf_hash: string | null; decisions_locked: number | null;
+  }>();
+  if (!current) return "not_found";
+  if (current.assigned_judge_id && current.assigned_judge_id !== judge.id) return "forbidden";
+  if (current.status === "completed" || current.decisions_locked === 1) return "unchanged";
+  if (!current.evaluation_json || !current.evaluation_pdf_hash) return "unchanged";
+  const stored = parseJson<ReportEvaluation>(current.evaluation_json);
+  if (!stored) return "unchanged";
+  const report = await findSimilarityResult(id, current.evaluation_pdf_hash);
+  if (!report) return "unchanged";
+  const next = JSON.stringify({ ...stored, similarityReport: report });
+  if (next === current.evaluation_json) return "unchanged";
+  const updated = await database.prepare(
+    // CAS: arada yeni analiz kaydedildiyse (evaluation_json değişti) yazma DÜŞER.
+    `UPDATE competition_applications
+     SET evaluation_json = ?, updated_at = ?
+     WHERE id = ? AND status <> 'completed' AND evaluation_json = ?
+       AND assigned_judge_id IS ? AND evaluation_pdf_hash IS ?
+       AND NOT EXISTS (SELECT 1 FROM competitions c
+         WHERE c.competition_key = competition_applications.competition_key AND c.decisions_locked = 1)`,
+  ).bind(next, new Date().toISOString(), id, current.evaluation_json,
+    current.assigned_judge_id, current.evaluation_pdf_hash).run();
+  return updated.meta.changes ? "attached" : "unchanged";
 }
 
 export type DeleteAnalysisResult = "deleted" | "not_found" | "forbidden" | "completed_locked" | "nothing_to_delete";

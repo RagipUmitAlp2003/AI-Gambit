@@ -2,16 +2,15 @@ import { requirePermission } from "../../lib/admin-guard";
 import { PayloadTooLargeError, acquireAnalysisPermit, readFormDataWithLimit, requestBodyTooLarge } from "../../lib/request-guard";
 import {
   EXTRACTION_PROMPT_VERSION,
-  EXTRACTION_SYSTEM_INSTRUCTION,
-  buildExtractionPrompt,
-  extractionSchemaForCandidates,
   normalizeExtraction,
   type RawExtraction,
 } from "../../lib/criteria-extraction";
-import { describeGeminiFailure, runSingleGeneration } from "../../lib/gemini-generation";
+import { describeGeminiFailure } from "../../lib/gemini-generation";
+import { CRITERIA_GENERATION_VERSION, type GenerationUsage } from "../../lib/criteria-generation";
+import { CRITERIA_CORE_THINKING_LEVEL, CRITERIA_OUTPUT_TOKENS, CRITERIA_TEMPERATURE, CRITERIA_THINKING_LEVEL, generatePrioritizedCriteria } from "../../lib/criteria-priority";
 import { recordUsage } from "../../lib/usage-metrics";
 import { pdfIntegrityError } from "../../lib/pdf-integrity";
-import { CANDIDATE_SELECTOR_VERSION, formatCandidatesForLlm, selectCriteriaCandidates, summarizeUnselectedBlocks, type CandidateSelection } from "../../lib/criteria-candidates";
+import { CANDIDATE_SELECTOR_VERSION, selectCriteriaCandidates, summarizeUnselectedBlocks, type CandidateSelection } from "../../lib/criteria-candidates";
 import { DICTIONARY_VERSION } from "../../lib/criteria-dictionary";
 import { extractPdfStructure, PDF_STRUCTURE_OCR_VERSION, PDF_STRUCTURE_VERSION, PdfTextLayerError, type StructuredPdf } from "../../lib/pdf-structure";
 import { extractPdfStructureViaOcr, OCR_PROMPT_VERSION } from "../../lib/pdf-ocr";
@@ -19,29 +18,11 @@ import { findStoredAnalysis, reportBucket, saveCriteriaExtractionRun, saveStored
 import type { AnalysisDiagnostics, AnalysisResult } from "../../lib/types";
 
 /**
- * Şartname analizi ucu — dört aşamalı rapor kontrolü (dil/şablon, başlık/içerik,
- * kategori uygunluğu, rapordan denetlenebilen teknik kural), TEK LLM çağrısı.
- *
- * Yarışma Yöneticisi YALNIZCA şartname PDF'sini yükler; ayrı bir resmî rapor
- * şablonu alanı yoktur. PDF sunucuda yapısal bloklara ayrılır; sürümlü sözlük
- * ve deterministik sinyaller güçlü adayları seçer. Modele PDF değil, yalnızca
- * kaynak kimlikli aday metinleri tek çağrıda verilir.
- *
- * TEK ÇAĞRI: bir "Belgeyi analiz et" işlemi için modele tam olarak bir
- * `generateContent` isteği gider. Yedek model kademesi, model taraması ve gizli
- * yeniden deneme döngüsü kaldırıldı; 429/503/zaman aşımında uç açık bir hata ve
- * `retryable: true` döndürür, kullanıcı "Yeniden dene" ile kendisi karar verir.
- * Tanılamadaki `apiCalls` gerçekten yapılan istek sayısıdır.
- *
- * TEK İSTİSNA — OCR yedeği: metin katmansız (taranmış) belgede uç önce
- * kontrollü 422 (OCR_REQUIRED) ile durur. Yarışma Yöneticisi OCR'yi arayüzden
- * AÇIKÇA onaylarsa (`ocr=1`) aktarım için tam olarak BİR ek `generateContent`
- * isteği yapılır; bu çağrı da hiç yeniden denenmez ve sayaçlara olduğu gibi
- * yazılır. OCR yapısı belge başına bir kez üretilip R2'de sabitlenir; sonraki
- * yeniden analizler ek çağrı yapmadan sabit yapıyı kullanır.
- *
- * Model çıktısı sunucuda doğrulanır (sayfa sınırı, tekrar, boş alan); karar
- * yöneticide kalır. Puan planı, güven seviyesi ve pasif kriter üretilmez.
+ * Aynı aday seçimi ve dört alan talimatı korunur. Adaylar, tek cevabın çıktı
+ * sınırına bağlı kalmamak için sınırlı gruplarda aynı modele gönderilir.
+ * Yalnız MAX_TOKENS alan grup bölünür; 429/503 için gizli tekrar yapılmaz.
+ * Bütün gruplar tamamlanıp kaynak/kapsam doğrulanmadan sonuç kaydedilmez.
+ * OCR yedeği mevcut açık kullanıcı onayına bağlıdır ve ayrı sayılır.
  */
 
 /** Analizde kullanılan TEK model. Yedek kademe yoktur. */
@@ -51,9 +32,6 @@ const CACHE_LIMIT = 12;
 const MAX_PDF_BYTES = 18 * 1024 * 1024;
 // Multipart sınırına dosya dışında başlıklar için küçük pay eklenir.
 const MAX_MULTIPART_BYTES = MAX_PDF_BYTES + 768 * 1024;
-// HIGH düşünme düzeyinde yoğun aday listeleri 150 saniyeyi aşabilir.
-// Kaliteyi veya tek çağrı politikasını değiştirmeden en fazla 5 dakika bekle.
-const GENERATION_TIMEOUT_MS = 300_000;
 
 /**
  * Çıktı token tavanı.
@@ -70,46 +48,15 @@ const GENERATION_TIMEOUT_MS = 300_000;
  * Tavan yine sonsuz değildir; kesilme olursa `finishReason` okunup kullanıcıya
  * ne olduğu ve ne yapabileceği açıkça söylenir (sessiz veri kaybı yok).
  */
-const MAX_OUTPUT_TOKENS = 65_536;
+const MAX_OUTPUT_TOKENS = CRITERIA_OUTPUT_TOKENS;
 
 /**
  * Modelin "düşünme" bütçesi — analiz süresinin en büyük belirleyicisi.
  *
- * Aday sayısı arttıkça bağlamı tutmak zorlaştığı için uzun belgelerde kademe
- * yükselir. `GEMINI_THINKING_LEVEL` ile elle sabitlenebilir.
+ * Temel çıkarım/yönlendirme LOW, teknik çıkarım MEDIUM kullanır.
  */
-const THINKING_OVERRIDE = (process.env.GEMINI_THINKING_LEVEL || "").toUpperCase();
-function thinkingLevelFor(pageCount: number): string {
-  if (["LOW", "MEDIUM", "HIGH"].includes(THINKING_OVERRIDE)) return THINKING_OVERRIDE;
-  if (pageCount >= 80) return "HIGH";
-  // Orta boy şartnamelerde bile tasarım/görev ayrımı bağlam muhakemesi ister.
-  return pageCount >= 10 ? "HIGH" : "MEDIUM";
-}
-
-function extractGeminiText(payload: unknown) {
-  if (!payload || typeof payload !== "object") return "";
-  const candidates = (payload as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }).candidates;
-  return candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
-}
-
-/**
- * Model cevabı çıktı tavanına dayanıp KESİLDİ mi?
- *
- * Kesilmiş cevap geçersiz JSON olarak geliyor ve kullanıcı "şemaya uygun JSON
- * olarak okunamadı" gibi sebebi anlaşılmayan bir hata görüyordu. Gerçek sebep
- * belgenin tek cevaba sığmayacak kadar çok kural adayı içermesidir; mesaj bunu
- * söylemeli ve yöneticiye ne yapacağını anlatmalıdır.
- */
-function truncatedByTokenLimit(payload: unknown): boolean {
-  const candidates = (payload as { candidates?: Array<{ finishReason?: string }> })?.candidates;
-  return candidates?.[0]?.finishReason === "MAX_TOKENS";
-}
-
-const TRUNCATED_OUTPUT_MESSAGE =
-  "Belge tek analiz cevabına sığmadı: model çıktısı token sınırına ulaştığı için kesildi ve "
-  + "sonuç kaydedilmedi. Şartname çok sayıda kural adayı içeriyor. Belgeyi bölümler hâlinde "
-  + "(ör. yalnızca rapor kuralları içeren bölümler) yükleyerek yeniden deneyin. Sorun sürerse "
-  + "GEMINI_MODEL için daha yüksek çıktı kapasiteli bir model seçin.";
+// Eski HIGH ortam ayarı geçişlere özel düşünme düzeylerini değiştirmez.
+const THINKING_LEVEL = CRITERIA_THINKING_LEVEL;
 
 /**
  * Aynı belgenin yeniden analizini önleyen İKİ KATLI önbellek.
@@ -157,7 +104,8 @@ function cacheableExtraction(extraction: CachedExtraction, structure: Structured
   if (!extraction.raw || typeof extraction.raw !== "object") return false;
   try {
     const candidateIds = new Set(selection.candidates.map((candidate) => candidate.block.sourceId));
-    return normalizeExtraction(extraction.raw, extraction.pageCount, structure.blocks, candidateIds).criteria.length > 0;
+    const checked = normalizeExtraction(extraction.raw, extraction.pageCount, structure.blocks, candidateIds);
+    return checked.criteria.length > 0 && checked.stats.unansweredCandidates === 0;
   } catch {
     return false;
   }
@@ -180,17 +128,6 @@ function inflightAnalyses(): Map<string, Promise<CachedExtraction | null>> {
 async function documentHash(bytes: ArrayBuffer) {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
-}
-
-function extractUsage(payload: unknown) {
-  const usage = (payload as {
-    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number; totalTokenCount?: number };
-  })?.usageMetadata;
-  return {
-    prompt: usage?.promptTokenCount ?? 0,
-    output: (usage?.candidatesTokenCount ?? 0) + (usage?.thoughtsTokenCount ?? 0),
-    total: usage?.totalTokenCount ?? 0,
-  };
 }
 
 /** Bu isteğin OCR ayak izi; önbellek isabetinde de sonuç OCR uyarısını taşır. */
@@ -258,15 +195,6 @@ function buildResult(
       ...(ocr.used ? { textExtraction: "gemini_ocr" as const, ocrApiCalls: ocr.apiCalls, ocrMs: ocr.modelMs } : {}),
     },
   };
-}
-
-function documentContextOf(structure: StructuredPdf): string {
-  const selected = structure.blocks.filter((block, index) => (
-    index < 10 || block.blockType === "HEADING" || block.pageNumber === structure.pageCount
-  )).slice(0, 80);
-  return selected.map((block) => (
-    `${block.sourceId} | s.${block.pageNumber} | ${block.blockType} | ${block.originalText}`
-  )).join("\n");
 }
 
 async function saveCoverageArtifact(
@@ -452,6 +380,7 @@ export async function POST(request: Request) {
     // Önbellek isabetinde `apiCalls: 0` yazılır; sayı uydurulmaz.
     const cacheContext = JSON.stringify({
       promptVersion: EXTRACTION_PROMPT_VERSION,
+      generationVersion: CRITERIA_GENERATION_VERSION,
       document: docHash,
       model: PRIMARY_MODEL,
       // Çözünürlük, düşünme bütçesi ve çıktı tavanı sonucu değiştirir; ayar
@@ -461,9 +390,10 @@ export async function POST(request: Request) {
       dictionaryVersion: DICTIONARY_VERSION,
       selectorVersion: CANDIDATE_SELECTOR_VERSION,
       candidateSourceIds: selection.candidates.map((candidate) => candidate.block.sourceId),
-      thinking: thinkingLevelFor(pageCount),
+      thinking: THINKING_LEVEL,
+      coreThinking: CRITERIA_CORE_THINKING_LEVEL,
       maxOutputTokens: MAX_OUTPUT_TOKENS,
-      temperature: 0,
+      temperature: CRITERIA_TEMPERATURE,
       pageCount,
       // OCR alanları YALNIZCA OCR kullanıldığında eklenir: metin katmanlı
       // belgelerin anahtar dizgesi bayt bayt aynı kalır ve mevcut D1/bellek
@@ -554,48 +484,14 @@ export async function POST(request: Request) {
     inflightKey = cacheKey;
     inflightAnalyses().set(cacheKey, new Promise((resolve) => { settleInflight = resolve; }));
 
-    const candidatesText = formatCandidatesForLlm(selection.candidates);
-    const prompt = buildExtractionPrompt({
-      pageCount,
-      totalBlocks: structure.blocks.length,
-      candidateCount: selection.candidates.length,
-      documentContext: documentContextOf(structure),
-      candidatesText,
-    });
-
-    /** TEK üretim çağrısının gövdesi: PDF yerine doğrulanmış aday metinleri. */
-    const body = JSON.stringify({
-      systemInstruction: { parts: [{ text: EXTRACTION_SYSTEM_INSTRUCTION }] },
-      contents: [{
-        role: "user",
-        parts: [{ text: prompt }],
-      }],
-      generationConfig: {
-        // Sıcaklık 0 değişkenliği azaltır; yeni model çağrıları için birebir
-        // aynı sonucu garanti etmez. Normal tekrarların tutarlılığını sürümlü
-        // önbellek sağlar; refresh yalnızca bilinçli yeni analiz içindir.
-        temperature: 0,
-        topP: 1,
-        thinkingConfig: { thinkingLevel: thinkingLevelFor(pageCount) },
-        maxOutputTokens: MAX_OUTPUT_TOKENS,
-        responseMimeType: "application/json",
-        responseJsonSchema: extractionSchemaForCandidates(
-          selection.candidates.map((candidate) => candidate.block.sourceId),
-        ),
-      },
-    });
-
-    let modelUsed = PRIMARY_MODEL;
-    /**
-     * Gerçekten yapılan `generateContent` isteği sayısı; tanılamaya bu yazılır.
-     * OCR aktarımı yapıldıysa o çağrı da sayılır (dürüst toplam, 2 olabilir).
-     */
-    let apiCalls: number = ocr.apiCalls;
+    const modelUsed = PRIMARY_MODEL;
+    let apiCalls = ocr.apiCalls;
+    let generationUsage: GenerationUsage = { prompt: 0, output: 0, total: 0, thoughts: 0 };
 
     const failWith = (status: number, detail: string, retryableOverride?: boolean) => {
       console.error("AI analiz isteği başarısız:", { status, detail, apiCalls });
-      // Sınıflandırma düşse bile bu istekte yapılmış OCR çağrısı ve tokenları kayıttan silinmez.
-      recordUsage({ model: modelUsed, promptTokens: ocrUsage.prompt, outputTokens: ocrUsage.output, totalTokens: ocrUsage.total, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls });
+      // Başarısız/taşmış gruplar dahil bütün model ve OCR kullanımı kaydedilir.
+      recordUsage({ model: modelUsed, promptTokens: generationUsage.prompt + ocrUsage.prompt, outputTokens: generationUsage.output + ocrUsage.output, totalTokens: generationUsage.total + ocrUsage.total, durationMs: Date.now() - startedAt, cached: false, error: true, apiCalls });
       const failure = describeGeminiFailure(status, detail, "AI belge analizi");
       // `retryable` istemciye "Yeniden dene" düğmesini göstermesini söyler;
       // sunucu kendiliğinden ikinci bir çağrı yapmaz.
@@ -606,46 +502,14 @@ export async function POST(request: Request) {
     };
 
     const modelStartedAt = Date.now();
-    // TEK çağrı: yedek model, tarama turu ve gizli yeniden deneme yoktur.
-    const outcome = await runSingleGeneration({
-      apiKey,
-      body,
-      model: PRIMARY_MODEL,
-      timeoutMs: GENERATION_TIMEOUT_MS,
-      label: "analyze",
-    });
+    const generated = await generatePrioritizedCriteria({ apiKey, model: PRIMARY_MODEL, structure, selection });
     const modelMs = Date.now() - modelStartedAt;
-    apiCalls = ocr.apiCalls + outcome.apiCalls;
-    if (!outcome.ok) return failWith(outcome.status, outcome.detail);
-    modelUsed = outcome.model;
-
-    const responseText = extractGeminiText(outcome.payload);
-    // Çıktı token tavanına takılan yanıt JSON ortasından kesilir; bunu genel
-    // "JSON okunamadı" cümlesiyle maskelemek kök nedeni görünmez kılıyordu.
-    // Kesilme, boş yanıttan ve bozuk JSON'dan ÖNCE kontrol edilir: sebebi bilinen
-    // bir başarısızlığı "geçersiz çıktı" diye raporlamak yanıltıcıydı.
-    const finishReason = (outcome.payload as { candidates?: Array<{ finishReason?: string }> })
-      ?.candidates?.[0]?.finishReason ?? "";
-    if (truncatedByTokenLimit(outcome.payload)) return failWith(502, TRUNCATED_OUTPUT_MESSAGE);
-    if (!responseText) return failWith(502, `Belge analizi için geçerli yapılandırılmış çıktı alınamadı${finishReason ? ` (finishReason: ${finishReason})` : ""}.`);
-    let raw: RawExtraction;
-    try {
-      raw = JSON.parse(responseText) as RawExtraction;
-    } catch {
-      return failWith(502, `Belge analizi şemaya uygun JSON olarak okunamadı${finishReason ? ` (finishReason: ${finishReason})` : ""}.`);
-    }
-    // JSON.parse "null" gibi nesne olmayan gövdeleri de geçirir; böyle bir
-    // gövde normalizasyonda patlar ve önbelleğe girerse her isteği düşürürdü.
-    if (!raw || typeof raw !== "object") {
-      return failWith(502, "Belge analizi şemaya uygun JSON olarak okunamadı.");
-    }
-
-    // Geçerli JSON, eksiksiz analiz demek değildir. Gemini bazı koşularda
-    // yalnızca kabul ettiği kriterleri döndürüp adayların büyük bölümünü sessizce
-    // atlayabiliyor. Eksik kapsamı başarı diye kaydetmek 129 adaylı bir belgeyi
-    // yanıltıcı biçimde 13 kriterle tamamlanmış gösteriyordu. Tek çağrı politikası
-    // korunur: sunucu gizlice yeniden denemez; eksik sonucu kaydetmez ve kullanıcıya
-    // açık, yeniden denenebilir hata verir.
+    apiCalls = ocr.apiCalls + generated.apiCalls;
+    generationUsage = generated.usage;
+    if (!generated.ok) return failWith(generated.status, generated.detail);
+    const raw = generated.raw;
+    const responseText = JSON.stringify(raw);
+    // Grup kapsamına ek olarak belgenin tamamını mevcut kaynak doğrulayıcıdan geçir.
     const candidateIds = new Set(selection.candidates.map((candidate) => candidate.block.sourceId));
     const coverageCheck = normalizeExtraction(raw, pageCount, structure.blocks, candidateIds);
     if (coverageCheck.stats.unansweredCandidates > 0) {
@@ -678,7 +542,7 @@ export async function POST(request: Request) {
     }
 
     const totalMs = Date.now() - startedAt;
-    const usage = extractUsage(outcome.payload);
+    const usage = generationUsage;
     // Kullanım kaydı işlem başına tektir ve dürüst toplamı taşır:
     // sınıflandırma + (varsa) OCR aktarım tokenları ve çağrı sayısı.
     recordUsage({

@@ -229,10 +229,13 @@ test("başvuru sonucu yalnızca hakem incelemesiyle yazılır", () => {
  * Tek LLM çağrısı
  * --------------------------------------------------------------------- */
 
-test("şartname analizi tek generateContent çağrısı yapar", () => {
+test("şartname analizi aynı modeli sınırlı gruplarla kullanır", () => {
   assert.ok(!/GEMINI_FALLBACK_MODEL|GEMINI_THIRD_MODEL/.test(ANALYZE_ROUTE), "Yedek model kademesi kalmamalı.");
   assert.ok(!/MODEL_SWEEPS|MODEL_RETRY_BUDGET_MS|markModelUnavailable/.test(ANALYZE_ROUTE), "Model taraması ve gizli yeniden deneme kalmamalı.");
-  assert.match(ANALYZE_ROUTE, /runSingleGeneration\(/, "Tek çağrı katmanı kullanılmalı.");
+  const priority = readFileSync("app/lib/criteria-priority.ts", "utf8");
+  assert.match(priority, /input.generate \?\? runSingleGeneration/, "Tek çağrı katmanı kullanılmalı.");
+  assert.match(priority, /generateCriteriaInBatches\(/, "Belge adayları sınırlı gruplarda işlenmeli.");
+  assert.match(ANALYZE_ROUTE, /generatePrioritizedCriteria\(/);
   assert.ok(!/apiCalls: 1,/.test(ANALYZE_ROUTE), "Tanılamaya sabit 'apiCalls: 1' yazılmamalıdır.");
   assert.match(ANALYZE_ROUTE, /apiCalls,/, "Gerçek çağrı sayısı tanılamaya yazılmalıdır.");
   assert.match(
@@ -270,8 +273,8 @@ test("kaynak sayfa sınırı sunucuda belgeden okunur, istemciye bırakılmaz", 
 });
 
 test("üretim ayarları kararlı ve token bütçesi sınırlı", () => {
-  assert.match(ANALYZE_ROUTE, /temperature: 0/, "Kural çıkarımında sıcaklık 0 olmalıdır.");
-  assert.match(ANALYZE_ROUTE, /maxOutputTokens: MAX_OUTPUT_TOKENS/, "Çıktı tavanı sabitten okunmalıdır.");
+  assert.match(ANALYZE_ROUTE, /temperature: CRITERIA_TEMPERATURE/, "Önbellek üretimle aynı sıcaklığı kullanmalıdır.");
+  assert.match(readFileSync("app/lib/criteria-priority.ts", "utf8"), /maxOutputTokens: CRITERIA_OUTPUT_TOKENS/, "Çıktı tavanı sabitten okunmalıdır.");
   assert.ok(!/maxOutputTokens: 65536/.test(ANALYZE_ROUTE), "Eski 64k çıktı tavanı kalmamalıdır.");
 });
 
@@ -495,9 +498,11 @@ test("hakem ekranında kanıtı PDF'de gösteren uygulama içi panel ve aşama i
   // şeridindeki "ŞÜPHELİ/Normal" satırı kaldırıldı, bağımsız kart gösterir.
   assert.match(evaluation, /Raporlar arası benzerlik/, "Bağımsız benzerlik kartı bulunmalıdır.");
   // Şüpheli/Normal işareti kaybolmaz; yalnızca kendi notunda (bağımsız kartta) durur.
-  assert.match(evaluation, /ŞÜPHELİ/, "Benzerlik işareti kendi notunda Şüpheli/Normal olarak gösterilmelidir.");
+  // "ŞÜPHELİ" suçlayıcı ifadesi kaldırıldı (madde 3): işaret kendi notunda
+  // "inceleme önerilir" olarak, karar hakemde kalacak biçimde gösterilir.
+  assert.match(evaluation, /inceleme önerilir/, "Benzerlik işareti kendi notunda gösterilmelidir.");
   const strip = evaluation.slice(evaluation.indexOf("function StageStrip"), evaluation.indexOf("type RejectDraft"));
-  assert.doesNotMatch(strip, /ŞÜPHELİ/, "Şüpheli/Normal işareti aşama şeridine geri sızmamalıdır.");
+  assert.doesNotMatch(strip, /inceleme önerilir|ŞÜPHELİ/, "Benzerlik işareti aşama şeridine geri sızmamalıdır.");
 
   const viewer = readFileSync("app/components/pdf-evidence-viewer.tsx", "utf8");
   // Adres parçasına güvenilmez: sayfa doğrudan çizilir.
