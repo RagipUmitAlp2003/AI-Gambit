@@ -494,7 +494,7 @@ console.log("Language and competition lookup regression tests: PASS");
   const login = readFileSync("app/components/access-login.tsx", "utf8");
   assert(!/devLogin/.test(login), "Giriş ekranında şifresiz rol kısayolu olmamalıdır.");
   assert(!/QUICK_ROLES/.test(login), "Giriş ekranında rol seçimi olmamalıdır.");
-  assert(/Kullanıcı adı veya e-posta/.test(login), "Tek giriş formu kullanıcı adı kabul etmelidir.");
+  assert(/Kullanıcı E-Postası/.test(login), "Tek giriş formu kullanıcı adı kabul etmelidir.");
 
   const client = readFileSync("app/lib/admin-client.ts", "utf8");
   assert(!/dev-session/.test(client), "İstemci artık rol kısayolu ucunu çağırmamalıdır.");

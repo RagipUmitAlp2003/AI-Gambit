@@ -9,6 +9,7 @@ import JudgeQueuePanel from "./judge-queue-panel";
 import OperationsPanel from "./operations-panel";
 import ParticipantPortal from "./participant-portal";
 import PasswordChangeGate from "./password-change-gate";
+import T3Lockup from "./t3-lockup";
 import ManagerProfileHistory from "./manager-profile-history";
 import { AdminApiError, adminApi } from "../lib/admin-client";
 import { PARTICIPANT_ROLE, ROLES, roleByCode } from "../lib/admin-roles";
@@ -183,6 +184,7 @@ export default function ManagementApp() {
             </button>
           ))}
         </nav>
+        <T3Lockup className="management-sidebar-logo" />
         <div className="signed-user">
           <span>{session.roleCode}</span>
           <div><strong>{session.fullName}</strong><small>{role?.title}</small></div>
