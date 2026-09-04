@@ -35,6 +35,18 @@ function database() {
   return db;
 }
 
+test("a stale tab cannot finalize an already completed review, even after a fresh server read", () => {
+  const db = database();
+  try {
+    db.exec(`UPDATE competition_applications SET status = 'completed', review_json = '{"draftSavedAt":null}'`);
+    const result = db.prepare(sql(reviewBody, "UPDATE competition_applications")).run(
+      "completed", '{"outcome":"rejected"}', "j1", "Hakem", "t3", "t3",
+      "a1", "completed", '{"draftSavedAt":null}', "pdf1", "j1", 1, "t1");
+    assert.equal(result.changes, 0);
+    assert.equal(db.prepare("SELECT review_json FROM competition_applications").get()!.review_json, '{"draftSavedAt":null}');
+  } finally { db.close(); }
+});
+
 test("iki eşzamanlı taslak okumasından yalnızca ilki yazabilir; ikinci sonuç tablosunu da değiştiremez", () => {
   const db = database();
   try {

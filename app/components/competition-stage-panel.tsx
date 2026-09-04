@@ -1,4 +1,5 @@
 "use client";
+import { useLiveRefresh } from "./use-live-refresh";
 
 import { useEffect, useState } from "react";
 import { formatDateTime } from "../lib/admin-client";
@@ -64,6 +65,7 @@ export default function CompetitionStagePanel() {
   }
 
   useEffect(() => { load(); }, []);
+  useLiveRefresh(load, !loading && !busyId);
 
   async function move(competition: CompetitionWorkflow, nextStatus: CompetitionStatus, label: string) {
     setBusyId(competition.id);

@@ -1,4 +1,5 @@
 "use client";
+import { useLiveRefresh } from "./use-live-refresh";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import CompetitionSelect from "./competition-select";
@@ -92,6 +93,17 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
   const [openCompetitions, setOpenCompetitions] = useState<CompetitionEntry[] | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const submitRef = useRef<HTMLDivElement>(null);
+  useLiveRefresh(async () => {
+    try {
+      const result = await workflowApi.applications();
+      setApplications(result.applications);
+      setOpenCompetitions(result.openCompetitions ?? []);
+      setError("");
+    } catch {
+      setOpenCompetitions([]);
+      setError("Yarışma listesi yenilenemedi. Bağlantı geldiğinde yeniden denenecek; formunuz korunuyor.");
+    }
+  });
 
   // Seçilen yarışma önce BAŞVURUYA AÇIK listede aranır: yayımlanmış profilin adı
   // şartnameden gelir ve koddaki sabit havuzda bulunmayabilir.

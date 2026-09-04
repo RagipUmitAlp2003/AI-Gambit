@@ -157,45 +157,23 @@ test("bozuk JSON ve üretim arızası fırlatmadan ok:false döner (senaryo 10)"
 
 /* ------------- Kaynak denetimi: rota kablolaması (iki aşamalı kayıt) ------------- */
 
-test("rota: deterministik sonuç LLM'den ÖNCE kaydedilir; arıza sonucu kaybettirmez", () => {
+test("otomatik rota üretken LLM çağırmaz; matematiksel sonucu tek aşamada kaydeder", () => {
   const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  const firstSave = route.indexOf("await saveSimilarityResult({ ...saveInput");
-  const llmCall = route.indexOf("explainSimilarityMatches({");
-  assert.ok(firstSave >= 0 && llmCall >= 0);
-  assert.ok(firstSave < llmCall,
-    "MinHash+embedding sonucu LLM çağrısından ÖNCE kalıcı olmalıdır (iki aşamalı kayıt).");
-  assert.match(route, /llmStatus = "failed"/, "Arıza llmStatus=failed olarak damgalanmalıdır.");
-  assert.match(route, /Açıklama kontrolü tamamlanamadı/,
-    "Arızada hakeme 'Açıklama kontrolü tamamlanamadı' notu düşülmelidir (madde 5).");
-  assert.match(route, /llmStatus = "skipped"/, "Kapalı/uygunsuz durum skipped olarak işaretlenir.");
+  assert.match(route, /await saveSimilarityResult\(\{ \.\.\.saveInput/);
+  assert.doesNotMatch(route, /explainSimilarityMatches\(\{/);
+  assert.match(route, /llmApiCalls: 0/);
 });
 
-test("rota: LLM yüzdeyi, seviyeyi, sayfayı ve alıntıyı DEĞİŞTİREMEZ", () => {
+test("otomatik rotada LLM yüzdeyi, seviyeyi, sayfayı ve alıntıyı değiştiremez", () => {
   const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  const llmStart = route.indexOf("if (llmActive) {");
-  const llmBlock = route.slice(llmStart, route.indexOf("return json({", llmStart));
-  assert.ok(llmStart >= 0 && llmBlock.length > 0, "LLM bloğu bulunmalıdır.");
-  // Birleştirme YALNIZCA llm* açıklama alanlarını yazar.
-  assert.ok(!/\.approxPercent\s*=/.test(llmBlock), "LLM bloğu yüzdeye yazamaz.");
-  assert.ok(!/\blevel\s*=/.test(llmBlock), "LLM bloğu seviyeye yazamaz.");
-  assert.ok(!/\.ownPage\s*=|\.peerPage\s*=/.test(llmBlock), "LLM bloğu sayfalara yazamaz.");
-  assert.ok(!/\.ownQuote\s*=|\.peerQuote\s*=/.test(llmBlock), "LLM bloğu alıntılara yazamaz.");
-  assert.match(llmBlock, /target\.llmClass = annotation\.sinif/, "Yalnızca açıklama alanları birleştirilir.");
-  // Sayfa ve alıntılar sunucunun kendi eşleşme verisinden yankılanır.
-  assert.match(route, /ownExcerpt: ownChunk \? excerptOf\(ownChunk\.text\) : ""/,
-    "Modele giden alıntı sunucunun deterministik verisinden gelmelidir.");
+  assert.doesNotMatch(route, /target\.llmClass|target\.llmExplanation|target\.llmAssessment/);
 });
 
-test("rota: kill switch + maliyet kapıları LLM çağrısını korur", () => {
+test("otomatik rota her durumda üretken LLM'i kapalı tutar", () => {
   const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  assert.match(route, /similarityLlmEnabled\(\)/, "SIMILARITY_LLM_ENABLED anahtarı denetlenmelidir.");
-  assert.match(route, /body\.skipLlm !== true/, "Test koşuları skipLlm ile LLM'i atlayabilmelidir.");
-  assert.match(route, /&& !skipEmbedding/,
-    "skipEmbedding'li (ücretsiz test) koşular LLM ücreti de ödememelidir.");
-  assert.match(route, /level !== "normal" && matches\.length > 0/,
-    "Normal seviyede ve eşleşmesiz sonuçta LLM çağrılmaz (maliyet).");
-  assert.match(route, /llmInputs\.slice\(0, thresholds\.llmTopK\)/,
-    "Modele en fazla K (varsayılan 3) eşleşme gider.");
+  assert.doesNotMatch(route, /similarityLlmEnabled\(\)|body\.skipLlm|llmInputs/);
+  assert.match(route, /report\.llmStatus = "skipped"/);
+  assert.match(route, /llmApiCalls: 0/);
   const config = readFileSync("app/lib/similarity-config.ts", "utf8");
-  assert.match(config, /SIMILARITY_LLM_ENABLED/, "Kapatma anahtarı yapılandırma modülünde tanımlıdır.");
+  assert.match(config, /SIMILARITY_LLM_ENABLED/, "Eski dağıtımlar için yapılandırma geriye uyumlu kalır.");
 });

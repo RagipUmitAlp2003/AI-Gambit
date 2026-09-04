@@ -2464,7 +2464,8 @@ export type EvaluationContextFailure =
   | "forbidden"
   | "criteria_missing"
   | "document_missing"
-  | "competition_archived";
+  | "competition_archived"
+  | "competition_locked";
 
 /**
  * Başvurunun değerlendirme bağlamını YALNIZCA sunucu kaynaklarından kurar.
@@ -2479,6 +2480,7 @@ export async function resolveEvaluationContext(
     `SELECT a.id, a.competition_key, a.competition_name, a.profile_id, a.status,
             a.assigned_judge_id, a.current_version_id, a.file_key, a.file_name,
             c.deleted_at AS competition_deleted_at, c.is_active AS competition_is_active,
+            c.status AS competition_status, c.decisions_locked AS competition_locked,
             v.file_key AS version_file_key, v.file_name AS version_file_name,
             v.version_number AS version_number
      FROM competition_applications a
@@ -2490,12 +2492,14 @@ export async function resolveEvaluationContext(
     status: string; assigned_judge_id: string | null; current_version_id: string | null;
     file_key: string; file_name: string;
     competition_deleted_at: string | null; competition_is_active: number | null;
+    competition_status: string | null; competition_locked: number | null;
     version_file_key: string | null; version_file_name: string | null; version_number: number | null;
   }>();
   if (!row) return "not_found";
   // Hakem yalnızca KENDİSİNE atanmış başvuruyu değerlendirebilir.
   if (actor.roleCode === "02" && row.assigned_judge_id !== actor.id) return "forbidden";
-  if (row.competition_deleted_at) return "competition_archived";
+  if (row.competition_deleted_at || row.competition_status === "archived") return "competition_archived";
+  if (row.competition_locked === 1) return "competition_locked";
 
   // 1) Yarışmanın SON yayımlanmış kriter sürümü — istemci ne gönderirse göndersin.
   const latest = await findLatestCriteriaVersion(row.competition_key);
@@ -2575,7 +2579,10 @@ export async function markApplicationAnalyzing(id: string, judge: AdminAccount):
   const result = await database.prepare(
     `UPDATE competition_applications
      SET status = 'analyzing', profile_id = ?, judge_id = ?, judge_name = ?, updated_at = ?
-     WHERE id = ? AND status IN ('assigned', 'resubmitted', 'analysis_failed', 'awaiting_judge', 'judge_in_review')`,
+     WHERE id = ? AND status IN ('assigned', 'resubmitted', 'analysis_failed', 'awaiting_judge', 'judge_in_review')
+       AND NOT EXISTS (SELECT 1 FROM competitions c
+         WHERE c.competition_key = competition_applications.competition_key
+           AND (c.decisions_locked = 1 OR c.status = 'archived' OR c.deleted_at IS NOT NULL))`,
   ).bind(profile.id, judge.id, judge.fullName, new Date().toISOString(), id).run();
   if (!result.meta.changes) return "conflict";
   await recordWorkflowEvent({
@@ -2939,7 +2946,7 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
       + "çalışmanız yazılmadı. Sayfayı yenileyip güncel kararların üzerine devam edin.",
     );
   }
-  if (!completed && before.status === "completed") {
+  if (before.status === "completed") {
     throw new ConflictError("Kesinleşmiş kararın üzerine taslak yazılamaz; önce kararı yeniden açın.");
   }
   const draftScope = evaluation ? {
@@ -2958,7 +2965,7 @@ export async function saveApplicationReview(id: string, judge: AdminAccount, rev
   const reviewBatch = await database.batch([database.prepare(
     `UPDATE competition_applications
      SET status = ?, review_json = ?, judge_id = ?, judge_name = ?, updated_at = ?, completed_at = ?
-     WHERE id = ? AND status IN ('awaiting_judge', 'judge_in_review', 'completed')
+     WHERE id = ? AND status IN ('awaiting_judge', 'judge_in_review')
        AND status = ? AND review_json IS ? AND file_key IS ?
        AND assigned_judge_id IS ? AND evaluation_criteria_version IS ?
        AND json_extract(evaluation_json, '$.analyzedAt') IS ?
@@ -3609,6 +3616,47 @@ export async function listSimilarityChunkBatch(
   return groupPeerChunkRows(rows);
 }
 
+export type BulkSimilarityPoolEntry = {
+  applicationId: string;
+  submissionVersionId: string;
+  participantLabel: string;
+  assignedJudgeId: string | null;
+  prepared: boolean;
+};
+
+/** Current, non-archived submissions and whether their current PDF has comparable chunks. */
+export async function listBulkSimilarityPool(
+  competitionKey: string,
+  pipelineVersion: string,
+): Promise<BulkSimilarityPoolEntry[]> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(
+    `SELECT a.id, a.current_version_id, a.assigned_judge_id,
+            COALESCE(d.team_name, a.participant_name) AS participant_label,
+            CASE WHEN EXISTS (
+              SELECT 1 FROM similarity_chunks s
+               WHERE s.application_id = a.id
+                 AND s.submission_version_id = a.current_version_id
+                 AND s.pipeline_version = ?
+            ) THEN 1 ELSE 0 END AS prepared
+       FROM competition_applications a
+       LEFT JOIN application_submission_details d ON d.application_id = a.id
+       WHERE a.competition_key = ? AND a.deleted_at IS NULL
+         AND a.current_version_id IS NOT NULL
+       ORDER BY a.id`,
+  ).bind(pipelineVersion, competitionKey).all<{
+    id: string; current_version_id: string; assigned_judge_id: string | null;
+    participant_label: string; prepared: number;
+  }>();
+  return (result.results ?? []).map((row) => ({
+    applicationId: row.id,
+    submissionVersionId: row.current_version_id,
+    participantLabel: row.participant_label,
+    assignedJudgeId: row.assigned_judge_id,
+    prepared: Number(row.prepared) === 1,
+  }));
+}
+
 /**
  * İşaret izi geri yazımı (madde 8): kayıtlı vektörden ÜCRETSİZ üretilen iz,
  * bir sonraki koşuda yeniden hesaplanmasın diye satıra işlenir. YALNIZCA
@@ -3760,6 +3808,48 @@ export async function findSimilarityResult(
   return stale
     ? { ...report, stale: true, staleReason: staleReason || "Benzerlik sonucu güncel değil; analizi yenileyin." }
     : report;
+}
+
+export type BulkSimilarityResultEntry = {
+  applicationId: string;
+  closestApplicationId: string | null;
+  submissionVersionId: string;
+  participantLabel: string;
+  assignedJudgeId: string | null;
+  report: SimilarityReport;
+};
+
+/** Current-PDF mathematical results; stale rows remain visible for cross-report pair discovery. */
+export async function listBulkSimilarityResults(
+  competitionKey: string,
+  pipelineVersion: string,
+): Promise<BulkSimilarityResultEntry[]> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(
+    `SELECT r.application_id, r.submission_version_id, r.closest_application_id, r.report_json, a.assigned_judge_id,
+            COALESCE(d.team_name, a.participant_name) AS participant_label
+       FROM similarity_results r
+       INNER JOIN competition_applications a
+         ON a.id = r.application_id AND a.current_version_id = r.submission_version_id
+       LEFT JOIN application_submission_details d ON d.application_id = a.id
+       WHERE r.competition_key = ? AND r.pipeline_version = ?
+         AND r.status IN ('completed', 'partial', 'stale') AND a.deleted_at IS NULL
+       ORDER BY r.application_id`,
+  ).bind(competitionKey, pipelineVersion).all<{
+    application_id: string; submission_version_id: string; closest_application_id: string | null; report_json: string;
+    assigned_judge_id: string | null; participant_label: string;
+  }>();
+  return (result.results ?? []).flatMap((row) => {
+    const report = parseJson<SimilarityReport>(row.report_json);
+    return report ? [{
+      applicationId: row.application_id,
+      closestApplicationId: row.closest_application_id,
+      submissionVersionId: row.submission_version_id,
+      participantLabel: row.participant_label,
+      assignedJudgeId: row.assigned_judge_id,
+      report,
+    }] : [];
+  });
 }
 
 /** Rapor düzeyi benzerlik sonucunu bu PDF sürümüne bağlı olarak kaydeder. */

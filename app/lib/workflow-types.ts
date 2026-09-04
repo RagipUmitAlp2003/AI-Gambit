@@ -111,6 +111,13 @@ export type CompetitionWorkflow = {
   updatedAt: string;
 };
 
+/** Passive is not frozen: existing reviews remain editable. Missing state fails closed. */
+export function competitionReadOnly(competition: CompetitionWorkflow | null | undefined): boolean {
+  return !competition || Boolean(competition.archivedAt) || competition.status === "archived"
+    || competition.decisionsLocked || competition.status === "decisions_frozen"
+    || competition.status === "results_published";
+}
+
 /**
  * Değişmez kriter sürümü.
  *

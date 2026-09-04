@@ -736,8 +736,10 @@ console.log("Integrity, lifecycle and login regression tests: PASS");
   assert(!/decision\.decidedAt \?\? timestamp/.test(reviewBody), "İstemcinin decidedAt değeri saklanmamalıdır.");
   assert(/aiVerdictOf\(finding\.verdict\)/.test(reviewBody), "aiVerdict kayıtlı bulgudan yeniden türetilmelidir.");
   // Nihai yazma yarış korumalıdır: koşul WHERE'de tutulur ve değişiklik doğrulanır.
-  assert(/WHERE id = \? AND status IN \('awaiting_judge', 'judge_in_review', 'completed'\)/.test(reviewBody),
+  assert(/WHERE id = \? AND status IN \('awaiting_judge', 'judge_in_review'\)/.test(reviewBody),
     "Nihai karar yazımı durum koşulunu WHERE içinde tutmalıdır.");
+  assert(/if \(before\.status === "completed"\)/.test(reviewBody),
+    "Kesinleşmiş karar yeniden açılmadan başka bir final kararıyla ezilmemelidir.");
   assert(/reviewBatch\[0\]\?\.meta\.changes/.test(reviewBody), "Yarış durumunda karar yazımı açık hata vermelidir.");
 
   // AI sonucu kaydı ve 'analiz başarısız' işareti kesinleşmiş/kilitli kararı BOZAMAZ.

@@ -1162,13 +1162,8 @@ test("durum adlandırması: başarısız/eksik/yapılmamış karşılaştırma '
   assert.match(app, /AI açıklaması için seçilen kanıt/, "AI açıklamasına giden kanıt ayrı gösterilmelidir.");
 });
 
-test("LLM maliyet kapısı: havuz büyüse de açıklama TEK rapor ve en fazla 3 kanıt üzerinden istenir", () => {
+test("otomatik benzerlikte üretken LLM maliyeti yoktur", () => {
   const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  assert.match(route, /best\.matches\.slice\(0, 3\)/, "En fazla üç eşleşme kanıtı seçilmelidir.");
-  assert.match(route, /llmInputs\.slice\(0, thresholds\.llmTopK\)/, "Kanıt sayısı yapılandırılabilir tavanla sınırlıdır.");
-  assert.match(route, /level !== "normal" && matches\.length > 0 && llmInputs\.length > 0/,
-    "Güçlü eşleşme yoksa LLM çağrısı YAPILMAZ (0 çağrı).");
-  // Havuzdaki her rapor için ayrı çağrı döngüsü kurulamaz.
-  assert.ok(!/for\s*\([^)]*peers[^)]*\)\s*\{[\s\S]{0,400}annotateSimilarityMatches/.test(route),
-    "Havuza yayılmış LLM çağrı döngüsü kurulmamalıdır.");
+  assert.doesNotMatch(route, /explainSimilarityMatches\(\{/);
+  assert.match(route, /llmApiCalls: 0/);
 });

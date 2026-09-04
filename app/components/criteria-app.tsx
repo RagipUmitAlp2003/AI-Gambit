@@ -1,4 +1,5 @@
 "use client";
+import ElapsedTime from "./elapsed-time";
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -355,7 +356,7 @@ function UploadStep({
       {loading ? (
         <div className="analysis-progress" role="status" aria-live="polite">
           <span className="progress-spinner" />
-          <div><strong>Belge anlamlandırılıyor</strong><p>{loadingMessage}</p></div>
+          <div><strong>Belge anlamlandırılıyor</strong><p>{loadingMessage}</p><ElapsedTime /></div>
           <div className="progress-line"><span /></div>
         </div>
       ) : null}

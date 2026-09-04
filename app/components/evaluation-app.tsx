@@ -2,6 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import ElapsedTime from "./elapsed-time";
+import { useLiveRefresh } from "./use-live-refresh";
+import { competitionReadOnly, COMPETITION_STATUS_LABELS } from "../lib/workflow-types";
 import TopbarSession from "./topbar-session";
 import { formatDateTime } from "../lib/admin-client";
 import { extractPdfText } from "../lib/pdf-reader";
@@ -58,6 +61,7 @@ import {
  */
 
 type Mode = "home" | "workshop" | "history";
+type BulkSimilaritySummary = Awaited<ReturnType<typeof workflowApi.bulkSimilarity>>;
 type Outcome = "accepted" | "rejected";
 
 const ANALYZABLE_STATUSES = ["assigned", "resubmitted", "analysis_failed"] as const;
@@ -281,6 +285,7 @@ function CompetitionList({ profiles, applications, competitions, selectedKey, hi
             {/* Değerlendirme Yöneticisi bu yarışmayı acil işaretledi. */}
             {priority ? <em className="priority-badge">🔥 ACİL / ÖNCELİKLİ</em> : null}
             <strong>{entry.name}</strong>
+            <span>{entry.competition ? `${entry.competition.isActive ? "Aktif" : "Pasif"} · ${COMPETITION_STATUS_LABELS[entry.competition.status]}` : "Yarışma durumu alınamadı"}</span>
             <span>{entry.profile ? `${criteriaCount} kriter` : "Kriter profili yok"} · {count} {history ? "tamamlanan" : "bekleyen"} başvuru</span>
             {priority && entry.competition?.priorityNote ? <span className="priority-reason">{entry.competition.priorityNote}</span> : null}
           </button>
@@ -982,8 +987,9 @@ function LegacySimilarityCard({ similarity }: { similarity: NonNullable<StageRes
   );
 }
 
-function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunning, progress, similarityRun, onAnalyze, onRetrySimilarity, onReviewSaved, onFinalize, onReopen, onDeleteAnalysis, onArchive }: {
+function ApplicationDetail({ application, profile, competition, analyzing, otherAnalysisRunning, progress, similarityRun, onAnalyze, onRetrySimilarity, onReviewSaved, onFinalize, onReopen, onDeleteAnalysis, onArchive }: {
   application: CompetitionApplication;
+  competition: CompetitionWorkflow | null;
   /** Yarışmanın yayımlı profili; kriterlerin şartname kaynak sayfası buradan okunur. */
   profile: CompetitionProfile | null;
   analyzing: boolean;
@@ -1054,13 +1060,14 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
   const [archiveOpen, setArchiveOpen] = useState(false);
 
   // Analiz tek seferde bir başvuru için yürür; düğme GERÇEK durumu yansıtır.
-  const analysisBusy = analyzing || otherAnalysisRunning;
+  const readOnly = competitionReadOnly(competition);
+  const analysisBusy = analyzing || otherAnalysisRunning || readOnly;
   const canAnalyze = (ANALYZABLE_STATUSES as readonly string[]).includes(application.status) && !analysisBusy;
   const canRefresh = !analysisBusy
     && ((ANALYZABLE_STATUSES as readonly string[]).includes(application.status)
       || application.status === "awaiting_judge"
       || application.status === "judge_in_review");
-  const locked = completed;
+  const locked = completed || readOnly;
   /*
    * KRİTER TAZELİĞİ (madde 2): kriterler bu analizden sonra yeniden
    * yayımlandıysa sonuç eskimiştir. Sunucu da bu durumda nihai kararı
@@ -1368,6 +1375,7 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
         </div>
       </header>
 
+      {readOnly ? <p className="inline-error" role="status">{competition ? "Yarışma kilitli veya arşivli; yalnızca görüntüleyebilirsiniz." : "Yarışma durumu doğrulanamadı; düzenleme geçici olarak kapalı."}</p> : null}
       {!evaluation ? (
         <div className="eval-analyze-block">
           <div>
@@ -1381,7 +1389,7 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
           {analyzing ? (
             <div className="analysis-progress" role="status" aria-live="polite">
               <span className="progress-spinner" />
-              <div><strong>Yapay Zekâ Analizi sürüyor</strong><p>{progress}</p></div>
+              <div><strong>Yapay Zekâ Analizi sürüyor</strong><p>{progress}</p><ElapsedTime /></div>
               <div className="progress-line"><span /></div>
             </div>
           ) : (
@@ -1562,8 +1570,8 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
                   ? "Aynı yarışmadaki güncel başvurularla karşılaştırma sürüyor. Kriter kararlarınızı vermek için beklemeniz gerekmez."
                   : similarityRun.message}
               </p>
-              {similarityRun.state === "running" ? null : (
-                <button type="button" className="secondary-button" onClick={() => { void onRetrySimilarity(application); }}>
+              {similarityRun.state === "running" ? <ElapsedTime /> : (
+                <button type="button" className="secondary-button" disabled={readOnly} onClick={() => { void onRetrySimilarity(application); }}>
                   Benzerliği yenile
                 </button>
               )}
@@ -1577,20 +1585,20 @@ function ApplicationDetail({ application, profile, analyzing, otherAnalysisRunni
             NİHAİ KARAR — bütün kriterler sonuçlanmadan AÇILMAZ. Sistem
             "öneriliyor" bile demez; kararı yalnızca hakem verir (madde 4).
           */}
-          {locked ? (
+          {completed ? (
             <div className="eval-decision-bar">
               <div>
                 <strong>Karar verildi: {OUTCOME_LABELS[application.outcome]}</strong>
                 <p>{application.review?.completedAt ? `${formatDateTime(application.review.completedAt)} · ` : ""}Sonuç yarışmacıya iletildi{application.outcomeNote ? `: “${application.outcomeNote}”` : "."}</p>
               </div>
-              <button type="button" className="secondary-button" disabled={busy} onClick={async () => {
+              <button type="button" className="secondary-button" disabled={busy || readOnly} onClick={async () => {
                 setBusy(true);
                 try { await onReopen(application); } finally { setBusy(false); }
               }}>
                 Kararı yeniden aç
               </button>
             </div>
-          ) : pendingOutcome ? (
+          ) : readOnly ? <p role="status">Yarışma durumu nedeniyle değerlendirme salt okunur. Yazdığınız taslak alanları korunuyor.</p> : pendingOutcome ? (
             <div className={`eval-final-panel outcome-${pendingOutcome}`}>
               <div className="eval-final-head">
                 <strong>Nihai karar: {OUTCOME_LABELS[pendingOutcome]}</strong>
@@ -1753,6 +1761,18 @@ export default function EvaluationApp() {
    */
   const [similarityState, setSimilarityState] = useState<Record<string, SimilarityRunState>>({});
   const [progress, setProgress] = useState("");
+  const [competitionError, setCompetitionError] = useState("");
+  const [bulkSimilarity, setBulkSimilarity] = useState<BulkSimilaritySummary | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  useLiveRefresh(async () => {
+    try {
+      const result = await workflowApi.competitions();
+      setCompetitions(result.competitions);
+      setCompetitionError("");
+    } catch {
+      setCompetitionError("Yarışma durumu yenilenemedi. İşlemler geçici olarak kapalı; bağlantı geldiğinde yeniden denenecek.");
+    }
+  }, !loading);
 
   useEffect(() => {
     let active = true;
@@ -1763,7 +1783,7 @@ export default function EvaluationApp() {
         if (applicationResult.status === "fulfilled") setApplications(applicationResult.value.applications);
         // Öncelik bayrağı olmadan da ekran çalışır; yalnızca rozet görünmez.
         if (competitionResult.status === "fulfilled") setCompetitions(competitionResult.value.competitions);
-        const failure = [profileResult, applicationResult].find((result) => result.status === "rejected");
+        const failure = [profileResult, applicationResult, competitionResult].find((result) => result.status === "rejected");
         setError(failure && failure.status === "rejected" ? (failure.reason instanceof Error ? failure.reason.message : "Veriler yüklenemedi.") : "");
         setLoading(false);
       });
@@ -1791,6 +1811,20 @@ export default function EvaluationApp() {
     setApplicationId(null);
     setNotice("");
     setError("");
+  }
+
+  async function loadBulkSimilarity() {
+    const competition = competitions.find((item) => item.competitionKey === competitionKey);
+    if (!competition || competitionReadOnly(competition)) return;
+    setBulkBusy(true);
+    setError("");
+    try {
+      setBulkSimilarity(await workflowApi.bulkSimilarity(competition.id));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Toplu benzerlik özeti hazırlanamadı.");
+    } finally {
+      setBulkBusy(false);
+    }
   }
 
   /** Sahipsiz reddedilmiş söz bırakmadan koşuyu sonuçlanmış hâle getirir. */
@@ -1951,7 +1985,6 @@ export default function EvaluationApp() {
       const runSimilarity = async () => {
         let result = await workflowApi.similarityCheck(current.id, { pages: extracted.pages, pdfHash });
         for (let attempt = 0; attempt < 12 && result.status === "partial" && result.resumeRunId; attempt += 1) {
-          setProgress(`Benzerlik karşılaştırması sürüyor… (${result.progress?.processed ?? "?"}/${result.progress?.total ?? "?"} rapor)`);
           result = await workflowApi.similarityCheck(current.id, {
             pages: extracted.pages, pdfHash, resumeRunId: result.resumeRunId,
           });
@@ -2097,9 +2130,34 @@ export default function EvaluationApp() {
                 competitions={competitions}
                 selectedKey={competitionKey}
                 history={history}
-                onSelect={(key) => { setCompetitionKey(key); setApplicationId(null); }}
+                onSelect={(key) => { setCompetitionKey(key); setApplicationId(null); setBulkSimilarity(null); }}
               />
               <div className="eval-workshop-main">
+                {competitionKey ? (
+                  <section className="eval-similarity-note level-normal" aria-label="Toplu benzerlik incelemesi">
+                    <h3 className="eval-similarity-title">Toplu benzerlik incelemesi</h3>
+                    <p>Güncel matematiksel sonuçlardan en güçlü beş rapor çifti hazırlanır. Bu işlem kriter veya nihai karar üretmez.</p>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={bulkBusy || competitionReadOnly(competitions.find((item) => item.competitionKey === competitionKey))}
+                      onClick={() => { void loadBulkSimilarity(); }}
+                    >
+                      {bulkBusy ? "Hazırlanıyor…" : "Benzerlikleri toplu tara"}
+                    </button>
+                    {bulkBusy ? <ElapsedTime /> : null}
+                    {bulkSimilarity ? (
+                      <div aria-live="polite">
+                        <p>{bulkSimilarity.poolSize} rapor · {bulkSimilarity.possiblePairCount} olası çift · {bulkSimilarity.candidates.length} güçlü aday</p>
+                        {bulkSimilarity.missingCount ? <p>{bulkSimilarity.missingCount} raporun matematiksel analizi henüz güncel değil.</p> : null}
+                        <ol>{bulkSimilarity.candidates.map((pair) => (
+                          <li key={pair.pairKey}><strong>{pair.leftLabel} ↔ {pair.rightLabel}</strong> · yaklaşık %{pair.mathematicalPercent}</li>
+                        ))}</ol>
+                        <p>{bulkSimilarity.note}</p>
+                      </div>
+                    ) : null}
+                  </section>
+                ) : null}
                 {!competitionKey ? (
                   <p className="library-empty">Soldan bir yarışma seçin.</p>
                 ) : selected ? (
@@ -2107,6 +2165,7 @@ export default function EvaluationApp() {
                     key={`${selected.id}-${selected.evaluation?.analyzedAt ?? ""}-${selected.status === "completed"}`}
                     application={selected}
                     profile={selectedProfile}
+                    competition={competitionError ? null : competitions.find((item) => item.competitionKey === selected.competitionKey) ?? null}
                     analyzing={analyzingId === selected.id}
                     otherAnalysisRunning={analyzingId !== null && analyzingId !== selected.id}
                     progress={progress}

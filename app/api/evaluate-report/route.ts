@@ -678,6 +678,7 @@ const CONTEXT_ERRORS: Record<string, { status: number; message: string }> = {
   },
   document_missing: { status: 409, message: "Başvurunun geçerli rapor sürümü bulunamadı." },
   competition_archived: { status: 409, message: "Bu yarışma arşivlendi; yeni analiz başlatılamaz." },
+  competition_locked: { status: 409, message: "Bu yarışmanın kararları donduruldu; yeni analiz başlatılamaz." },
 };
 
 export async function POST(request: Request) {

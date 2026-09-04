@@ -1,4 +1,5 @@
 "use client";
+import { useLiveRefresh } from "./use-live-refresh";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { formatDateTime } from "../lib/admin-client";
@@ -69,6 +70,7 @@ export default function OperationsPanel() {
   const [loading, setLoading] = useState(true);
   /** Eski ağ yanıtının yeni ekran durumunu ezmesini önleyen sıra sayacı. */
   const loadSeq = useRef(0);
+  useLiveRefresh(load, !loading);
 
   function load() {
     // Her yükleme bir sıra numarası alır; yalnızca EN SON başlatılan yükleme

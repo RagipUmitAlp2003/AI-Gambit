@@ -59,7 +59,9 @@ function validReview(review: JudgeReview): boolean {
   if (typeof review.overallNote !== "string" || review.overallNote.length > 5_000) return false;
   if (typeof review.feedbackApproved !== "boolean" || !review.finalFeedback || typeof review.finalFeedback !== "object") return false;
   const feedbackLists = [review.finalFeedback.strengths, review.finalFeedback.improvements, review.finalFeedback.suggestions];
-  if (feedbackLists.some((list) => !Array.isArray(list) || list.length > 100 || list.some((item) => typeof item !== "string" || item.length > 1_000))) return false;
+  // A feedback line combines a 300-char title, 2000-char reason, 1200-char
+  // quote, section and location. Do not reject valid criterion decisions.
+  if (feedbackLists.some((list) => !Array.isArray(list) || list.length > 100 || list.some((item) => typeof item !== "string" || item.length > 6_000))) return false;
   if (review.criterionDecisions !== undefined) {
     if (!Array.isArray(review.criterionDecisions) || review.criterionDecisions.length > 500) return false;
     if (!review.criterionDecisions.every(validCriterionDecision)) return false;

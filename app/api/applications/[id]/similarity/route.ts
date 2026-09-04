@@ -25,7 +25,7 @@ import {
   type SimilarityChunk,
   type TemplateFilter,
 } from "../../../../lib/similarity-text";
-import { similarityLlmEnabled, similarityMaxChunksPerDoc, similarityRuntimeLimits, similarityThresholds } from "../../../../lib/similarity-config";
+import { similarityMaxChunksPerDoc, similarityRuntimeLimits, similarityThresholds } from "../../../../lib/similarity-config";
 import { embeddingSketch, planBatches } from "../../../../lib/similarity-candidates";
 import { configuredByteLimit } from "../../../../lib/request-guard";
 import {
@@ -34,11 +34,6 @@ import {
   stripPoolCommonFeatures,
   type SimilarityChunkFeatures,
 } from "../../../../lib/similarity-corroboration";
-import {
-  SIMILARITY_LLM_CLASSES,
-  explainSimilarityMatches,
-  type SimilarityLlmMatchInput,
-} from "../../../../lib/similarity-llm";
 import { PdfTextLayerError, extractPdfStructure } from "../../../../lib/pdf-structure";
 import { requiredHeadingsOf } from "../../../../lib/report-prechecks";
 import { embedTexts } from "../../../../lib/similarity-embedding";
@@ -100,12 +95,6 @@ function quoteOf(text: string): string {
   return cleaned.length <= QUOTE_CHARS ? cleaned : `${cleaned.slice(0, QUOTE_CHARS)}…`;
 }
 
-/** Katman 3'e giden alıntı (~600 karakter); ekrandaki alıntı 220 ile sınırlı kalır. */
-const LLM_EXCERPT_CHARS = 600;
-
-function excerptOf(text: string): string {
-  return text.replace(/\s+/g, " ").trim().slice(0, LLM_EXCERPT_CHARS);
-}
 
 /** Parça metinlerinin saklandığı ÖZEL R2 nesnesi; yalnızca sunucu okur. */
 function chunkStoreKey(applicationId: string, versionId: string): string {
@@ -890,11 +879,9 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
         ? "review"
         : "normal";
 
-    /* 10) En fazla ÜÇ güçlü eşleşme; alıntılar sınırlı uzunlukta (madde 9.10).
-     * Katman 3 girdileri de BURADA, aynı deterministik eşleşme verisinden
-     * hazırlanır: model sayfa/alıntı üretmez, sunucu yankılar (madde 5). */
+    /* 10) En fazla ÜÇ güçlü matematiksel eşleşme; alıntılar sınırlı uzunlukta.
+     * Otomatik akış üretken modele metin göndermez. */
     const matches: SimilarityMatch[] = [];
-    const llmInputs: SimilarityLlmMatchInput[] = [];
     if (best && bestPeerApp && level !== "normal") {
       // Eşleşme sayfaları için en iyi eşin parça satırları yeniden okunur:
       // parti döngüsü belleğinde tutulmazlar (koşu sürdürülmüş olabilir).
@@ -914,15 +901,6 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
         const peerChunk = bestPeer?.chunks.find((chunk) => chunk.chunkIndex === match.peerIndex);
         const peerText = peerTexts.find((entry) => entry.index === match.peerIndex);
         const corroboration = match.corroboration ?? [];
-        llmInputs.push({
-          index: matches.length,
-          kind: match.kind,
-          ownPage: ownChunk?.pageStart ?? null,
-          peerPage: peerChunk?.pageStart ?? null,
-          ownExcerpt: ownChunk ? excerptOf(ownChunk.text) : "",
-          peerExcerpt: peerText ? excerptOf(peerText.text) : "",
-          corroboration,
-        });
         matches.push({
           peerLabel: bestPeerApp.participantLabel,
           peerApplicationId: bestPeerApp.applicationId,
@@ -967,21 +945,12 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
       templateVersion,
     };
 
-    /*
-     * 11) KATMAN 3 — LLM açıklama kontrolü (madde 5): İKİ AŞAMALI KAYIT.
-     * Deterministik sonuç ÖNCE kaydedilir; ödenen MinHash/embedding emeği LLM
-     * arızasıyla ASLA kaybolmaz. Model yalnızca yukarıda belirlenen eşleşme
-     * çiftlerini alır ve yalnızca sınıf + açıklama döndürür; yüzde, seviye,
-     * sayfa ve alıntılar bu çağrıdan ÖNCE hesaplanmıştır ve değişmez.
-     *
-     * Kapatma anahtarı SIMILARITY_LLM_ENABLED=off|0 (varsayılan AÇIK).
-     * `skipLlm` maliyet kapısı test/geliştirme içindir (skipEmbedding gibi);
-     * skipEmbedding'li koşular da ücretli LLM çağrısı YAPMAZ (e2e ücretsizdir).
-     */
-    const llmApiKey = process.env.GEMINI_API_KEY;
-    const llmActive = level !== "normal" && matches.length > 0 && llmInputs.length > 0
-      && similarityLlmEnabled() && body.skipLlm !== true && !skipEmbedding && !!llmApiKey;
-    if (!llmActive) report.llmStatus = "skipped";
+    /* 11) Matematiksel sonuç tek aşamada kaydedilir. Üretken özgünlük yorumu
+     * bu otomatik uçta yoktur; yalnız hakemin açıkça başlatacağı toplu akışa
+     * aittir. Böylece rapor sayısı arttıkça gizli LLM maliyeti oluşmaz. */
+    // Automatic analysis remains mathematical. Generative interpretation is
+    // deliberately reserved for the judge-triggered bulk review.
+    report.llmStatus = "skipped";
     const saveInput = {
       applicationId, submissionVersionId: resolved.submissionVersionId, pdfHash: serverPdfHash,
       competitionKey: resolved.competitionKey,
@@ -996,40 +965,11 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
     };
     await saveSimilarityResult({ ...saveInput, reportJson: JSON.stringify(report) });
 
-    let llmApiCalls = 0;
-    if (llmActive) {
-      const outcome = await explainSimilarityMatches({
-        apiKey: llmApiKey!,
-        competitionName: resolved.competitionName,
-        matches: llmInputs.slice(0, thresholds.llmTopK),
-      });
-      llmApiCalls = outcome.apiCalls;
-      if (outcome.ok) {
-        // Birleştirme YALNIZCA açıklama alanlarını yazar: yüzde/seviye/sayfa/
-        // alıntı deterministik verisinin üzerine hiçbir model metni yazılmaz.
-        for (const annotation of outcome.annotations) {
-          const target = matches[annotation.index];
-          if (!target) continue;
-          target.llmClass = annotation.sinif;
-          target.llmClassLabel = SIMILARITY_LLM_CLASSES[annotation.sinif];
-          target.llmExplanation = annotation.aciklama;
-          target.llmAssessment = annotation.degerlendirme;
-        }
-        report.llmStatus = "completed";
-      } else {
-        // Arıza deterministik sonucu KAYBETTİRMEZ (madde 5).
-        report.llmStatus = "failed";
-        report.note = `${report.note} Açıklama kontrolü tamamlanamadı.`;
-        console.error("[similarity] LLM açıklama kontrolü tamamlanamadı", { detail: outcome.detail });
-      }
-      // İkinci kayıt idempotenttir (sil + yaz); ilk kayıt zaten geçerli sonucu taşır.
-      await saveSimilarityResult({ ...saveInput, reportJson: JSON.stringify(report) });
-    }
     return json({
       similarity: report,
       check: buildCheck(report),
       embeddingApiCalls,
-      llmApiCalls,
+      llmApiCalls: 0,
       // 429: istemci, kriter analizi tamamlandıktan sonra kısa gecikmeyle yeniden deneyebilir.
       ...(embeddingRateLimited ? { embeddingRateLimited: true } : {}),
     });

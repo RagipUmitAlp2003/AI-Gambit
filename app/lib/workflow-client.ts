@@ -79,6 +79,11 @@ async function jsonRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const workflowApi = {
+  bulkSimilarity: (competitionId: string) => jsonRequest<{
+    poolSize: number; analyzedCount: number; missingCount: number; possiblePairCount: number;
+    candidates: Array<{ pairKey: string; leftLabel: string; rightLabel: string; mathematicalPercent: number }>;
+    llmStatus: "not_requested"; note: string;
+  }>(`/api/competitions/${encodeURIComponent(competitionId)}/bulk-similarity`),
   /** `openCompetitions`: şu anda başvuruya açık yarışmalar (yayımlanmış profili olanlar). */
   applications: () => jsonRequest<{ applications: CompetitionApplication[]; openCompetitions?: CompetitionEntry[] }>("/api/applications"),
   submitApplication: async (input: {
