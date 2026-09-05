@@ -7,6 +7,8 @@ import { criteriaContentHash, criteriaHash } from "./criteria-hash";
 import { applySourceLock, buildSourceLockIndex, type SourceLockIndex } from "./source-lock";
 import { validateProfileExport } from "./profile-loader";
 import { findingRejectionAuditLine, judgeDecisionCounts, validateCriterionDecisions, visibleFindingsOf } from "./judge-review";
+import { UNSPECIFIED, type StoredTeamProfile } from "./team-profile";
+import type { AnalyticsApplicationRecord, AnalyticsCriterionDecision, AnalyticsMember } from "./participation-analytics";
 // Ağır PDF ayrıştırıcısı bu modülün içinde DEĞİL; `readReportTextLayer` PDF.js'i
 // yalnızca gerçekten çağrıldığında dinamik olarak yükler.
 import { quoteFoundOnPage, readReportTextLayer, type ReportTextLayer } from "./report-text-layer";
@@ -28,6 +30,7 @@ import {
   APPLICATION_STATUSES,
   type ApplicationOutcome,
   type ApplicationStatus,
+  type ApplicationTeamMember,
   type CompetitionApplication,
   type CompetitionProfile,
   type CompetitionStatus,
@@ -425,6 +428,28 @@ const SIMILARITY_RESULT_COLUMNS: Array<{ name: string; definition: string }> = [
   { name: "stale_reason", definition: "TEXT" },
 ];
 
+/*
+ * Takım üyesi demografi/eğitim görüntüsü ve başvuru düzeyinde duyuru kaynağı
+ * (migrations/0017_team_member_analytics.sql). Eski satırlarda NULL kalır;
+ * okuma tarafı NULL'u "Belirtilmedi" olarak yorumlar. Bu sütunlar AI
+ * değerlendirmesini, kriter sonuçlarını, hakem kararını ve benzerlik hesabını
+ * ETKİLEMEZ; yalnızca toplulaştırılmış analitikte okunur.
+ */
+const TEAM_MEMBER_PROFILE_COLUMNS: Array<{ name: string; definition: string }> = [
+  { name: "is_applicant", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { name: "gender", definition: "TEXT" },
+  { name: "education_level", definition: "TEXT" },
+  { name: "grade_level", definition: "TEXT" },
+  { name: "institution", definition: "TEXT" },
+  { name: "city", definition: "TEXT" },
+  { name: "teknofest_history", definition: "TEXT" },
+];
+
+const SUBMISSION_DETAIL_COLUMNS: Array<{ name: string; definition: string }> = [
+  { name: "discovery_source", definition: "TEXT" },
+  { name: "team_size", definition: "INTEGER" },
+];
+
 async function upgradeProfileTable(database: D1Database): Promise<void> {
   const columns = await database.prepare(`PRAGMA table_info(competition_profiles)`).all<{ name: string }>();
   const present = new Set((columns.results ?? []).map((row) => row.name));
@@ -487,6 +512,12 @@ export async function workflowDatabase(): Promise<D1Database> {
         await addMissingColumns(database, "similarity_chunks", SIMILARITY_CHUNK_COLUMNS);
         await addMissingColumns(database, "similarity_results", SIMILARITY_RESULT_COLUMNS);
         await addMissingColumns(database, "submission_versions", SUBMISSION_VERSION_COLUMNS);
+        await addMissingColumns(database, "application_team_members", TEAM_MEMBER_PROFILE_COLUMNS);
+        await addMissingColumns(database, "application_submission_details", SUBMISSION_DETAIL_COLUMNS);
+        await database.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_application_team_members_applicant
+             ON application_team_members (application_id, is_applicant)`,
+        ).run().catch(() => undefined);
         /*
          * ÇİFT BAŞVURU KORUMASI (madde 9): aynı katılımcının aynı yarışmada
          * arşivlenmemiş tek aktif başvurusu olur. Dizin oluşturulamıyorsa
@@ -618,6 +649,8 @@ type ApplicationRow = {
   outcome: string | null;
   outcome_note: string | null;
   decided_at: string | null;
+  discovery_source: string | null;
+  team_size: number | null;
   competition_status: string | null;
   competition_is_active: number | null;
   evaluation_criteria_version: number | null;
@@ -635,7 +668,28 @@ type TeamMemberRow = {
   id: string;
   application_id: string;
   full_name: string;
+  is_applicant: number | null;
+  gender: string | null;
+  education_level: string | null;
+  grade_level: string | null;
+  institution: string | null;
+  city: string | null;
+  teknofest_history: string | null;
 };
+
+/** Eski satırlardaki NULL alanlar "Belirtilmedi" olarak okunur. */
+function toTeamMember(member: TeamMemberRow): ApplicationTeamMember {
+  return {
+    id: member.id,
+    fullName: member.full_name,
+    gender: member.gender || UNSPECIFIED,
+    educationLevel: member.education_level || UNSPECIFIED,
+    gradeLevel: member.grade_level || UNSPECIFIED,
+    institution: member.institution || UNSPECIFIED,
+    city: member.city || UNSPECIFIED,
+    teknofestHistory: member.teknofest_history || UNSPECIFIED,
+  };
+}
 
 type ExtractionRow = {
   id: string;
@@ -808,6 +862,11 @@ function toApplication(
   const storedStatus: ApplicationStatus = (APPLICATION_STATUSES as string[]).includes(row.status)
     ? row.status as ApplicationStatus
     : "submitted";
+  // Başvuru sahibi yeni kayıtlarda is_applicant = 1 satırıyla temsil edilir;
+  // `teamMembers` geriye uyum için yalnızca DİĞER üyeleri taşımaya devam eder.
+  const applicantRow = members.find((member) => Number(member.is_applicant) === 1) ?? null;
+  const otherMembers = members.filter((member) => Number(member.is_applicant) !== 1);
+  const teamSize = Number(row.team_size) > 0 ? Number(row.team_size) : otherMembers.length + 1;
   return {
     id: row.id,
     participantId: operations ? "" : row.participant_id,
@@ -815,7 +874,17 @@ function toApplication(
     participantEmail: operations ? null : row.participant_email,
     applicantFullName: operations ? "" : (row.applicant_full_name || row.participant_name),
     teamName: row.team_name || row.participant_name,
-    teamMembers: operations ? [] : members.map((member) => ({ id: member.id, fullName: member.full_name })),
+    teamMembers: operations ? [] : otherMembers.map(toTeamMember),
+    teamSize,
+    applicantProfile: operations
+      ? null
+      : applicantRow
+        ? toTeamMember(applicantRow)
+        : {
+          id: "", fullName: row.applicant_full_name || row.participant_name, gender: UNSPECIFIED, educationLevel: UNSPECIFIED,
+          gradeLevel: UNSPECIFIED, institution: UNSPECIFIED, city: UNSPECIFIED, teknofestHistory: UNSPECIFIED,
+        },
+    discoverySource: operations ? "" : (row.discovery_source || UNSPECIFIED),
     competitionKey: row.competition_key,
     competitionName: row.competition_name,
     profileId: row.profile_id,
@@ -1967,7 +2036,11 @@ export async function createApplication(input: {
   participant: AdminAccount;
   applicantFullName: string;
   teamName: string;
-  teamMembers: string[];
+  /**
+   * Başvuru sahibi + diğer üyeler + duyuru kaynağı (bkz. team-profile.ts).
+   * Başvuru anındaki değişmez görüntü olarak saklanır; hesaba bağlanmaz.
+   */
+  teamProfile: StoredTeamProfile;
   competitionName: string;
   competitionKey: string;
   profileId: string | null;
@@ -2017,9 +2090,9 @@ export async function createApplication(input: {
     timestamp,
   ), database.prepare(
     `INSERT INTO application_submission_details
-      (application_id, applicant_full_name, team_name, outcome, outcome_note)
-     VALUES (?, ?, ?, 'pending', '')`,
-  ).bind(id, input.applicantFullName, input.teamName), database.prepare(
+      (application_id, applicant_full_name, team_name, outcome, outcome_note, discovery_source, team_size)
+     VALUES (?, ?, ?, 'pending', '', ?, ?)`,
+  ).bind(id, input.applicantFullName, input.teamName, input.teamProfile.discoverySource, input.teamProfile.teamSize), database.prepare(
     `INSERT INTO submission_versions
       (id, application_id, version_number, file_key, file_name, mime_type, size_bytes,
        pdf_hash, byte_length, submitted_by, submitted_at)
@@ -2028,10 +2101,17 @@ export async function createApplication(input: {
     versionId, id, input.fileKey, input.fileName, input.mimeType, input.sizeBytes,
     input.pdfHash, input.sizeBytes, input.participant.id, timestamp,
   ),
-  ...input.teamMembers.map((fullName, index) => database.prepare(
-    `INSERT INTO application_team_members (id, application_id, member_order, full_name)
-     VALUES (?, ?, ?, ?)`,
-  ).bind(crypto.randomUUID(), id, index, fullName))];
+  // Başvuru sahibi 0. sırada is_applicant = 1 ile, diğer üyeler 1..n ile yazılır.
+  // Demografi alanları başvuru anındaki görüntüdür; hesap değişse bile değişmez.
+  ...[input.teamProfile.applicant, ...input.teamProfile.members].map((member, index) => database.prepare(
+    `INSERT INTO application_team_members
+      (id, application_id, member_order, full_name, is_applicant, gender, education_level,
+       grade_level, institution, city, teknofest_history)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    crypto.randomUUID(), id, index, member.fullName, member.isApplicant ? 1 : 0, member.gender,
+    member.educationLevel, member.gradeLevel, member.institution, member.city, member.teknofestHistory,
+  ))];
   try {
     await database.batch(statements);
   } catch (insertError) {
@@ -2177,7 +2257,7 @@ function redactEvaluation(evaluation: ReportEvaluation | null): ReportEvaluation
 }
 
 const APPLICATION_SELECT = `SELECT a.*, d.applicant_full_name, d.team_name,
-  d.outcome, d.outcome_note, d.decided_at,
+  d.outcome, d.outcome_note, d.decided_at, d.discovery_source, d.team_size,
   c.status AS competition_status,
   c.is_active AS competition_is_active,
   (SELECT MAX(v.version_number) FROM submission_versions v WHERE v.application_id = a.id) AS current_version_number,
@@ -2198,7 +2278,8 @@ async function listTeamMembers(database: D1Database, account: AdminAccount, appl
   if (applicationId) { predicates.push("a.id = ?"); binds.push(applicationId); }
   const where = predicates.length ? `WHERE ${predicates.join(" AND ")}` : "";
   const result = await database.prepare(
-    `SELECT m.id, m.application_id, m.full_name
+    `SELECT m.id, m.application_id, m.full_name, m.is_applicant, m.gender, m.education_level,
+            m.grade_level, m.institution, m.city, m.teknofest_history
      FROM application_team_members m
      INNER JOIN competition_applications a ON a.id = m.application_id
      ${where}
@@ -4394,4 +4475,112 @@ export async function operationsSummary(account: AdminAccount): Promise<Operatio
     failed: at("analysis_failed"),
     completionRate: total ? Math.round((completed / total) * 100) : 0,
   };
+}
+
+/*
+ * KATILIM VE KARAR ANALİTİĞİ — ham kayıt okuyucu (yalnızca sunucu).
+ *
+ * Değerlendirme Yöneticisinin analitik ucu bu kayıtları TOPLULAŞTIRIR ve
+ * yalnızca sayaç döndürür. Bu sorgu bilinçli olarak katılımcı adı, e-posta,
+ * dosya adı, PDF metni, hakem gerekçesi ve kanıt alıntısı OKUMAZ; hakem
+ * kararlarından yalnızca AI sonucu / hakem sonucu / aşama alınır.
+ *
+ * Arşivlenmiş (soft delete) başvurular aktif akışta olmadığı için dışarıda
+ * bırakılır. Eski başvurularda bulunmayan alanlar "Belirtilmedi" olur.
+ */
+type AnalyticsApplicationRow = {
+  id: string; competition_key: string; competition_name: string; status: string; submitted_at: string;
+  judge_id: string | null; evaluation_json: string | null; review_json: string | null;
+  outcome: string | null; discovery_source: string | null; team_size: number | null;
+};
+
+type AnalyticsMemberRow = {
+  application_id: string; is_applicant: number | null; gender: string | null; education_level: string | null;
+  grade_level: string | null; institution: string | null; city: string | null; teknofest_history: string | null;
+};
+
+function analyticsDecisionsOf(row: AnalyticsApplicationRow): AnalyticsCriterionDecision[] {
+  const review = parseJson<JudgeReview>(row.review_json);
+  if (!review || review.status !== "completed") return [];
+  const evaluation = parseJson<ReportEvaluation>(row.evaluation_json);
+  const stageById = new Map<string, string>();
+  for (const finding of evaluation?.findings ?? []) stageById.set(finding.criterionId, finding.stage);
+  const decisions: AnalyticsCriterionDecision[] = [];
+  for (const decision of review.criterionDecisions ?? []) {
+    if (decision.judgeVerdict !== "approved" && decision.judgeVerdict !== "rejected") continue;
+    if (decision.aiVerdict !== "UYGUN" && decision.aiVerdict !== "OLUMSUZ") continue;
+    decisions.push({
+      criterionId: decision.criterionId,
+      // Kriter adı şartnameden gelir; kişi bilgisi veya hakem gerekçesi değildir.
+      criterionName: decision.criterionName || decision.criterionId,
+      stage: stageById.get(decision.criterionId) ?? "unknown",
+      aiVerdict: decision.aiVerdict,
+      judgeVerdict: decision.judgeVerdict,
+      judgeResult: decision.judgeResult === "UYGUN" || decision.judgeResult === "OLUMSUZ" ? decision.judgeResult : null,
+      judgeKey: row.judge_id ?? "",
+    });
+  }
+  return decisions;
+}
+
+export async function listAnalyticsRecords(): Promise<AnalyticsApplicationRecord[]> {
+  const database = await workflowDatabase();
+  const [applications, members] = await Promise.all([
+    database.prepare(
+      `SELECT a.id, a.competition_key, a.competition_name, a.status, a.submitted_at, a.judge_id,
+              a.evaluation_json, a.review_json, d.outcome, d.discovery_source, d.team_size
+       FROM competition_applications a
+       LEFT JOIN application_submission_details d ON d.application_id = a.id
+       WHERE a.deleted_at IS NULL
+       ORDER BY a.submitted_at DESC`,
+    ).all<AnalyticsApplicationRow>(),
+    database.prepare(
+      `SELECT m.application_id, m.is_applicant, m.gender, m.education_level, m.grade_level,
+              m.institution, m.city, m.teknofest_history
+       FROM application_team_members m
+       INNER JOIN competition_applications a ON a.id = m.application_id
+       WHERE a.deleted_at IS NULL
+       ORDER BY m.application_id, m.member_order`,
+    ).all<AnalyticsMemberRow>(),
+  ]);
+  const membersByApplication = new Map<string, AnalyticsMember[]>();
+  for (const member of members.results ?? []) {
+    const list = membersByApplication.get(member.application_id) ?? [];
+    list.push({
+      isApplicant: Number(member.is_applicant) === 1,
+      gender: member.gender || UNSPECIFIED,
+      educationLevel: member.education_level || UNSPECIFIED,
+      gradeLevel: member.grade_level || UNSPECIFIED,
+      institution: member.institution || UNSPECIFIED,
+      city: member.city || UNSPECIFIED,
+      teknofestHistory: member.teknofest_history || UNSPECIFIED,
+    });
+    membersByApplication.set(member.application_id, list);
+  }
+  return (applications.results ?? []).map((row) => {
+    const stored = membersByApplication.get(row.id) ?? [];
+    // Eski başvuruda başvuru sahibi satırı yoktur: örtük olarak "Belirtilmedi" ile sayılır.
+    const withApplicant = stored.some((member) => member.isApplicant)
+      ? stored
+      : [{
+        isApplicant: true, gender: UNSPECIFIED, educationLevel: UNSPECIFIED, gradeLevel: UNSPECIFIED,
+        institution: UNSPECIFIED, city: UNSPECIFIED, teknofestHistory: UNSPECIFIED,
+      }, ...stored];
+    const status: ApplicationStatus = (APPLICATION_STATUSES as string[]).includes(row.status)
+      ? row.status as ApplicationStatus
+      : "submitted";
+    return {
+      id: row.id,
+      competitionKey: row.competition_key,
+      competitionName: row.competition_name,
+      submittedAt: row.submitted_at,
+      status,
+      // Sonuç yalnızca hakem kararı kesinleşmişse sayılır; taslak sonuç "bekliyor"dur.
+      outcome: status === "completed" ? normalizeOutcome(row.outcome) : "pending",
+      teamSize: Number(row.team_size) > 0 ? Number(row.team_size) : withApplicant.length,
+      discoverySource: row.discovery_source || UNSPECIFIED,
+      members: withApplicant,
+      criterionDecisions: analyticsDecisionsOf(row),
+    };
+  });
 }

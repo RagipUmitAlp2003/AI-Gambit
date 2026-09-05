@@ -172,6 +172,17 @@ export const PROFILE_STATUS_LABELS: Record<ProfileStatus, string> = {
 export type ApplicationTeamMember = {
   id: string;
   fullName: string;
+  /**
+   * Başvuru anında verilen demografi/eğitim görüntüsü (göç 0017). Eski
+   * kayıtlarda alanlar "unspecified" (Belirtilmedi) döner. Yalnızca ham kişi
+   * bilgisini görebilen görünümlerde doludur; operasyon görünümüne gitmez.
+   */
+  gender: string;
+  educationLevel: string;
+  gradeLevel: string;
+  institution: string;
+  city: string;
+  teknofestHistory: string;
 };
 
 /** Yarışmanın değerlendirme profili; hakem onayından sonra aktifleşir. */
@@ -206,7 +217,17 @@ export type CompetitionApplication = {
   participantEmail: string | null;
   applicantFullName: string;
   teamName: string;
+  /** Başvuru sahibi DIŞINDAKİ ekip üyeleri (geriye uyumlu anlam). */
   teamMembers: ApplicationTeamMember[];
+  /** Başvuru sahibi dâhil takım büyüklüğü; eski kayıtlarda üye sayısı + 1. */
+  teamSize: number;
+  /**
+   * Başvuru sahibinin kendi demografi/eğitim görüntüsü (göç 0017). Operasyon
+   * görünümünde null; eski kayıtlarda alanlar "unspecified" döner.
+   */
+  applicantProfile: ApplicationTeamMember | null;
+  /** "TEKNOFEST'i nereden duydunuz?" — başvuru başına tek değer; operasyon görünümünde "". */
+  discoverySource: string;
   competitionKey: string;
   competitionName: string;
   profileId: string | null;

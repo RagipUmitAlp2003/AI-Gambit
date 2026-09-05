@@ -229,3 +229,48 @@ test("kriter satırı PDF'den denetlenebilirlik alanını taşır", () => {
   assert.equal(updated.verifiability, "HARICI_KANIT_GEREKLI");
   database.close();
 });
+
+test("takım üyesi demografi sütunları ve başvuru düzeyi duyuru kaynağı (0017)", () => {
+  const database = migratedDatabase();
+  database.prepare(
+    `INSERT INTO competition_applications
+      (id, participant_id, participant_name, participant_email, competition_key, competition_name,
+       profile_id, file_key, file_name, mime_type, size_bytes, status, submitted_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 'application/pdf', 100, 'submitted', ?, ?)`,
+  ).run("app-17", "p1", "Ada", "ada@test", "roket", "Roket", "r2/app-17.pdf", "rapor.pdf", "2026-09-05", "2026-09-05");
+
+  // ESKİ satır: yeni sütunlar verilmeden yazılabilir; NULL kalır ("Belirtilmedi").
+  database.prepare(
+    `INSERT INTO application_submission_details (application_id, applicant_full_name, team_name) VALUES (?, ?, ?)`,
+  ).run("app-17", "Ada", "Takım");
+  database.prepare(
+    `INSERT INTO application_team_members (id, application_id, member_order, full_name) VALUES (?, ?, ?, ?)`,
+  ).run("m-legacy", "app-17", 1, "Deniz");
+  const legacy = database.prepare(`SELECT is_applicant, gender, education_level, city FROM application_team_members WHERE id = ?`)
+    .get("m-legacy") as Record<string, unknown>;
+  assert.deepEqual({ ...legacy }, { is_applicant: 0, gender: null, education_level: null, city: null });
+  const details = database.prepare(`SELECT discovery_source, team_size FROM application_submission_details WHERE application_id = ?`)
+    .get("app-17") as Record<string, unknown>;
+  assert.deepEqual({ ...details }, { discovery_source: null, team_size: null });
+
+  // YENİ satır: başvuru sahibi is_applicant = 1 ile aynı tabloda tutulur.
+  database.prepare(
+    `INSERT INTO application_team_members
+      (id, application_id, member_order, full_name, is_applicant, gender, education_level, grade_level,
+       institution, city, teknofest_history)
+     VALUES (?, ?, 0, ?, 1, ?, ?, ?, ?, ?, ?)`,
+  ).run("m-applicant", "app-17", "Ada", "female", "bachelor", "2", "ODTÜ", "Ankara", "first");
+  database.prepare(`UPDATE application_submission_details SET discovery_source = ?, team_size = ? WHERE application_id = ?`)
+    .run("instagram", 2, "app-17");
+  const applicants = database.prepare(
+    `SELECT COUNT(*) AS c FROM application_team_members WHERE application_id = ? AND is_applicant = 1`,
+  ).get("app-17") as { c: number };
+  assert.equal(applicants.c, 1);
+  const stored = database.prepare(`SELECT education_level, grade_level, city, teknofest_history FROM application_team_members WHERE id = ?`)
+    .get("m-applicant") as Record<string, unknown>;
+  assert.deepEqual({ ...stored }, { education_level: "bachelor", grade_level: "2", city: "Ankara", teknofest_history: "first" });
+  // Değerlendirme sütunları dokunulmadan kalır: demografi başvuru sonucunu değiştirmez.
+  const outcome = database.prepare(`SELECT outcome FROM application_submission_details WHERE application_id = ?`).get("app-17") as { outcome: string };
+  assert.equal(outcome.outcome, "pending");
+  database.close();
+});

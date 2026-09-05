@@ -6,6 +6,7 @@ import { formatDateTime } from "../lib/admin-client";
 import { roleLabel } from "../lib/admin-roles";
 import { fold } from "../lib/competitions";
 import { workflowApi } from "../lib/workflow-client";
+import ParticipationAnalyticsPanel from "./participation-analytics-panel";
 import {
   APPLICATION_STATUS_LABELS,
   COMPETITION_STATUS_LABELS,
@@ -49,6 +50,18 @@ type ArchiveTrailEntry = {
  * sekmesinde durur.
  */
 type OperationsTab = "overview" | "judges" | "timeline";
+
+/**
+ * Operasyon panelinin iki ÇALIŞMA GÖRÜNÜMÜ.
+ *   process     Mevcut süreç ve iş yükü ekranı — aynen korunur.
+ *   analytics   Katılım ve karar analitiği (toplulaştırılmış sayaçlar).
+ * Görünüm değiştirmek mevcut sekmeleri, filtreleri ve işlemleri bozmaz.
+ */
+type WorkView = "process" | "analytics";
+const WORK_VIEWS: ReadonlyArray<{ id: WorkView; label: string; detail: string }> = [
+  { id: "process", label: "Süreç ve iş yükü", detail: "Sayaçlar, uyarılar, hakem yükü ve süreç hareketleri" },
+  { id: "analytics", label: "Katılım ve karar analitiği", detail: "Demografi, kurum, kanal ve AI–hakem uyumu" },
+];
 const OPERATIONS_TABS: ReadonlyArray<{ id: OperationsTab; label: string; unit: string }> = [
   { id: "overview", label: "Şartname ve kriter özeti", unit: "yarışma" },
   { id: "judges", label: "Hakem iş yükü", unit: "başvuru" },
@@ -84,6 +97,8 @@ export default function OperationsPanel() {
   const [loading, setLoading] = useState(true);
   /** Değerlendirme Operasyonları bölümünde açık olan sekme. */
   const [tab, setTab] = useState<OperationsTab>("overview");
+  /** Panelin çalışma görünümü; ilk açılışta mevcut süreç ekranı gelir. */
+  const [workView, setWorkView] = useState<WorkView>("process");
   /** Eski ağ yanıtının yeni ekran durumunu ezmesini önleyen sıra sayacı. */
   const loadSeq = useRef(0);
   useLiveRefresh(load, !loading);
@@ -266,7 +281,29 @@ export default function OperationsPanel() {
       {error ? <p className="admin-error">{error}</p> : null}
       {notice ? <p className="success-note" role="status">{notice}</p> : null}
 
-      {summary ? (
+      {/*
+        İKİNCİ ÇALIŞMA GÖRÜNÜMÜ: "Katılım ve karar analitiği". Mevcut süreç ve iş
+        yükü ekranı aynen kalır; yalnızca seçili görünüm çizilir.
+      */}
+      <div className="admin-view-nav operations-view-nav" role="tablist" aria-label="Operasyon çalışma görünümleri">
+        {WORK_VIEWS.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            aria-selected={workView === item.id}
+            className={workView === item.id ? "active" : ""}
+            onClick={() => setWorkView(item.id)}
+          >
+            <strong>{item.label}</strong>
+            <small>{item.detail}</small>
+          </button>
+        ))}
+      </div>
+
+      {workView === "analytics" ? <ParticipationAnalyticsPanel /> : null}
+
+      {workView === "process" ? summary ? (
         <div className="operations-summary">
           <div><strong>{summary.total}</strong><span>toplam başvuru</span></div>
           <div className={unassigned.length ? "summary-warning" : ""}><strong>{unassigned.length}</strong><span>hakem ataması bekliyor</span></div>
@@ -279,12 +316,12 @@ export default function OperationsPanel() {
           <div><strong>{summary.failed}</strong><span>hatalı analiz</span></div>
           <div><strong>%{summary.completionRate}</strong><span>tamamlanma oranı</span></div>
         </div>
-      ) : null}
+      ) : null : null}
 
-      <section className="operations-alerts" aria-label="Operasyonel uyarılar">
+      {workView === "process" ? <section className="operations-alerts" aria-label="Operasyonel uyarılar">
         <h2>Operasyonel uyarılar</h2>
         {alerts.length ? <ul>{alerts.map((item) => <li key={item}>{item}</li>)}</ul> : <p className="page-note">Bekleyen operasyonel uyarı yok.</p>}
-      </section>
+      </section> : null}
 
       {/*
         DEĞERLENDİRME OPERASYONLARI — sekmeli bölüm.
@@ -293,7 +330,7 @@ export default function OperationsPanel() {
         ekranda süreç sayaçları ve uyarılar kalır; aşağıdaki üç bölümden
         yalnızca seçili sekmenin içeriği çizilir.
       */}
-      <section className="operations-tabs-section" aria-labelledby="operations-tabs-title">
+      {workView === "process" ? <section className="operations-tabs-section" aria-labelledby="operations-tabs-title">
         <div>
           <h2 id="operations-tabs-title">Değerlendirme Operasyonları</h2>
           <p>Şartname ve kriter özeti, hakem iş yükü ve son süreç hareketleri sekmelere ayrıldı; yalnızca seçili sekmenin bilgileri görünür.</p>
@@ -542,7 +579,7 @@ export default function OperationsPanel() {
             </>
           ) : null}
         </div>
-      </section>
+      </section> : null}
     </section>
   );
 }

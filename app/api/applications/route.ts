@@ -13,6 +13,7 @@ import {
 } from "../../lib/workflow-db";
 import { COMPETITION_STATUS_LABELS } from "../../lib/workflow-types";
 import { recordAudit } from "../../lib/admin-db";
+import { legacyTeamProfile, parseTeamProfile, type StoredTeamProfile } from "../../lib/team-profile";
 
 const SYSTEM_UPLOAD_LIMIT = 50 * 1024 * 1024;
 
@@ -36,6 +37,28 @@ function readTeamMembers(form: FormData): string[] {
   if (members.length > 30) throw new ValidationError("Bir başvuruda en fazla 30 ekip üyesi kaydedilebilir.");
   if (members.some((name) => name.length > 120)) throw new ValidationError("Ekip üyesi adı en fazla 120 karakter olabilir.");
   return members;
+}
+
+/**
+ * Ekip bilgileri (başvuru sahibi + üyeler + duyuru kaynağı).
+ *
+ * Yeni istemci `teamProfile` JSON'u gönderir; her alan sunucuda allowlist ile
+ * doğrulanır (team-profile.ts). Eski istemci yalnızca `teamMembers` ad
+ * listesi gönderirse bütün demografi alanları "Belirtilmedi" olarak saklanır;
+ * başvuru reddedilmez. Bu bilgiler değerlendirmeyi HİÇBİR biçimde etkilemez.
+ */
+function readTeamProfile(form: FormData, applicantFullName: string): StoredTeamProfile {
+  const rawProfile = form.get("teamProfile");
+  if (typeof rawProfile !== "string" || !rawProfile.trim()) {
+    return legacyTeamProfile(applicantFullName, readTeamMembers(form));
+  }
+  let parsedJson: unknown;
+  try { parsedJson = JSON.parse(rawProfile); }
+  catch { throw new ValidationError("Ekip bilgileri okunamadı."); }
+  const parsed = parseTeamProfile(parsedJson);
+  if (!parsed.ok) throw new ValidationError(parsed.error);
+  // Başvuru sahibinin adı tek kaynaktan gelir: form alanı ile üye kartı aynı kişidir.
+  return { ...parsed.profile, applicant: { ...parsed.profile.applicant, fullName: applicantFullName } };
 }
 
 export async function GET(request: Request): Promise<Response> {
@@ -65,7 +88,7 @@ export async function POST(request: Request): Promise<Response> {
     const competitionId = String(form.get("competitionId") ?? "").trim();
     const applicantFullName = requiredFormText(form, "applicantFullName", "Başvuru sahibi adı soyadı", 120);
     const teamName = requiredFormText(form, "teamName", "Takım adı", 120);
-    const teamMembers = readTeamMembers(form);
+    const teamProfile = readTeamProfile(form, applicantFullName);
     const file = form.get("file");
     // Yarışma adının YETKİLİ kaynağı yayımlanmış profildir, koddaki sabit havuz
     // değil: şartnameden çıkarılan ad (ör. bir festival adı) havuzda bulunmayabilir
@@ -121,7 +144,7 @@ export async function POST(request: Request): Promise<Response> {
       participant: auth.account,
       applicantFullName,
       teamName,
-      teamMembers,
+      teamProfile,
       competitionName: storedCompetitionName,
       competitionKey: profile.competitionKey,
       profileId: profile.id,

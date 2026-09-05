@@ -11,6 +11,8 @@ import { WorkflowApiError, workflowApi } from "../lib/workflow-client";
 import { APPLICATION_STATUS_LABELS, type CompetitionApplication } from "../lib/workflow-types";
 import { PARTICIPANT_FEEDBACK_HINTS, PARTICIPANT_FEEDBACK_LABELS } from "../lib/types";
 import AiDisclaimer from "./ai-disclaimer";
+import TeamMembersEditor from "./team-members-editor";
+import { emptyTeamProfile, validateTeamProfile, type TeamFieldError, type TeamProfileInput } from "../lib/team-profile";
 
 type ParticipantView = "competitions" | "applications";
 
@@ -63,7 +65,14 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
   const [competition, setCompetition] = useState("");
   const [applicantFullName, setApplicantFullName] = useState(account.fullName);
   const [teamName, setTeamName] = useState("");
-  const [teamMembers, setTeamMembers] = useState<string[]>([""]);
+  /**
+   * Ekip bilgileri: başvuru sahibi (ilk kart) + diğer üyeler + duyuru kaynağı.
+   * Hesap oluşturma ekranında SORULMAZ; başvuru hazırlanırken toplanır ve
+   * başvuruya bağlı değişmez görüntü olarak saklanır (team-profile.ts).
+   */
+  const [teamProfile, setTeamProfile] = useState<TeamProfileInput>(() => emptyTeamProfile(account.fullName));
+  /** Yalnızca gönderme denemesinden sonra gösterilen alan odaklı ekip hataları. */
+  const [teamErrors, setTeamErrors] = useState<TeamFieldError[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [applications, setApplications] = useState<CompetitionApplication[]>([]);
   const [busy, setBusy] = useState(false);
@@ -146,7 +155,14 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
       missing.push(`başvuruya açık bir yarışma (“${selectedCompetition.name}” henüz başvuruya açılmadı)`);
     }
     if (!file) missing.push("başvuru PDF'i");
+    const teamIssues = validateTeamProfile(profileWithApplicant()).length;
+    if (teamIssues) missing.push(`ekip bilgileri (${teamIssues} alan)`);
     return missing;
+  }
+
+  /** Başvuru sahibinin adı tek kaynaktan gelir: üst formdaki alan karta yansır. */
+  function profileWithApplicant(): TeamProfileInput {
+    return { ...teamProfile, applicant: { ...teamProfile.applicant, fullName: applicantFullName } };
   }
 
   /** Hata formun dibinde de görünmeli: sayfanın tepesindeki şerit kaçıyordu. */
@@ -191,13 +207,17 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
     setNotice("");
     /** Doğrulama hatasında kilit ve düğme serbest bırakılır; kullanıcı düzeltip yeniden dener. */
     const release = () => { submitLock.current = false; setBusy(false); };
+    const profile = profileWithApplicant();
+    const fieldErrors = validateTeamProfile(profile);
+    setTeamErrors(fieldErrors);
     const missing = missingRequirements();
     if (missing.length) {
       release();
-      fail(`Başvuru gönderilemedi. Eksik alanlar: ${missing.join(", ")}.`);
+      fail(fieldErrors.length && missing.length === 1
+        ? `Başvuru gönderilemedi. Ekip bilgilerinde eksik var: ${fieldErrors[0].message}`
+        : `Başvuru gönderilemedi. Eksik alanlar: ${missing.join(", ")}.`);
       return;
     }
-    const members = teamMembers.map((item) => item.trim()).filter(Boolean);
     if (!selectedCompetition || !file) { release(); return; }
     const gateError = await pdfGateError(file);
     if (gateError) { release(); fail(gateError); return; }
@@ -209,13 +229,14 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
         competitionId: selectedCompetition.id,
         applicantFullName: applicantFullName.trim(),
         teamName: teamName.trim(),
-        teamMembers: members,
+        teamProfile: profile,
         file,
       });
       setApplications((current) => [result.application, ...current]);
       setCompetition("");
       setTeamName("");
-      setTeamMembers([""]);
+      setTeamProfile(emptyTeamProfile(applicantFullName.trim()));
+      setTeamErrors([]);
       setFile(null);
       if (inputRef.current) inputRef.current.value = "";
       setNotice("Başvurunuz alındı ve bir hakeme iletildi. AI ön değerlendirmesini hakem başlatır; nihai kararı yine hakem verir.");
@@ -280,17 +301,19 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
               <label className="field"><span className="field-label">Başvuru sahibi adı soyadı</span><input value={applicantFullName} maxLength={120} onChange={(event) => setApplicantFullName(event.target.value)} autoComplete="name" /></label>
               <label className="field"><span className="field-label">Takım adı</span><input value={teamName} maxLength={120} onChange={(event) => setTeamName(event.target.value)} placeholder="Takımınızın adı" /></label>
             </div>
-            <fieldset className="participant-members">
-              <legend>Ekip üyeleri</legend>
-              <p>Başvuru sahibi dışındaki üyeleri ekleyin. Bireysel başvuruda boş bırakabilirsiniz.</p>
-              {teamMembers.map((member, index) => (
-                <div key={`member-${index}`}>
-                  <label><span>{index + 1}. ekip üyesi adı soyadı</span><input value={member} maxLength={120} onChange={(event) => setTeamMembers((current) => current.map((item, itemIndex) => itemIndex === index ? event.target.value : item))} /></label>
-                  {teamMembers.length > 1 || member ? <button type="button" className="text-button" onClick={() => setTeamMembers((current) => current.length === 1 ? [""] : current.filter((_, itemIndex) => itemIndex !== index))}>Kaldır</button> : null}
-                </div>
-              ))}
-              <button type="button" className="secondary-button" disabled={teamMembers.length >= 30} onClick={() => setTeamMembers((current) => [...current, ""])}>Ekip üyesi ekle</button>
-            </fieldset>
+            {/*
+              Ekip bilgileri: başvuru sahibi dâhil her üye için eğitim/kurum/şehir
+              ve TEKNOFEST geçmişi; duyuru kaynağı takım başına bir kez. Hatalar
+              yalnızca gönderme denemesinden sonra, alan odaklı gösterilir.
+            */}
+            <TeamMembersEditor
+              value={profileWithApplicant()}
+              onChange={(next) => {
+                setTeamProfile(next);
+                if (teamErrors.length) setTeamErrors(validateTeamProfile({ ...next, applicant: { ...next.applicant, fullName: applicantFullName } }));
+              }}
+              errors={teamErrors}
+            />
             <label className="field">
               <span className="field-label">Yarışma ara</span>
               <CompetitionSelect

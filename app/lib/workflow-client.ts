@@ -2,6 +2,8 @@
 
 import type { AdminAccount } from "./admin-types";
 import type { CompetitionEntry } from "./competitions";
+import type { TeamProfileInput } from "./team-profile";
+import type { AnalyticsFilters, ParticipationAnalytics } from "./participation-analytics";
 import type { JudgeReview, PreCheck, ProfileExport, ReportEvaluation, SimilarityReport } from "./types";
 import type {
   CompetitionApplication,
@@ -97,7 +99,11 @@ export const workflowApi = {
     competitionId?: string;
     applicantFullName: string;
     teamName: string;
-    teamMembers: string[];
+    /**
+     * Başvuru sahibi + diğer üyeler + duyuru kaynağı (team-profile.ts). Sunucu
+     * allowlist ile doğrular; başvuru anındaki değişmez görüntü olarak saklanır.
+     */
+    teamProfile: TeamProfileInput;
     file: File;
   }) => {
     const form = new FormData();
@@ -105,7 +111,9 @@ export const workflowApi = {
     if (input.competitionId) form.set("competitionId", input.competitionId);
     form.set("applicantFullName", input.applicantFullName);
     form.set("teamName", input.teamName);
-    form.set("teamMembers", JSON.stringify(input.teamMembers));
+    form.set("teamProfile", JSON.stringify(input.teamProfile));
+    // Geriye uyum: eski sunucu yalnızca ad listesini okur.
+    form.set("teamMembers", JSON.stringify(input.teamProfile.members.map((member) => member.fullName.trim()).filter(Boolean)));
     form.set("file", input.file);
     return responseJson<{ application: CompetitionApplication }>(await fetch("/api/applications", { method: "POST", credentials: "same-origin", body: form }));
   },
@@ -235,6 +243,16 @@ export const workflowApi = {
       createdAt: string;
     }>;
   }>("/api/operations"),
+  /**
+   * Katılım ve karar analitiği (yalnızca 04). Yalnızca toplulaştırılmış sayaç
+   * döner; filtreler sunucuda allowlist ile doğrulanır.
+   */
+  operationsAnalytics: (filters: AnalyticsFilters = {}) => {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
+    const query = params.toString();
+    return jsonRequest<{ analytics: ParticipationAnalytics }>(`/api/operations/analytics${query ? `?${query}` : ""}`);
+  },
   /** Role göre yarışma listesi; 02 öncelik rozetini buradan okur. */
   competitions: () => jsonRequest<{ competitions: CompetitionWorkflow[] }>("/api/competitions"),
   /** Başvuruyu açma/kapatma ve sonuç yayımlama — yalnızca yarışmanın sahibi 01. */
