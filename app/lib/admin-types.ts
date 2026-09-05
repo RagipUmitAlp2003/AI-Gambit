@@ -95,6 +95,7 @@ export type WorkflowEventName =
   | "judge_review_reopened"
   | "judge_score_adjusted"
   | "judge_decision_completed"
+  | "similarity_decision_completed"
   | "competition_stage_changed"
   | "criteria_version_published"
   | "criteria_source_locked"

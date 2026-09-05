@@ -32,7 +32,9 @@ test("otomatik benzerlik ve toplu hazırlık iki ayrı uçtur", () => {
   const bulk=readFileSync("app/lib/similarity-bulk.ts","utf8");
   assert.match(prep,/prepareApprovedSimilarity/);
   assert.doesNotMatch(prep,/saveSimilarityResult/);
-  assert.doesNotMatch(bulk,/GEMINI_API_KEY|explainSimilarityMatches|embedTexts\(/);
+  assert.doesNotMatch(prep,/GEMINI_API_KEY|explainSimilarityPairs|embedTexts\(/);
+  assert.match(bulk,/explainSimilarityPairs/);
+  assert.doesNotMatch(bulk,/embedTexts\(/);
   assert.match(bulk,/candidatePairs/);
   const database=readFileSync("app/lib/workflow-db.ts","utf8");
   assert.match(database,/a\.status = 'completed' AND d\.outcome = 'accepted'/);

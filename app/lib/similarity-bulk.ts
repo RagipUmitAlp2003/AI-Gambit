@@ -2,15 +2,18 @@ import type { AdminAccount } from "./admin-types";
 import {
  findCompetitionWorkflowById, findCurrentSimilarityTemplate, findStoredSimilarityChunks,
  listBulkSimilarityPool, reportBucket, workflowDatabase,
+ rejectAcceptedApplicationForSimilarity,
 } from "./workflow-db";
 import { SIMILARITY_EMBEDDING_MODEL, SIMILARITY_PIPELINE_VERSION, isTemplateChunkHash, sha256Hex, type ScoredChunk } from "./similarity-text";
-import { similarityThresholds } from "./similarity-config";
+import { similarityLlmEnabled, similarityThresholds } from "./similarity-config";
 import { poolFeatureCounts, stripPoolCommonFeatures } from "./similarity-corroboration";
 import { candidatePairs, comparePair } from "./similarity-bulk-engine";
 import {
  preparationKey, readPreparations, readBulkRun, startBulkRun, claimBulkRun, saveBulkRun, releaseBulkRun,
 } from "./similarity-jobs";
 import type { BulkOverview, BulkPair } from "./similarity-bulk-types";
+import { explainSimilarityPairs } from "./similarity-llm";
+import { recordUsage } from "./usage-metrics";
 
 export class SimilarityAccessError extends Error {
  status:number;
@@ -34,7 +37,7 @@ export async function bulkContext(competitionId:string,actor:AdminAccount) {
    return job?.state==="ready" && Boolean(job.summary?.pdfHash && job.summary?.textKey);
  });
  // Include state/version/model/template/config AND assignment in the snapshot. Stale results never become current silently.
- const snapshot=await sha256Hex(JSON.stringify({ version:"bulk-v1",model:SIMILARITY_EMBEDDING_MODEL,
+ const snapshot=await sha256Hex(JSON.stringify({ version:"bulk-v2",model:SIMILARITY_EMBEDDING_MODEL,
    pipeline:SIMILARITY_PIPELINE_VERSION,template:template?.version??null,thresholds:similarityThresholds(),
    pool:pool.map(entry=>[entry.applicationId,entry.submissionVersionId,entry.participantId,entry.assignedJudgeId,
      preparations.get(keys.get(entry.applicationId)!)?.state??"missing",
@@ -51,10 +54,18 @@ export async function bulkOverview(context:BulkContext):Promise<BulkOverview> {
      canPrepare:actor.roleCode!=="02" || entry.assignedJudgeId===actor.id,message:job?.message??""};
  });
  const emptyCount=reports.filter(entry=>entry.state==="empty").length;
+ const decisionThreshold=similarityThresholds().llmMinPercent;
+ const visiblePairs=(run?.data.results??[]).map(pair=>({
+   ...pair,
+   canMarkLeftNegative:pair.percent>=decisionThreshold && actor.roleCode==="02" && pool.some(entry=>entry.applicationId===pair.leftId && entry.assignedJudgeId===actor.id),
+   canMarkRightNegative:pair.percent>=decisionThreshold && actor.roleCode==="02" && pool.some(entry=>entry.applicationId===pair.rightId && entry.assignedJudgeId===actor.id),
+ }));
  return {poolSize:pool.length,readyCount:ready.length,emptyCount,missingCount:pool.length-ready.length-emptyCount,reports,
    run:run?{status:run.snapshot!==context.snapshot?"stale":run.data.status,processed:run.data.cursor,
      total:run.data.queue.length,possiblePairs:run.data.possiblePairs,screened:run.data.screened,
-     pairs:run.snapshot===context.snapshot?run.data.results:[],updatedAt:run.updatedAt}:null};
+     pairs:run.snapshot===context.snapshot?visiblePairs:[],updatedAt:run.updatedAt,
+     aiStatus:run.data.aiStatus,aiCandidateCount:run.data.aiCandidateCount,aiMessage:run.data.aiMessage,
+     aiModel:run.data.aiModel,aiReviewedAt:run.data.aiReviewedAt}:null};
 }
 export async function startBulk(context:BulkContext) {
  if(context.ready.length<2) throw new SimilarityAccessError(409,"Karşılaştırma için en az iki hazır, onaylı rapor gerekir.");
@@ -71,6 +82,7 @@ export async function startBulk(context:BulkContext) {
    context.ready.some(entry=>(entry.applicationId===left || entry.applicationId===right) && entry.assignedJudgeId===context.actor.id));
  await startBulkRun(context.runId,context.competition.competitionKey,context.actor.id,context.snapshot,{
    status:visible.length?"running":"completed",cursor:0,possiblePairs:plan.possiblePairs,screened:plan.screened,queue:visible,results:[],
+   aiStatus:"not_started",aiCandidateCount:0,aiMessage:"",aiModel:"",aiReviewedAt:null,
  });
 }
 export async function continueBulk(context:BulkContext) {
@@ -134,4 +146,104 @@ export async function continueBulk(context:BulkContext) {
    if(run.data.cursor===run.data.queue.length) run.data.status="completed";
    await saveBulkRun(context.runId,lease,run.data);
  } finally { await releaseBulkRun(context.runId,lease); }
+}
+
+/**
+ * Matematiksel tarama bittikten sonra yalnız eşik üstündeki en güçlü en fazla
+ * beş çifti TEK LLM çağrısıyla açıklar. Sonuç aynı snapshot içinde kalıcıdır;
+ * düğmeye tekrar basmak yeni ücretli çağrı üretmez.
+ */
+export async function reviewBulkWithAi(context:BulkContext):Promise<void> {
+ const lease=await claimBulkRun(context.runId);
+ if(!lease) return;
+ const startedAt=Date.now();
+ try {
+   const run=await readBulkRun(context.runId);
+   if(!run || run.snapshot!==context.snapshot) throw new SimilarityAccessError(409,"Onaylı rapor havuzu değişti. Önce benzerlik taramasını yenileyin.");
+   if(run.data.status!=="completed") throw new SimilarityAccessError(409,"AI yorumu için matematiksel karşılaştırmanın tamamlanması gerekir.");
+   if(run.data.aiStatus==="completed" || run.data.aiStatus==="skipped") return;
+   const thresholds=similarityThresholds();
+   const candidates=[...run.data.results]
+     .filter(pair=>pair.percent>=thresholds.llmMinPercent)
+     .sort((left,right)=>right.percent-left.percent || left.key.localeCompare(right.key))
+     .slice(0,thresholds.llmTopK);
+   run.data.aiCandidateCount=candidates.length;
+   run.data.aiReviewedAt=new Date().toISOString();
+   if(!candidates.length) {
+     run.data.aiStatus="skipped";
+     run.data.aiMessage=`%${thresholds.llmMinPercent} eşiğini geçen rapor çifti bulunmadığı için ücretli AI çağrısı yapılmadı.`;
+     await saveBulkRun(context.runId,lease,run.data);
+     return;
+   }
+   if(!similarityLlmEnabled()) {
+     run.data.aiStatus="skipped";
+     run.data.aiMessage="AI özgünlük yorumu sistem ayarından kapalı; matematiksel sonuçlar korunuyor.";
+     await saveBulkRun(context.runId,lease,run.data);
+     return;
+   }
+   const apiKey=process.env.GEMINI_API_KEY;
+   if(!apiKey) {
+     run.data.aiStatus="failed";
+     run.data.aiMessage="AI özgünlük yorumu için servis anahtarı bulunamadı; matematiksel sonuçlar korunuyor.";
+     await saveBulkRun(context.runId,lease,run.data);
+     return;
+   }
+   const outcome=await explainSimilarityPairs({
+     apiKey,
+     competitionName:context.competition.competitionName,
+     pairs:candidates.map(pair=>({
+       pairKey:pair.key,leftLabel:pair.leftLabel,rightLabel:pair.rightLabel,
+       percent:pair.percent,evidence:pair.evidence,
+     })),
+   });
+   if(!outcome.ok) {
+     run.data.aiStatus="failed";
+     run.data.aiModel=outcome.model??"";
+     run.data.aiMessage=`AI özgünlük yorumu tamamlanamadı: ${outcome.detail.slice(0,300)} Matematiksel sonuçlar korunuyor.`;
+     recordUsage({model:outcome.model??"",promptTokens:0,outputTokens:0,totalTokens:0,
+       durationMs:Date.now()-startedAt,cached:false,error:true,apiCalls:outcome.apiCalls});
+   } else {
+     const reviews=new Map(outcome.reviews.map(review=>[review.pairKey,review]));
+     run.data.results=run.data.results.map(pair=>{
+       const review=reviews.get(pair.key);
+       return review?{...pair,aiReview:{level:review.level,label:review.label,
+         explanation:review.explanation,confidence:review.confidence}}:pair;
+     });
+     run.data.aiStatus="completed";
+     run.data.aiModel=outcome.model;
+     run.data.aiMessage=`${outcome.reviews.length} güçlü rapor çifti tek AI çağrısıyla özgün içerik açısından yorumlandı.`;
+     recordUsage({model:outcome.model,promptTokens:outcome.usage.prompt,outputTokens:outcome.usage.output,
+       totalTokens:outcome.usage.total,durationMs:Date.now()-startedAt,cached:false,error:false,apiCalls:1});
+   }
+   await saveBulkRun(context.runId,lease,run.data);
+ } finally { await releaseBulkRun(context.runId,lease); }
+}
+
+/** Hakemin yalnız kendisine atanmış onaylı raporu, yüksek benzerlik kanıtı üzerinden olumsuza çevirmesi. */
+export async function markBulkApplicationNegative(context:BulkContext,input:{
+ applicationId:string; pairKey:string; reason:string;
+}):Promise<string> {
+ if(context.actor.roleCode!=="02") throw new SimilarityAccessError(403,"Bu kararı yalnızca atanmış hakem verebilir.");
+ const run=await readBulkRun(context.runId);
+ if(!run || run.snapshot!==context.snapshot || run.data.status!=="completed") {
+   throw new SimilarityAccessError(409,"Benzerlik sonucu güncel değil. Önce taramayı tamamlayın.");
+ }
+ const pair=run.data.results.find(item=>item.key===input.pairKey);
+ const thresholds=similarityThresholds();
+ if(!pair || pair.percent<thresholds.llmMinPercent) {
+   throw new SimilarityAccessError(409,"Bu rapor çifti yüksek benzerlik eşiğini karşılamıyor.");
+ }
+ if(input.applicationId!==pair.leftId && input.applicationId!==pair.rightId) {
+   throw new SimilarityAccessError(400,"Seçilen proje bu rapor çiftine ait değil.");
+ }
+ const target=context.pool.find(entry=>entry.applicationId===input.applicationId);
+ if(!target || target.assignedJudgeId!==context.actor.id) {
+   throw new SimilarityAccessError(403,"Yalnızca size atanmış projeyi olumsuza çevirebilirsiniz.");
+ }
+ const peerApplicationId=input.applicationId===pair.leftId?pair.rightId:pair.leftId;
+ await rejectAcceptedApplicationForSimilarity({
+   applicationId:input.applicationId,peerApplicationId,pairKey:pair.key,percent:pair.percent,
+   aiLevel:pair.aiReview?.level??"not_reviewed",reason:input.reason,
+ },context.actor);
+ return "Proje benzerlik incelemesi sonucunda olumsuza çevrildi. Kriter kararları ve inceleme kanıtı korundu.";
 }

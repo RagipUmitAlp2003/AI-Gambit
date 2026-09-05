@@ -4,16 +4,18 @@ import { useEffect, useRef, useState } from "react";
 import { workflowApi } from "../lib/workflow-client";
 import type { CompetitionWorkflow } from "../lib/workflow-types";
 import { COMPETITION_STATUS_LABELS } from "../lib/workflow-types";
-import type { BulkOverview, PreparationState } from "../lib/similarity-bulk-types";
+import type { BulkOverview, BulkPair, PreparationState } from "../lib/similarity-bulk-types";
 import ElapsedTime from "./elapsed-time";
 
-/** Operate: extend the existing workshop. Competition list at left, one action and evidence at right.
- * Quiet teal/white surfaces, plain-language states; no red suspicion card and no AI verdict controls.
+/** Operate: extend the existing workshop. Competition list at left, bounded analysis and evidence at right.
+ * Quiet teal/white surfaces; only the assigned judge's explicit, reasoned action can change a result.
  */
 const STATE_LABELS: Record<PreparationState,string> = {
  missing:"Henüz hazırlanmadı",queued:"Hazırlık bekliyor",running:"Hazırlanıyor",ready:"Hazır",
  partial:"Anlamsal veri eksik",empty:"Karşılaştırılabilir metin yok",failed:"Yeniden deneme gerekiyor",
 };
+const CONFIDENCE_LABELS={low:"Düşük güven",medium:"Orta güven",high:"Yüksek güven"} as const;
+type NegativeDraft={pair:BulkPair;applicationId:string;applicationLabel:string};
 export default function SimilarityWorkspace({competitions}:{competitions:CompetitionWorkflow[]}) {
  const [selected,setSelected]=useState<string|null>(null);
  const [data,setData]=useState<BulkOverview|null>(null);
@@ -21,6 +23,10 @@ export default function SimilarityWorkspace({competitions}:{competitions:Competi
  const [loading,setLoading]=useState(false);
  const [busy,setBusy]=useState(false);
  const [message,setMessage]=useState("");
+ const [notice,setNotice]=useState("");
+ const [negativeDraft,setNegativeDraft]=useState<NegativeDraft|null>(null);
+ const [negativeReason,setNegativeReason]=useState("");
+ const [negativeError,setNegativeError]=useState("");
  const active=useRef(true);
  const generation=useRef(0);
  useEffect(()=>{active.current=true;return()=>{active.current=false;};},[]);
@@ -37,7 +43,7 @@ export default function SimilarityWorkspace({competitions}:{competitions:Competi
  },[selected]);
  function choose(id:string) {
    if(id===selected) { void refresh(); return; }
-   generation.current++;setSelected(id);setData(null);setError("");setLoading(true);setBusy(false);
+   generation.current++;setSelected(id);setData(null);setError("");setNotice("");setLoading(true);setBusy(false);setNegativeDraft(null);
  }
  async function refresh() {
    if(!selected)return;
@@ -80,12 +86,36 @@ export default function SimilarityWorkspace({competitions}:{competitions:Competi
    }catch(caught){if(active.current && generation.current===token)setError(caught instanceof Error?caught.message:"Tarama durdu. Kaldığı yerden devam edebilirsiniz.");}
    finally{if(active.current && generation.current===token){setBusy(false);setMessage("");}}
  }
+ async function explain() {
+   if(!selected || busy || loading || data?.run?.status!=="completed")return;
+   const token=generation.current;setBusy(true);setError("");setNotice("");setMessage("En güçlü rapor çiftleri özgün içerik açısından yorumlanıyor…");
+   try{
+     const next=await workflowApi.bulkSimilarityAction(selected,"explain");
+     if(active.current && generation.current===token)setData(next);
+   }catch(caught){if(active.current && generation.current===token)setError(caught instanceof Error?caught.message:"AI özgünlük yorumu tamamlanamadı.");}
+   finally{if(active.current && generation.current===token){setBusy(false);setMessage("");}}
+ }
+ function openNegative(pair:BulkPair,applicationId:string,applicationLabel:string) {
+   setNegativeDraft({pair,applicationId,applicationLabel});setNegativeReason("");setNegativeError("");setNotice("");
+ }
+ async function markNegative() {
+   if(!selected || !negativeDraft || busy)return;
+   const reason=negativeReason.trim();
+   if(!reason){setNegativeError("Olumsuz karar için yarışmacıya gösterilecek kısa bir gerekçe yazın.");return;}
+   const token=generation.current;setBusy(true);setError("");setNegativeError("");setMessage("Hakem kararı kaydediliyor…");
+   try{
+     const next=await workflowApi.bulkSimilarityNegative(selected,{applicationId:negativeDraft.applicationId,
+       pairKey:negativeDraft.pair.key,reason});
+     if(active.current && generation.current===token){setData(next);setNotice(next.notice??"Proje olumsuza çevrildi.");setNegativeDraft(null);setNegativeReason("");}
+   }catch(caught){if(active.current && generation.current===token)setNegativeError(caught instanceof Error?caught.message:"Karar kaydedilemedi.");}
+   finally{if(active.current && generation.current===token){setBusy(false);setMessage("");}}
+ }
  const competition=competitions.find(item=>item.id===selected);
  return <section className="workspace eval-workshop similarity-workspace" aria-labelledby="similarity-heading">
    <div className="workspace-heading"><div>
      <span className="section-kicker">Onaylı raporlar</span>
      <h1 id="similarity-heading">Benzerlik Analizi</h1>
-     <p>Aynı yarışma, yıl ve aşamadaki onaylanmış raporları birlikte karşılaştırın. Bu çalışma hakem kararlarını değiştirmez.</p>
+     <p>Aynı yarışma, yıl ve aşamadaki onaylanmış raporları birlikte karşılaştırın; güçlü eşleşmeleri kanıtlarıyla inceleyin.</p>
    </div></div>
    <div className="eval-workshop-layout">
      <nav className="eval-competition-list" aria-label="Benzerlik yarışmaları">
@@ -99,13 +129,14 @@ export default function SimilarityWorkspace({competitions}:{competitions:Competi
          <div className="similarity-toolbar"><h2>{competition?.competitionName}</h2>
            <button type="button" className="text-button" disabled={busy||loading} onClick={()=>void refresh()}>Durumu yenile</button></div>
          {error?<p className="similarity-message" role="alert">{error}</p>:null}
+         {notice?<p className="similarity-notice" role="status">{notice}</p>:null}
          {loading?<p role="status">Onaylı raporlar yükleniyor…</p>:null}
          {data?<>
            <div className="similarity-intro">
              <p><strong>{data.poolSize} onaylı rapor</strong> · {data.readyCount} karşılaştırmaya hazır
                {data.missingCount? ` · ${data.missingCount} hazırlık bekliyor`:""}
                {data.emptyCount? ` · ${data.emptyCount} raporda karşılaştırılabilir metin yok`:""}</p>
-             <p>Ret verilen ve henüz kararı verilmemiş başvurular bu listeye alınmaz. Kayıtlı verilerin karşılaştırılması yeni bir AI çağrısı yapmaz.</p>
+             <p>Ret verilen ve henüz kararı verilmemiş başvurular bu listeye alınmaz. Matematiksel karşılaştırma yeni bir üretken AI çağrısı yapmaz.</p>
              <button type="button" className="primary-button" disabled={busy||loading||data.readyCount<2||data.missingCount>0}
                onClick={()=>void compare()}>{busy?"İşlem sürüyor…":data.run?.status==="running"?"Taramaya devam et":data.run?.status==="completed"?"Kayıtlı sonuçları göster":"Benzerlikleri analiz et"}</button>
              {data.readyCount<2?<p>Karşılaştırma için en az iki hazır rapor gerekir.</p>:null}
@@ -129,14 +160,44 @@ export default function SimilarityWorkspace({competitions}:{competitions:Competi
                {data.run.screened?" Büyük havuzda önce anlam ve metin yakınlığıyla aday çiftler seçildi; seçilmeyen çiftler için oran üretilmedi.":" Küçük havuzdaki size açık tüm farklı takım çiftleri karşılaştırılır."}</p>
              <p>Oran, iki rapordaki karşılaştırılabilir metnin eşleşen paylarının ortalamasıdır; projenin özgünlük puanı veya intihal kararı değildir.
                Şablon ve ortak dil yine de oranı etkileyebilir. En yakın en fazla 50 çift gösterilir.</p>
+             {data.run.status==="completed"?<div className="similarity-ai-action">
+               <div><strong>Özgün içerik açıklaması</strong>
+                 <p>%85 ve üzerindeki en güçlü en fazla 5 rapor çifti; problem, çözüm, mimari ve ayırt edici yöntemler açısından tek AI çağrısıyla yorumlanır. Matematiksel oran değişmez.</p></div>
+               {data.run.aiStatus==="not_started"||data.run.aiStatus==="failed"?<button type="button" className="secondary-button"
+                 disabled={busy||loading} onClick={()=>void explain()}>{data.run.aiStatus==="failed"?"AI yorumunu yeniden dene":"Güçlü eşleşmeleri AI ile yorumla"}</button>:null}
+               {data.run.aiStatus!=="not_started"?<p className={`similarity-ai-status ${data.run.aiStatus}`}>{data.run.aiMessage}</p>:null}
+             </div>:null}
              {!data.run.pairs.length?<p>Gösterilecek rapor çifti henüz yok.</p>:data.run.pairs.map(pair=><details className="similarity-pair" key={pair.key}>
                <summary><span><strong>{pair.leftLabel} ↔ {pair.rightLabel}</strong><small>Eşleşen bölümleri incele</small></span>
                  <span className="similarity-percent">%{pair.percent}<small>metin yakınlığı</small></span></summary>
                <p>{pair.directCount} bölümde aynı veya çok yakın ifadeler · {pair.semanticCount} bölümde benzer anlatım.</p>
+               {pair.aiReview?<div className={`similarity-ai-review level-${pair.aiReview.level}`}>
+                 <div><strong>{pair.aiReview.label}</strong><span>{CONFIDENCE_LABELS[pair.aiReview.confidence]}</span></div>
+                 <p>{pair.aiReview.explanation}</p>
+                 <small>AI yalnızca aşağıdaki kayıtlı eşleşmeleri yorumladı; oranı ve kanıtları değiştirmedi.</small>
+               </div>:null}
                {pair.evidence.length?pair.evidence.map((item,index)=><div className="similarity-evidence" key={index}>
                  <div><strong>{pair.leftLabel} · s. {item.leftPage}</strong><small>{item.leftSection}</small><blockquote>{item.leftText}</blockquote></div>
                  <div><strong>{pair.rightLabel} · s. {item.rightPage}</strong><small>{item.rightSection}</small><blockquote>{item.rightText}</blockquote></div>
                </div>):<p>Güçlü bir metin eşleşmesi bulunmadı.</p>}
+               {pair.canMarkLeftNegative||pair.canMarkRightNegative?<div className="similarity-decision-actions">
+                 <strong>Hakem kararı</strong><p>İncelemeniz sonucunda kendi projenizin önceki onayını gerekçeyle olumsuza çevirebilirsiniz.</p>
+                 <div>{pair.canMarkLeftNegative?<button type="button" className="text-button danger" disabled={busy}
+                   onClick={()=>openNegative(pair,pair.leftId,pair.leftLabel)}>{pair.leftLabel} projesini olumsuza çevir</button>:null}
+                   {pair.canMarkRightNegative?<button type="button" className="text-button danger" disabled={busy}
+                   onClick={()=>openNegative(pair,pair.rightId,pair.rightLabel)}>{pair.rightLabel} projesini olumsuza çevir</button>:null}</div>
+               </div>:null}
+               {negativeDraft?.pair.key===pair.key?<div className="similarity-negative-form">
+                 <div><strong>{negativeDraft.applicationLabel} projesi olumsuza çevrilecek</strong>
+                   <p>Bu işlem önceki nihai onayı RET olarak günceller. Kriter kararları ve benzerlik kanıtı korunur.</p></div>
+                 <label>Hakem gerekçesi<textarea maxLength={1000} rows={4} value={negativeReason}
+                   onChange={event=>{setNegativeReason(event.target.value);setNegativeError("");}}
+                   placeholder="Benzerliğin neden proje sonucu açısından olumsuz değerlendirildiğini açıklayın."/></label>
+                 {negativeError?<p className="field-error" role="alert">{negativeError}</p>:null}
+                 <div className="similarity-form-actions"><button type="button" className="text-button" disabled={busy}
+                   onClick={()=>{setNegativeDraft(null);setNegativeReason("");setNegativeError("");}}>Vazgeç</button>
+                   <button type="button" className="primary-button danger" disabled={busy||!negativeReason.trim()} onClick={()=>void markNegative()}>Olumsuz kararı kaydet</button></div>
+               </div>:null}
              </details>)}
            </section>:null}
          </>:null}

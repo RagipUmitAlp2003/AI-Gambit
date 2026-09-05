@@ -50,6 +50,8 @@ export type SimilarityThresholds = {
   reportHighPercent: number;
   /** LLM açıklama katmanına giden en güçlü eşleşme sayısı (madde 5 · Katman 3). */
   llmTopK: number;
+  /** Yalnızca bu rapor yakınlığına ulaşan çiftler toplu LLM yorumuna alınır. */
+  llmMinPercent: number;
   /** Bunun altındaki karşılaştırılabilir kelime sayısı MinHash havuzuna alınmaz (madde 5 · Katman 1). */
   minComparableWords: number;
   corroboration: SimilarityCorroborationConfig;
@@ -62,7 +64,8 @@ export const DEFAULT_SIMILARITY_THRESHOLDS: SimilarityThresholds = Object.freeze
   semanticReview: SEMANTIC_REVIEW_THRESHOLD,
   reportReviewPercent: REPORT_REVIEW_PERCENT,
   reportHighPercent: REPORT_HIGH_PERCENT,
-  llmTopK: 3,
+  llmTopK: 5,
+  llmMinPercent: 85,
   minComparableWords: 40,
   corroboration: Object.freeze({
     minSharedRareTerms: 3,
@@ -107,6 +110,7 @@ export function similarityThresholds(env: EnvSource = process.env): SimilarityTh
     reportHighPercent = defaults.reportHighPercent;
   }
   const llmTopK = Math.round(boundedNumber(env.SIMILARITY_LLM_TOP_K, 1, 5, defaults.llmTopK));
+  const llmMinPercent = Math.round(boundedNumber(env.SIMILARITY_LLM_MIN_PERCENT, 1, 100, defaults.llmMinPercent));
   return {
     directHigh,
     directReview,
@@ -115,6 +119,7 @@ export function similarityThresholds(env: EnvSource = process.env): SimilarityTh
     reportReviewPercent,
     reportHighPercent,
     llmTopK,
+    llmMinPercent,
     minComparableWords: defaults.minComparableWords,
     corroboration: defaults.corroboration,
   };

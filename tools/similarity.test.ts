@@ -959,6 +959,15 @@ test("kill switch: SIMILARITY_LLM_ENABLED off/0 kapatır, tanımsız açıktır"
   assert.equal(similarityLlmEnabled({ SIMILARITY_LLM_ENABLED: "OFF" }), false);
 });
 
+test("toplu AI yorumu eşik üstünde en fazla beş çiftle sınırlandırılır", () => {
+  const defaults = similarityThresholds({});
+  assert.equal(defaults.llmMinPercent, 85);
+  assert.equal(defaults.llmTopK, 5);
+  const overridden = similarityThresholds({ SIMILARITY_LLM_MIN_PERCENT: "92", SIMILARITY_LLM_TOP_K: "2" });
+  assert.equal(overridden.llmMinPercent, 92);
+  assert.equal(overridden.llmTopK, 2);
+});
+
 test("embedding önbellek anahtarına şablon sürümü GİRMEZ; damga değişince yalnızca satırlar yenilenir", () => {
   const db = readFileSync("app/lib/workflow-db.ts", "utf8");
   const find = db.slice(db.indexOf("export async function findStoredSimilarityChunks"));
@@ -1099,4 +1108,25 @@ test("otomatik benzerlikte üretken LLM maliyeti yoktur", () => {
   const route=readFileSync("app/api/applications/[id]/similarity/route.ts","utf8");
   assert.doesNotMatch(route,/explainSimilarityMatches|generateContent/);
   assert.match(route,/llmApiCalls:\s*0/);
+});
+
+test("yüksek benzerlikte hakem kararı AI açıklamasından bağımsız, yetkili ve gerekçeli kalır", () => {
+  const bulk=readFileSync("app/lib/similarity-bulk.ts","utf8");
+  const decision=bulk.slice(bulk.indexOf("export async function markBulkApplicationNegative"));
+  assert.match(decision,/context\.actor\.roleCode!=="02"/);
+  assert.match(decision,/pair\.percent<thresholds\.llmMinPercent/);
+  assert.match(decision,/target\.assignedJudgeId!==context\.actor\.id/);
+  assert.doesNotMatch(decision,/aiStatus!=="completed"/,
+    "Üretken AI açıklaması arızalanırsa hakemin kanıta dayalı kararı kilitlenmemelidir.");
+  assert.match(decision,/pair\.aiReview\?\.level\?\?"not_reviewed"/);
+  const route=readFileSync("app/api/competitions/[id]/bulk-similarity/route.ts","utf8");
+  assert.match(route,/body\.action==="mark_negative"/);
+  assert.match(route,/requirePermission\(request,"final_judgement"\)/);
+  assert.match(route,/body\.reason\.trim\(\)\.length>1000/);
+  const db=readFileSync("app/lib/workflow-db.ts","utf8");
+  const transition=db.slice(db.indexOf("export async function rejectAcceptedApplicationForSimilarity"));
+  assert.match(transition,/current\.outcome !== "accepted"/);
+  assert.match(transition,/current\.decisions_locked === 1/);
+  assert.match(transition,/similarityDecision:/);
+  assert.match(transition,/markSimilarityResultsStale/);
 });

@@ -70,13 +70,22 @@ export async function readPreparations(keys:string[]) {
 export type BulkRunData = {
  status:"running"|"completed"; cursor:number; possiblePairs:number; screened:boolean;
  queue:Array<[string,string]>; results:BulkPair[];
+ aiStatus:"not_started"|"completed"|"failed"|"skipped";
+ aiCandidateCount:number; aiMessage:string; aiModel:string; aiReviewedAt:string|null;
 };
 export type BulkRun = { snapshot:string; data:BulkRunData; updatedAt:string };
 export async function readBulkRun(id:string):Promise<BulkRun|null> {
  const db=await similarityDatabase();
  const row=await db.prepare("SELECT snapshot,data_json,updated_at FROM similarity_bulk_runs WHERE id=?")
  .bind(id).first<{snapshot:string;data_json:string;updated_at:string}>();
- return row?{snapshot:row.snapshot,data:JSON.parse(row.data_json),updatedAt:row.updated_at}:null;
+ if(!row) return null;
+ const parsed=JSON.parse(row.data_json) as Partial<BulkRunData>;
+ return {snapshot:row.snapshot,data:{
+   status:parsed.status??"completed",cursor:parsed.cursor??0,possiblePairs:parsed.possiblePairs??0,
+   screened:parsed.screened??false,queue:parsed.queue??[],results:parsed.results??[],
+   aiStatus:parsed.aiStatus??"not_started",aiCandidateCount:parsed.aiCandidateCount??0,
+   aiMessage:parsed.aiMessage??"",aiModel:parsed.aiModel??"",aiReviewedAt:parsed.aiReviewedAt??null,
+ },updatedAt:row.updated_at};
 }
 export async function startBulkRun(id:string,competitionKey:string,actorId:string,snapshot:string,data:BulkRunData) {
  const db=await similarityDatabase();

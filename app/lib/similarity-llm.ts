@@ -208,3 +208,167 @@ export async function explainSimilarityMatches(input: {
   }
   return { ok: true, annotations, model: outcome.model, apiCalls: 1 };
 }
+
+/* ------------------------------------------------------------------------- *
+ * Toplu yarışma görünümü: rapor çiftlerini TEK çağrıda özgünlük açısından
+ * yorumlar. Eski eşleşme-sınıflandırma sözleşmesi geriye uyum için yukarıda
+ * korunur; toplu ekran yalnızca bu çift düzeyi sözleşmeyi kullanır.
+ * ------------------------------------------------------------------------- */
+
+export const SIMILARITY_PAIR_LEVELS = {
+  common: "Ortak şablon veya alan dili",
+  technical_common: "Ortak teknik tercih",
+  conceptual: "Kısmi kavramsal benzerlik",
+  strong: "Güçlü özgün içerik benzerliği",
+  insufficient: "Yorum için kanıt yetersiz",
+} as const;
+
+export type SimilarityPairLevel = keyof typeof SIMILARITY_PAIR_LEVELS;
+export type SimilarityPairEvidenceInput = {
+  kind: "direct" | "semantic";
+  leftPage: number;
+  rightPage: number;
+  leftSection: string;
+  rightSection: string;
+  leftText: string;
+  rightText: string;
+};
+export type SimilarityLlmPairInput = {
+  pairKey: string;
+  leftLabel: string;
+  rightLabel: string;
+  percent: number;
+  evidence: SimilarityPairEvidenceInput[];
+};
+export type SimilarityLlmPairReview = {
+  pairKey: string;
+  level: SimilarityPairLevel;
+  label: string;
+  explanation: string;
+  confidence: "low" | "medium" | "high";
+};
+export type SimilarityPairLlmOutcome =
+  | { ok: true; reviews: SimilarityLlmPairReview[]; model: string; apiCalls: 1;
+      usage: { prompt: number; output: number; total: number } }
+  | { ok: false; detail: string; apiCalls: 0 | 1; model?: string };
+
+const PAIR_RESPONSE_SCHEMA = {
+  type: "object",
+  required: ["ciftler"],
+  properties: {
+    ciftler: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["pairKey", "seviye", "guven", "aciklama"],
+        properties: {
+          pairKey: { type: "string" },
+          seviye: { type: "string", enum: Object.keys(SIMILARITY_PAIR_LEVELS) },
+          guven: { type: "string", enum: ["low", "medium", "high"] },
+          aciklama: { type: "string" },
+        },
+      },
+    },
+  },
+} as const;
+
+function pairSystemInstruction(competitionName: string): string {
+  return [
+    `Sen "${competitionName}" yarışmasında rapor çiftlerinin özgün içerik benzerliğini açıklayan ikinci gözsün.`,
+    "Sana tam PDF'ler değil, matematiksel benzerlik motorunun seçtiği en güçlü rapor çiftleri ve yalnızca eşleşen kısa alıntılar verilir.",
+    "Amacın metin yakınlığının kaynağını ayırmaktır: resmî şablon/ortak alan dili, sıradan teknik tercih, kısmi kavramsal benzerlik, özgün çözüm-tasarım anlatımında güçlü benzerlik veya yetersiz kanıt.",
+    "Özgünlük açısından özellikle problem tanımı, önerilen çözüm, sistem mimarisi, ayırt edici yöntem/algoritma ve doğrulama yaklaşımının birlikte örtüşmesine bak.",
+    "Aynı malzeme, bileşen, standart, yarışma terimi veya teknik zorunluluk tek başına özgün çözüm benzerliği değildir.",
+    "Matematiksel yüzdeyi değiştirme, yeni oran veya yeni eşleşme üretme. Verilmeyen sayfa ve içeriğe atıf yapma.",
+    "İntihal ya da otomatik ret kararı verme. Hakemin karar verebilmesi için yalnızca somut, kısa ve tarafsız bir açıklama yaz.",
+    "Her pairKey için tam bir yanıt üret ve yalnızca istenen JSON şemasını döndür.",
+  ].join("\n");
+}
+
+function pairReviewsOf(payload: unknown, knownKeys: Set<string>): SimilarityLlmPairReview[] | null {
+  const rows = (payload as { ciftler?: unknown } | null)?.ciftler;
+  if (!Array.isArray(rows)) return null;
+  const seen = new Set<string>();
+  const reviews: SimilarityLlmPairReview[] = [];
+  for (const row of rows) {
+    const item = row as { pairKey?: unknown; seviye?: unknown; guven?: unknown; aciklama?: unknown };
+    const pairKey = typeof item.pairKey === "string" ? item.pairKey : "";
+    const rawLevel = typeof item.seviye === "string" ? item.seviye : "";
+    const rawConfidence = typeof item.guven === "string" ? item.guven : "";
+    const explanation = capText(item.aciklama);
+    if (!knownKeys.has(pairKey) || seen.has(pairKey) || !(rawLevel in SIMILARITY_PAIR_LEVELS)
+      || !["low", "medium", "high"].includes(rawConfidence) || !explanation) continue;
+    const level = rawLevel as SimilarityPairLevel;
+    const confidence = rawConfidence as "low" | "medium" | "high";
+    seen.add(pairKey);
+    reviews.push({ pairKey, level, label: SIMILARITY_PAIR_LEVELS[level], explanation, confidence });
+  }
+  return reviews;
+}
+
+/** En fazla beş rapor çiftini, tam PDF göndermeden, tek üretken çağrıda yorumlar. */
+export async function explainSimilarityPairs(input: {
+  apiKey: string;
+  competitionName: string;
+  pairs: SimilarityLlmPairInput[];
+  model?: string;
+  timeoutMs?: number;
+  generate?: typeof runSingleGeneration;
+}): Promise<SimilarityPairLlmOutcome> {
+  if (!input.pairs.length) return { ok: false, detail: "Yorumlanacak rapor çifti yok.", apiCalls: 0 };
+  const generate = input.generate ?? runSingleGeneration;
+  const model = input.model ?? (process.env.GEMINI_MODEL || "gemini-3-flash-preview");
+  const pairs = input.pairs.slice(0, 5).map((pair) => ({
+    pairKey: pair.pairKey,
+    solRapor: pair.leftLabel,
+    sagRapor: pair.rightLabel,
+    matematikselOran: pair.percent,
+    kanitlar: pair.evidence.slice(0, 5).map((evidence) => ({
+      tur: evidence.kind === "direct" ? "dogrudan" : "anlamsal",
+      solSayfa: evidence.leftPage,
+      sagSayfa: evidence.rightPage,
+      solBolum: evidence.leftSection.slice(0, 160),
+      sagBolum: evidence.rightSection.slice(0, 160),
+      solAlinti: evidence.leftText.slice(0, SIMILARITY_LLM_EXCERPT_CHARS),
+      sagAlinti: evidence.rightText.slice(0, SIMILARITY_LLM_EXCERPT_CHARS),
+    })),
+  }));
+  const outcome = await generate({
+    apiKey: input.apiKey,
+    model,
+    timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    label: "similarity-pairs",
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: pairSystemInstruction(input.competitionName) }] },
+      contents: [{ role: "user", parts: [{ text: JSON.stringify({ ciftler: pairs }) }] }],
+      generationConfig: {
+        thinkingConfig: { thinkingLevel: "LOW" },
+        maxOutputTokens: 3072,
+        responseMimeType: "application/json",
+        responseJsonSchema: PAIR_RESPONSE_SCHEMA,
+      },
+    }),
+  });
+  if (!outcome.ok) return { ok: false, detail: outcome.detail, apiCalls: outcome.apiCalls, model: outcome.model };
+  const reviews = pairReviewsOf(
+    parseJsonLoose(extractGeminiText(outcome.payload)),
+    new Set(pairs.map((pair) => pair.pairKey)),
+  );
+  if (!reviews?.length) {
+    return { ok: false, detail: "AI geçerli bir rapor çifti açıklaması döndürmedi.", apiCalls: 1, model: outcome.model };
+  }
+  const usage = (outcome.payload as { usageMetadata?: {
+    promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number;
+  } })?.usageMetadata;
+  return {
+    ok: true,
+    reviews,
+    model: outcome.model,
+    apiCalls: 1,
+    usage: {
+      prompt: Number(usage?.promptTokenCount) || 0,
+      output: Number(usage?.candidatesTokenCount) || 0,
+      total: Number(usage?.totalTokenCount) || 0,
+    },
+  };
+}

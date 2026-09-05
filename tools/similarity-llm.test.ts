@@ -18,6 +18,7 @@ import { readFileSync } from "node:fs";
 import {
   SIMILARITY_LLM_CLASSES,
   explainSimilarityMatches,
+  explainSimilarityPairs,
   type SimilarityLlmMatchInput,
 } from "../app/lib/similarity-llm.ts";
 import type { GenerationInput, GenerationOutcome } from "../app/lib/gemini-generation.ts";
@@ -173,7 +174,31 @@ test("otomatik rota her durumda üretken LLM'i kapalı tutar", () => {
   const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
   assert.doesNotMatch(route, /similarityLlmEnabled\(\)|body\.skipLlm|llmInputs/);
   assert.match(route, /llmApiCalls:\s*0/);
-  assert.doesNotMatch(readFileSync("app/lib/similarity-bulk.ts", "utf8"), /similarity-llm|generateContent/);
+  const bulk = readFileSync("app/lib/similarity-bulk.ts", "utf8");
+  assert.match(bulk, /explainSimilarityPairs/);
+  assert.match(bulk, /pair\.percent>=thresholds\.llmMinPercent/);
+  assert.match(bulk, /slice\(0,thresholds\.llmTopK\)/);
+  assert.doesNotMatch(bulk, /embedTexts\(/);
   const config = readFileSync("app/lib/similarity-config.ts", "utf8");
   assert.match(config, /SIMILARITY_LLM_ENABLED/, "Eski dağıtımlar için yapılandırma geriye uyumlu kalır.");
+});
+
+test("toplu çift açıklaması en fazla beş çifti TEK düşük düşünmeli çağrıda yorumlar", async () => {
+  const calls: GenerationInput[] = [];
+  const pairs = Array.from({ length: 6 }, (_, index) => ({
+    pairKey: `a${index}:b${index}`, leftLabel: `A${index}`, rightLabel: `B${index}`, percent: 90,
+    evidence: [{ kind: "semantic" as const, leftPage: 2, rightPage: 3, leftSection: "Çözüm",
+      rightSection: "Mimari", leftText: "özgün çözüm yaklaşımı", rightText: "benzer çözüm yaklaşımı" }],
+  }));
+  const outcome = await explainSimilarityPairs({
+    apiKey: "test-key", competitionName: "Yarışma", pairs,
+    generate: fakeGenerate(calls, JSON.stringify({ ciftler: pairs.slice(0, 5).map((pair) => ({
+      pairKey: pair.pairKey, seviye: "conceptual", guven: "medium", aciklama: "Çözüm yaklaşımı kısmen örtüşüyor."
+    })) })),
+  });
+  assert.equal(calls.length, 1);
+  const body = JSON.parse(calls[0].body);
+  assert.equal(body.contents[0].parts[0].text.includes(pairs[5].pairKey), false, "Altıncı çift modele gitmemelidir.");
+  assert.equal(body.generationConfig.thinkingConfig.thinkingLevel, "LOW");
+  assert.ok(outcome.ok && outcome.reviews.length === 5);
 });

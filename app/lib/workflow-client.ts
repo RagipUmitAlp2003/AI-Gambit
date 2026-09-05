@@ -81,10 +81,14 @@ async function jsonRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
 export const workflowApi = {
   bulkSimilarity: (competitionId: string) => jsonRequest<import("./similarity-bulk-types").BulkOverview>(
     `/api/competitions/${encodeURIComponent(competitionId)}/bulk-similarity`),
-  bulkSimilarityAction: (competitionId: string, action: "start" | "continue" | "prepare", applicationId?: string) =>
+  bulkSimilarityAction: (competitionId: string, action: "start" | "continue" | "prepare" | "explain", applicationId?: string) =>
     jsonRequest<import("./similarity-bulk-types").BulkOverview>(
       `/api/competitions/${encodeURIComponent(competitionId)}/bulk-similarity`,
       { method: "POST", body: JSON.stringify({ action, applicationId }) }),
+  bulkSimilarityNegative: (competitionId: string, input: { applicationId: string; pairKey: string; reason: string }) =>
+    jsonRequest<import("./similarity-bulk-types").BulkOverview>(
+      `/api/competitions/${encodeURIComponent(competitionId)}/bulk-similarity`,
+      { method: "POST", body: JSON.stringify({ action: "mark_negative", ...input }) }),
   /** `openCompetitions`: şu anda başvuruya açık yarışmalar (yayımlanmış profili olanlar). */
   applications: () => jsonRequest<{ applications: CompetitionApplication[]; openCompetitions?: CompetitionEntry[] }>("/api/applications"),
   submitApplication: async (input: {

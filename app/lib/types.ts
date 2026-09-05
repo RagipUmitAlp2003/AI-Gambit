@@ -838,6 +838,16 @@ export type JudgeReview = {
    * birbirinin çalışmasını sessizce ezmesin diye bu damga karşılaştırılır.
    */
   draftSavedAt?: string | null;
+  /** Nihai onay, toplu benzerlik incelemesi sonrasında hakem tarafından değiştirildiyse denetim kanıtı. */
+  similarityDecision?: {
+    pairKey: string;
+    peerApplicationId: string;
+    percent: number;
+    aiLevel: string;
+    reason: string;
+    decidedBy: string;
+    decidedAt: string;
+  } | null;
 };
 
 /* ------------------------------------------------------------------------- *

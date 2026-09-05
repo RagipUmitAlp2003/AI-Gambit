@@ -3214,6 +3214,109 @@ export async function reopenApplicationReview(id: string, judge: AdminAccount): 
   return "reopened";
 }
 
+/**
+ * Onaylanmış bir başvuruyu, yalnızca atanmış hakemin tamamlanmış toplu
+ * benzerlik incelemesindeki somut bir rapor çifti üzerinden OLUMSUZ'a
+ * çevirmesi için atomik karar kapısı. Kriter kararları ve AI analizi aynen
+ * korunur; yalnız genel sonuç, gerekçe ve benzerlik denetim izi güncellenir.
+ */
+export async function rejectAcceptedApplicationForSimilarity(input: {
+  applicationId: string;
+  peerApplicationId: string;
+  pairKey: string;
+  percent: number;
+  aiLevel: string;
+  reason: string;
+}, judge: AdminAccount): Promise<void> {
+  const reason = input.reason.trim().slice(0, 1_000);
+  if (!reason) throw new ConflictError("Projeyi olumsuza çevirmek için hakem gerekçesi zorunludur.");
+  const database = await workflowDatabase();
+  const current = await database.prepare(
+    `SELECT a.status, a.assigned_judge_id, a.review_json, a.competition_key,
+            d.outcome, c.decisions_locked
+       FROM competition_applications a
+       LEFT JOIN application_submission_details d ON d.application_id = a.id
+       LEFT JOIN competitions c ON c.competition_key = a.competition_key
+      WHERE a.id = ? AND a.deleted_at IS NULL`,
+  ).bind(input.applicationId).first<{
+    status: string; assigned_judge_id: string | null; review_json: string | null;
+    competition_key: string; outcome: string | null; decisions_locked: number | null;
+  }>();
+  if (!current) throw new ConflictError("Başvuru bulunamadı.");
+  if (judge.roleCode !== "02" || current.assigned_judge_id !== judge.id) {
+    throw new ConflictError("Yalnızca başvuruya atanmış hakem bu sonucu değiştirebilir.");
+  }
+  if (current.decisions_locked === 1) {
+    throw new ConflictError("Bu yarışmanın hakem kararları donduruldu; sonuç değiştirilemez.");
+  }
+  if (current.status !== "completed" || current.outcome !== "accepted") {
+    throw new ConflictError("Yalnızca daha önce onaylanmış ve kesinleşmiş bir proje olumsuza çevrilebilir.");
+  }
+  const stored = parseJson<JudgeReview>(current.review_json);
+  if (!stored || stored.status !== "completed" || stored.outcome !== "accepted") {
+    throw new ConflictError("Başvurunun geçerli hakem onayı bulunamadı; sonuç değiştirilmedi.");
+  }
+  const timestamp = new Date().toISOString();
+  const next: JudgeReview = {
+    ...stored,
+    status: "completed",
+    outcome: "rejected",
+    outcomeNote: reason,
+    completedAt: timestamp,
+    draftSavedAt: null,
+    similarityDecision: {
+      pairKey: input.pairKey,
+      peerApplicationId: input.peerApplicationId,
+      percent: Math.max(0, Math.min(100, Math.round(input.percent))),
+      aiLevel: input.aiLevel.slice(0, 80),
+      reason,
+      decidedBy: judge.id,
+      decidedAt: timestamp,
+    },
+  };
+  const batch = await database.batch([
+    database.prepare(
+      `UPDATE competition_applications
+          SET review_json = ?, judge_id = ?, judge_name = ?, updated_at = ?, completed_at = ?
+        WHERE id = ? AND status = 'completed' AND assigned_judge_id = ? AND review_json = ?
+          AND EXISTS (SELECT 1 FROM application_submission_details d
+                       WHERE d.application_id = competition_applications.id AND d.outcome = 'accepted')
+          AND NOT EXISTS (SELECT 1 FROM competitions c
+                           WHERE c.competition_key = competition_applications.competition_key
+                             AND c.decisions_locked = 1)`,
+    ).bind(JSON.stringify(next), judge.id, judge.fullName, timestamp, timestamp,
+      input.applicationId, judge.id, current.review_json),
+    database.prepare(
+      `UPDATE application_submission_details
+          SET outcome = 'rejected', outcome_note = ?, decided_at = ?
+        WHERE application_id = ? AND outcome = 'accepted' AND changes() > 0`,
+    ).bind(reason, timestamp, input.applicationId),
+  ]);
+  if (!batch[0]?.meta.changes || !batch[1]?.meta.changes) {
+    throw new ConflictError("Başvuru bu sırada değişti; benzerlik kararı kaydedilmedi. Sayfayı yenileyin.");
+  }
+  await markSimilarityResultsStale(
+    current.competition_key,
+    "Hakem benzerlik incelemesi sonucunda bir başvurunun kararını değiştirdi; havuzu yeniden tarayın.",
+  );
+  await recordWorkflowEvent({
+    subjectType: "application",
+    subjectId: input.applicationId,
+    event: "similarity_decision_completed",
+    actor: judge,
+    detail: `Başvuru benzerlik incelemesi sonucunda reddedildi · yakınlık %${Math.round(input.percent)} · gerekçe: ${reason.slice(0, 400)}`,
+  }).catch((eventError) => console.error("[workflow] benzerlik kararı olayı kaydedilemedi", eventError));
+  await recordAudit({
+    actorId: judge.id,
+    actorEmail: judge.email,
+    actorRole: judge.roleCode,
+    action: "similarity_result_rejected",
+    targetType: "competition_application",
+    targetId: input.applicationId,
+    detail: `eş rapor ${input.peerApplicationId} · çift ${input.pairKey} · yakınlık %${Math.round(input.percent)} · ${reason.slice(0, 400)}`,
+  }).catch((auditError) => console.error("[audit] benzerlik kararı kaydedilemedi", auditError));
+}
+
 /* ------------------------------------------------------------------------- *
  * Benzerlik kayıtları (madde 9)
  *

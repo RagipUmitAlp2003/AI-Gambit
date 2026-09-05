@@ -368,13 +368,14 @@
 .eval-stage-kicker { margin: 0 0 8px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.02em; }
 
 
-/* Similarity is an independent, neutral reading surface; never a rejection signal. */
+/* Similarity is an independent reading surface; only an explicit judge action can change a result. */
 .similarity-workspace .similarity-toolbar { display:flex; align-items:start; justify-content:space-between; gap:16px; }
 .similarity-toolbar h2 { margin:0; font-size:21px; }
 .similarity-intro { padding:22px; background:#eef6f6; border-radius:12px; color:var(--ink); }
 .similarity-intro p { margin:0 0 14px; max-width:72ch; line-height:1.6; }
 .similarity-intro p:last-child { margin:14px 0 0; }
 .similarity-message { padding:16px; background:#eef3f7; border:1px solid var(--line); border-radius:12px; color:var(--ink); }
+.similarity-notice { padding:14px 16px; background:#e8f5ef; border:1px solid #a9d5c1; border-radius:12px; color:#145c43; font-weight:700; }
 .similarity-progress { display:grid; gap:10px; }
 .similarity-progress progress { width:100%; height:12px; accent-color:var(--teal); }
 .similarity-readiness summary { cursor:pointer; padding:14px 0; font-weight:700; }
@@ -384,20 +385,45 @@
 .similarity-readiness span,.similarity-readiness small { color:var(--ink-soft); }
 .similarity-results { margin-top:12px; }
 .similarity-results>p { max-width:72ch; line-height:1.6; color:var(--ink-soft); }
+.similarity-ai-action { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:12px 24px; margin:22px 0 10px; padding:18px; border:1px solid #b9d7d5; border-radius:14px; background:#f0f8f7; }
+.similarity-ai-action strong { color:var(--ink); font-size:15px; }
+.similarity-ai-action p { margin:6px 0 0; max-width:72ch; color:var(--ink-soft); line-height:1.55; }
+.similarity-ai-status { grid-column:1/-1; margin:0!important; padding-top:10px; border-top:1px solid #c9dfdd; font-weight:650; }
+.similarity-ai-status.failed { color:var(--danger); }
+.similarity-ai-status.completed { color:var(--teal-deep); }
 .similarity-pair { border-top:1px solid var(--line); padding:8px 0; }
 .similarity-pair summary { display:flex; justify-content:space-between; align-items:center; gap:18px; cursor:pointer; padding:16px 0; }
 .similarity-pair summary>span { display:grid; gap:6px; }
 .similarity-pair small { display:block; color:var(--ink-soft); font-size:12px; font-weight:400; }
 .similarity-percent { font-size:26px; font-weight:700; text-align:right; white-space:nowrap; color:var(--teal-deep); }
+.similarity-ai-review { display:grid; gap:7px; margin:4px 0 10px; padding:14px 16px; border:1px solid #c6d8dc; border-radius:12px; background:#f5f8f9; }
+.similarity-ai-review>div { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px 16px; }
+.similarity-ai-review>div span { color:var(--ink-soft); font-size:12px; font-weight:700; }
+.similarity-ai-review p { margin:0; max-width:75ch; line-height:1.6; color:var(--ink); }
+.similarity-ai-review>small { color:var(--ink-soft); }
+.similarity-ai-review.level-conceptual,.similarity-ai-review.level-strong { border-color:#dcc48e; background:#fff9ec; }
 .similarity-evidence { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; padding:18px 0; }
 .similarity-evidence>div { min-width:0; }
 .similarity-evidence blockquote { margin:10px 0; padding:14px; background:#f1f5f6; border-radius:8px; line-height:1.65; overflow-wrap:anywhere; }
+.similarity-decision-actions { display:grid; gap:7px; padding:16px 0 8px; border-top:1px solid var(--line); }
+.similarity-decision-actions p { margin:0; color:var(--ink-soft); line-height:1.55; }
+.similarity-decision-actions>div { display:flex; flex-wrap:wrap; gap:10px; }
+.similarity-workspace .text-button.danger { color:var(--danger); border-color:#d9aaa6; }
+.similarity-negative-form { display:grid; gap:14px; margin:12px 0 18px; padding:18px; border:1px solid #cad9dc; border-radius:14px; background:#f7fafb; }
+.similarity-negative-form p { margin:5px 0 0; color:var(--ink-soft); line-height:1.55; }
+.similarity-negative-form label { display:grid; gap:7px; color:var(--ink); font-weight:700; }
+.similarity-negative-form textarea { width:100%; resize:vertical; min-height:96px; padding:12px 14px; border:1px solid var(--line-strong); border-radius:10px; background:#fff; color:var(--ink); font:inherit; line-height:1.55; }
+.similarity-negative-form textarea:focus { outline:2px solid var(--teal-deep); outline-offset:2px; }
+.similarity-negative-form .field-error { margin:0; color:var(--danger); font-size:12px; font-weight:700; }
+.similarity-form-actions { display:flex; justify-content:flex-end; align-items:center; flex-wrap:wrap; gap:10px; }
 .similarity-workspace button:focus-visible,.similarity-workspace summary:focus-visible { outline:2px solid var(--teal-deep); outline-offset:4px; }
 .similarity-workspace button:disabled { opacity:.55; cursor:not-allowed; }
 @media(min-width:1100px) { .eval-home-choices { grid-template-columns:repeat(3,minmax(0,1fr)); } }
 @media(max-width:680px) {
  .similarity-evidence { grid-template-columns:1fr; gap:6px; }
  .similarity-toolbar { flex-direction:column; }
+ .similarity-ai-action { grid-template-columns:1fr; }
+ .similarity-ai-status { grid-column:auto; }
  .similarity-readiness li { align-items:start; flex-direction:column; }
  .similarity-intro { padding:16px; }
 }
