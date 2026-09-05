@@ -54,17 +54,34 @@
   letter-spacing: -.03em;
 }
 .access-brand > span:last-child { font-size: 16px; font-weight: 760; }
-.access-story-copy { width: min(620px, 100%); margin: 80px 0; }
-.access-story-copy .section-kicker { color: #9eddd7; }
+.access-story-copy { width: min(560px, 100%); margin: 44px 0 0; }
+.access-story-copy .section-kicker { color: #9eddd7; font-size: 9.5px; }
 .access-story-copy h1 {
-  max-width: 11ch;
-  margin: 18px 0 22px;
+  max-width: 12ch;
+  margin: 14px 0 18px;
   color: #fff;
-  font-size: clamp(42px, 5vw, 76px);
-  line-height: .98;
-  letter-spacing: -.04em;
+  font-size: clamp(34px, 3.9vw, 58px);
+  line-height: 1;
+  letter-spacing: -.035em;
 }
-.access-story-copy p { max-width: 62ch; margin: 0; color: #b9cbd3; font-size: 16px; line-height: 1.7; }
+.access-story-copy p { max-width: 54ch; margin: 0; color: #b9cbd3; font-size: 14px; line-height: 1.65; }
+.t3-lockup { display: flex; align-items: center; justify-content: center; gap: clamp(12px, 1.6vw, 20px); }
+.t3-lockup-mark { display: block; width: clamp(78px, 8.4vw, 112px); height: auto; }
+.t3-lockup-word { color: currentColor; font-size: clamp(18px, 2vw, 26px); font-weight: 800; line-height: 1.05; letter-spacing: .005em; text-transform: uppercase; }
+.access-hero-logo { width: 100%; padding: clamp(8px, 2vw, 24px) 0; color: #fff; }
+
+.password-gate-page { min-height: 100vh; display: grid; place-items: center; padding: clamp(28px, 5vw, 60px) 20px; background: var(--paper); }
+.password-gate-shell { display: grid; justify-items: center; gap: clamp(22px, 3.4vw, 34px); width: min(520px, 100%); }
+.password-gate-logo { color: var(--ink); }
+.password-gate-logo .t3-lockup-mark { width: clamp(62px, 6.6vw, 84px); }
+.password-gate-logo .t3-lockup-word { font-size: clamp(16px, 1.7vw, 21px); }
+.password-gate-card { width: 100%; padding: clamp(26px, 4vw, 40px); border: 1px solid var(--line); border-radius: 18px; background: var(--paper); box-shadow: 0 18px 46px rgba(16, 42, 67, .10); }
+.password-gate-card .admin-entry > header h2 { font-size: clamp(26px, 3vw, 34px); }
+.password-gate-card .admin-entry > header p { max-width: none; }
+.password-gate-card .signin-form { margin-top: 22px; }
+.password-gate-card .primary-button { width: 100%; min-height: 46px; margin-top: 4px; }
+.password-gate-card .page-note { width: auto; margin: 18px 0 0; text-align: center; }
+.password-gate-card .page-note .text-button { padding: 0; font-size: inherit; }
 .access-principle { display: grid; gap: 5px; padding-top: 22px; border-top: 1px solid rgba(255,255,255,.17); }
 .access-principle strong { font-size: 14px; }
 .access-principle span { color: #9fb4bf; font-size: 12px; }
@@ -140,6 +157,10 @@
 .management-sidebar nav button strong { font-size: 12.5px; }
 .management-sidebar nav button small { color: inherit; font-size: 10px; line-height: 1.35; }
 .management-sidebar nav button.active { background: rgba(118,209,200,.14); color: #fff; }
+.management-sidebar-logo { justify-content: flex-start; gap: 10px; margin-top: auto; padding: 20px 8px 18px; color: #edf6f7; }
+.management-sidebar-logo + .signed-user { margin-top: 0; }
+.management-sidebar-logo .t3-lockup-mark { width: 56px; }
+.management-sidebar-logo .t3-lockup-word { font-size: 13px; line-height: 1.1; letter-spacing: .01em; }
 .signed-user { display: grid; grid-template-columns: 38px minmax(0,1fr); gap: 11px; align-items: center; margin-top: auto; padding: 16px 8px 4px; border-top: 1px solid rgba(255,255,255,.14); }
 .signed-user > span { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 11px; background: #78d2c9; color: var(--ink); font-size: 11px; font-weight: 900; }
 .signed-user div { min-width: 0; display: grid; gap: 2px; }
@@ -359,13 +380,15 @@
 @media (max-width: 920px) {
   .access-page { grid-template-columns: 1fr; }
   .access-story { min-height: auto; padding: 34px 28px; }
-  .access-story-copy { margin: 62px 0 48px; }
-  .access-story-copy h1 { max-width: 14ch; font-size: clamp(38px,9vw,62px); }
+  .access-story-copy { margin: 34px 0 0; }
+  .access-story-copy h1 { max-width: 14ch; font-size: clamp(32px,7.4vw,50px); }
+  .access-hero-logo { justify-content: flex-start; padding: 26px 0 30px; }
   .access-panel { min-height: auto; padding: 46px 28px 64px; }
   .management-shell { grid-template-columns: 1fr; }
   .management-sidebar { position: static; height: auto; padding: 14px 18px; }
   .management-brand { padding: 0 0 14px; }
   .management-sidebar nav { grid-template-columns: repeat(3,minmax(0,1fr)); margin-top: 14px; }
+  .management-sidebar-logo { display: none; }
   .signed-user { display: none; }
   .management-topbar { padding: 12px 20px; }
   .admin-row { grid-template-columns: 1fr 1fr; }
@@ -376,8 +399,11 @@
 
 @media (max-height: 800px) and (min-width: 921px) {
   .access-story { padding-top: 34px; padding-bottom: 34px; }
-  .access-story-copy { margin: 38px 0; }
-  .access-story-copy h1 { font-size: clamp(40px, 4.4vw, 64px); }
+  .access-story-copy { margin: 26px 0 0; }
+  .access-story-copy h1 { font-size: clamp(32px, 3.4vw, 50px); }
+  .access-hero-logo { gap: 14px; padding: 6px 0; }
+  .access-hero-logo .t3-lockup-mark { width: clamp(66px, 6.4vw, 86px); }
+  .access-hero-logo .t3-lockup-word { font-size: clamp(16px, 1.6vw, 21px); }
   .access-panel { padding-top: 26px; padding-bottom: 26px; }
   .audience-switch { margin-bottom: 20px; }
   .admin-entry > header h2 { font-size: 32px; }
@@ -391,8 +417,11 @@
 @media (max-width: 620px) {
   .access-panel { order: -1; }
   .access-story { padding: 26px 20px; }
-  .access-story-copy { margin: 48px 0 38px; }
-  .access-story-copy h1 { font-size: 40px; }
+  .access-story-copy { margin: 28px 0 0; }
+  .access-story-copy h1 { font-size: 34px; }
+  .access-hero-logo { gap: 12px; padding: 24px 0 26px; }
+  .access-hero-logo .t3-lockup-mark { width: 66px; }
+  .access-hero-logo .t3-lockup-word { font-size: 17px; }
   .access-panel { padding: 34px 18px 50px; }
   .quick-role-list button { grid-template-columns: 38px minmax(0,1fr); }
   .quick-role-list button small { grid-column: 2; }

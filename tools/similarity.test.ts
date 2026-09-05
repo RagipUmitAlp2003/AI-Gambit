@@ -1000,8 +1000,11 @@ test("benzerlik ayrı çalışma alanındadır; karar kartı ve teknik jargon ku
   assert.match(app,/<SimilarityWorkspace/);
   const ui=readFileSync("app/components/similarity-workspace.tsx","utf8");
   assert.match(ui,/özgünlük puanı veya intihal kararı değildir/);
-  assert.match(ui,/aynı veya çok yakın ifadeler/);
+  assert.match(ui,/yakın ifade/);
   assert.match(ui,/benzer anlatım/);
+  assert.match(ui,/Benzerlik inceleme akışı/);
+  assert.match(ui,/Başvuru kararını gözden geçirin/);
+  assert.doesNotMatch(ui,/projesini olumsuza çevir|proje iptal et/i);
 });
 
 test("rapor sözleşmesi: eşleşme ayrımı ve havuz kesme işareti yapılandırılmış alanlarla taşınır", () => {
@@ -1009,7 +1012,7 @@ test("rapor sözleşmesi: eşleşme ayrımı ve havuz kesme işareti yapılandı
   assert.match(engine,/directCount:matches\.filter\(match=>match\.kind==="direct"\)\.length/);
   assert.match(engine,/semanticCount:matches\.filter\(match=>match\.kind==="semantic"\)\.length/);
   const ui=readFileSync("app/components/similarity-workspace.tsx","utf8");
-  assert.match(ui,/seçilmeyen çiftler için oran üretilmedi/);
+  assert.match(ui,/Büyük havuzda önce en yakın aday çiftler seçildi/);
 });
 
 test("madde 12 · durum 11: her şey ayıklansa bile denetim kaydı R2'ye yazılır, havuz zehirlenmez", () => {

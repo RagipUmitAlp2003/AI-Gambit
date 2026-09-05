@@ -206,8 +206,9 @@ export async function reviewBulkWithAi(context:BulkContext):Promise<void> {
      const reviews=new Map(outcome.reviews.map(review=>[review.pairKey,review]));
      run.data.results=run.data.results.map(pair=>{
        const review=reviews.get(pair.key);
-       return review?{...pair,aiReview:{level:review.level,label:review.label,
-         explanation:review.explanation,confidence:review.confidence}}:pair;
+      return review?{...pair,aiReview:{level:review.level,label:review.label,
+         explanation:review.explanation,confidence:review.confidence,
+         focusAreas:review.focusAreas,dimensions:review.dimensions}}:pair;
      });
      run.data.aiStatus="completed";
      run.data.aiModel=outcome.model;
@@ -245,5 +246,5 @@ export async function markBulkApplicationNegative(context:BulkContext,input:{
    applicationId:input.applicationId,peerApplicationId,pairKey:pair.key,percent:pair.percent,
    aiLevel:pair.aiReview?.level??"not_reviewed",reason:input.reason,
  },context.actor);
- return "Proje benzerlik incelemesi sonucunda olumsuza çevrildi. Kriter kararları ve inceleme kanıtı korundu.";
+ return "Başvuru sonucu benzerlik incelemesinin ardından olumsuz olarak güncellendi. Kriter kararları ve inceleme kanıtı korundu.";
 }

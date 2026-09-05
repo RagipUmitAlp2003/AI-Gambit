@@ -193,7 +193,9 @@ test("toplu çift açıklaması en fazla beş çifti TEK düşük düşünmeli �
   const outcome = await explainSimilarityPairs({
     apiKey: "test-key", competitionName: "Yarışma", pairs,
     generate: fakeGenerate(calls, JSON.stringify({ ciftler: pairs.slice(0, 5).map((pair) => ({
-      pairKey: pair.pairKey, seviye: "conceptual", guven: "medium", aciklama: "Çözüm yaklaşımı kısmen örtüşüyor."
+      pairKey: pair.pairKey, seviye: "conceptual", guven: "medium", aciklama: "Çözüm yaklaşımı kısmen örtüşüyor.",
+      odaklar: ["görüntü işleme yöntemi"],
+      boyutlar: { problem: "low", cozum: "high", mimari: "medium", yontem: "high", dogrulama: "not_evidenced" },
     })) })),
   });
   assert.equal(calls.length, 1);
@@ -201,4 +203,6 @@ test("toplu çift açıklaması en fazla beş çifti TEK düşük düşünmeli �
   assert.equal(body.contents[0].parts[0].text.includes(pairs[5].pairKey), false, "Altıncı çift modele gitmemelidir.");
   assert.equal(body.generationConfig.thinkingConfig.thinkingLevel, "LOW");
   assert.ok(outcome.ok && outcome.reviews.length === 5);
+  assert.equal(outcome.ok && outcome.reviews[0].dimensions.solution, "high");
+  assert.deepEqual(outcome.ok && outcome.reviews[0].focusAreas, ["görüntü işleme yöntemi"]);
 });

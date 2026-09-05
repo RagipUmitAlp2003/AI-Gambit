@@ -1,10 +1,20 @@
 export type PreparationState = "missing" | "queued" | "running" | "ready" | "partial" | "empty" | "failed";
 export type SimilarityAiLevel = "common" | "technical_common" | "conceptual" | "strong" | "insufficient";
+export type SimilarityAiDimension = "not_evidenced" | "low" | "medium" | "high";
 export type SimilarityAiReview = {
  level: SimilarityAiLevel;
  label: string;
  explanation: string;
  confidence: "low" | "medium" | "high";
+ /** Eski kayıtlarda bulunmayabilir; yalnız modele verilen eşleşme kanıtını özetler. */
+ focusAreas?: string[];
+ dimensions?: {
+   problem: SimilarityAiDimension;
+   solution: SimilarityAiDimension;
+   architecture: SimilarityAiDimension;
+   method: SimilarityAiDimension;
+   validation: SimilarityAiDimension;
+ };
 };
 export type BulkPair = {
  key: string; leftId: string; rightId: string; leftLabel: string; rightLabel: string;

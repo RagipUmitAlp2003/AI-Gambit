@@ -246,7 +246,16 @@ export type SimilarityLlmPairReview = {
   label: string;
   explanation: string;
   confidence: "low" | "medium" | "high";
+  focusAreas: string[];
+  dimensions: {
+    problem: SimilarityPairDimension;
+    solution: SimilarityPairDimension;
+    architecture: SimilarityPairDimension;
+    method: SimilarityPairDimension;
+    validation: SimilarityPairDimension;
+  };
 };
+export type SimilarityPairDimension = "not_evidenced" | "low" | "medium" | "high";
 export type SimilarityPairLlmOutcome =
   | { ok: true; reviews: SimilarityLlmPairReview[]; model: string; apiCalls: 1;
       usage: { prompt: number; output: number; total: number } }
@@ -260,12 +269,24 @@ const PAIR_RESPONSE_SCHEMA = {
       type: "array",
       items: {
         type: "object",
-        required: ["pairKey", "seviye", "guven", "aciklama"],
+        required: ["pairKey", "seviye", "guven", "aciklama", "odaklar", "boyutlar"],
         properties: {
           pairKey: { type: "string" },
           seviye: { type: "string", enum: Object.keys(SIMILARITY_PAIR_LEVELS) },
           guven: { type: "string", enum: ["low", "medium", "high"] },
           aciklama: { type: "string" },
+          odaklar: { type: "array", maxItems: 3, items: { type: "string" } },
+          boyutlar: {
+            type: "object",
+            required: ["problem", "cozum", "mimari", "yontem", "dogrulama"],
+            properties: {
+              problem: { type: "string", enum: ["not_evidenced", "low", "medium", "high"] },
+              cozum: { type: "string", enum: ["not_evidenced", "low", "medium", "high"] },
+              mimari: { type: "string", enum: ["not_evidenced", "low", "medium", "high"] },
+              yontem: { type: "string", enum: ["not_evidenced", "low", "medium", "high"] },
+              dogrulama: { type: "string", enum: ["not_evidenced", "low", "medium", "high"] },
+            },
+          },
         },
       },
     },
@@ -277,8 +298,12 @@ function pairSystemInstruction(competitionName: string): string {
     `Sen "${competitionName}" yarışmasında rapor çiftlerinin özgün içerik benzerliğini açıklayan ikinci gözsün.`,
     "Sana tam PDF'ler değil, matematiksel benzerlik motorunun seçtiği en güçlü rapor çiftleri ve yalnızca eşleşen kısa alıntılar verilir.",
     "Amacın metin yakınlığının kaynağını ayırmaktır: resmî şablon/ortak alan dili, sıradan teknik tercih, kısmi kavramsal benzerlik, özgün çözüm-tasarım anlatımında güçlü benzerlik veya yetersiz kanıt.",
-    "Özgünlük açısından özellikle problem tanımı, önerilen çözüm, sistem mimarisi, ayırt edici yöntem/algoritma ve doğrulama yaklaşımının birlikte örtüşmesine bak.",
+    "Özgünlük açısından problem tanımı, önerilen çözüm, sistem mimarisi, ayırt edici yöntem/algoritma ve doğrulama yaklaşımını AYRI AYRI değerlendir.",
     "Aynı malzeme, bileşen, standart, yarışma terimi veya teknik zorunluluk tek başına özgün çözüm benzerliği değildir.",
+    "Her boyut için yalnız verilen alıntıların kanıtladığı düzeyi yaz: not_evidenced, low, medium veya high. Alıntıda o boyut yoksa düşük deme; not_evidenced kullan.",
+    "odaklar alanına benzerliğin görüldüğü en fazla üç somut konu yaz. Genel 'teknik içerik' gibi belirsiz ifadeler kullanma.",
+    "Güçlü özgün içerik benzerliği için yalnız ortak sözcük yetmez; problem-çözüm ilişkisi, mimari akış veya ayırt edici yöntemde somut örtüşme gerekir.",
+    "Açıklamada önce hangi özgün unsurun örtüştüğünü, sonra kanıtın sınırını belirt. Verilmeyen bölümlerin farklı veya aynı olduğunu varsayma.",
     "Matematiksel yüzdeyi değiştirme, yeni oran veya yeni eşleşme üretme. Verilmeyen sayfa ve içeriğe atıf yapma.",
     "İntihal ya da otomatik ret kararı verme. Hakemin karar verebilmesi için yalnızca somut, kısa ve tarafsız bir açıklama yaz.",
     "Her pairKey için tam bir yanıt üret ve yalnızca istenen JSON şemasını döndür.",
@@ -291,7 +316,8 @@ function pairReviewsOf(payload: unknown, knownKeys: Set<string>): SimilarityLlmP
   const seen = new Set<string>();
   const reviews: SimilarityLlmPairReview[] = [];
   for (const row of rows) {
-    const item = row as { pairKey?: unknown; seviye?: unknown; guven?: unknown; aciklama?: unknown };
+    const item = row as { pairKey?: unknown; seviye?: unknown; guven?: unknown; aciklama?: unknown;
+      odaklar?: unknown; boyutlar?: unknown };
     const pairKey = typeof item.pairKey === "string" ? item.pairKey : "";
     const rawLevel = typeof item.seviye === "string" ? item.seviye : "";
     const rawConfidence = typeof item.guven === "string" ? item.guven : "";
@@ -300,8 +326,22 @@ function pairReviewsOf(payload: unknown, knownKeys: Set<string>): SimilarityLlmP
       || !["low", "medium", "high"].includes(rawConfidence) || !explanation) continue;
     const level = rawLevel as SimilarityPairLevel;
     const confidence = rawConfidence as "low" | "medium" | "high";
+    const allowedDimensions = new Set<SimilarityPairDimension>(["not_evidenced", "low", "medium", "high"]);
+    const rawDimensions = (item.boyutlar && typeof item.boyutlar === "object")
+      ? item.boyutlar as Record<string, unknown> : {};
+    const dimension = (key: string): SimilarityPairDimension => {
+      const value = rawDimensions[key];
+      return typeof value === "string" && allowedDimensions.has(value as SimilarityPairDimension)
+        ? value as SimilarityPairDimension : "not_evidenced";
+    };
+    const focusAreas = Array.isArray(item.odaklar)
+      ? item.odaklar.filter((value): value is string => typeof value === "string")
+        .map((value) => value.trim().slice(0, 80)).filter(Boolean).slice(0, 3)
+      : [];
     seen.add(pairKey);
-    reviews.push({ pairKey, level, label: SIMILARITY_PAIR_LEVELS[level], explanation, confidence });
+    reviews.push({ pairKey, level, label: SIMILARITY_PAIR_LEVELS[level], explanation, confidence, focusAreas,
+      dimensions: { problem: dimension("problem"), solution: dimension("cozum"),
+        architecture: dimension("mimari"), method: dimension("yontem"), validation: dimension("dogrulama") } });
   }
   return reviews;
 }

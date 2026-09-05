@@ -5,6 +5,7 @@ import { adminApi } from "../lib/admin-client";
 import type { BootstrapStatus } from "../lib/admin-client";
 import type { AdminAccount } from "../lib/admin-types";
 import { workflowApi } from "../lib/workflow-client";
+import T3Lockup from "./t3-lockup";
 
 type Props = { onSignedIn: (account: AdminAccount) => void | Promise<void> };
 type Panel = "signin" | "register";
@@ -123,6 +124,7 @@ export default function AccessLogin({ onSignedIn }: Props) {
             Yapay zekâ kanıt sunar; nihai karar yetkili kullanıcıda kalır.
           </p>
         </div>
+        <T3Lockup className="access-hero-logo" />
         <div className="access-principle">
           <strong>Yetki görünür, karar izlenebilir.</strong>
           <span>Rolünüz hesabınıza bağlıdır; giriş sırasında rol seçilmez.</span>

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { adminApi } from "../lib/admin-client";
 import type { AdminAccount } from "../lib/admin-types";
+import T3Lockup from "./t3-lockup";
 
 type Props = {
   account: AdminAccount;
@@ -45,8 +46,10 @@ export default function PasswordChangeGate({ account, onChanged, onSignOut }: Pr
   }
 
   return (
-    <main className="access-page">
-      <section className="access-panel" aria-labelledby="password-gate-title">
+    <main className="password-gate-page">
+      <div className="password-gate-shell">
+        <T3Lockup className="password-gate-logo" />
+        <section className="password-gate-card" aria-labelledby="password-gate-title">
         <div className="admin-entry">
           <header>
             <span className="section-kicker">Güvenlik adımı</span>
@@ -101,7 +104,8 @@ export default function PasswordChangeGate({ account, onChanged, onSignOut }: Pr
             <button type="button" className="text-button" onClick={() => onSignOut()}>çıkış yapın</button>.
           </p>
         </div>
-      </section>
+        </section>
+      </div>
     </main>
   );
 }
