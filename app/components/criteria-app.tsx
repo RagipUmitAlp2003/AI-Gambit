@@ -436,7 +436,8 @@ function CriteriaReview({
   publishing: boolean;
   approvalError: string;
 }) {
-  const [selectedId, setSelectedId] = useState(criteria[0]?.id ?? "");
+  /** Açık (genişletilmiş) kriterin kimliği; hiçbiri açık değilse boş. Satıra tekrar tıklamak kapatır. */
+  const [selectedId, setSelectedId] = useState("");
   const [query, setQuery] = useState("");
   const [stageFilter, setStageFilter] = useState<StageFilter>("all");
   /** Açık olan kriter ekleme formu; kapalıyken null. */
@@ -447,7 +448,7 @@ function CriteriaReview({
   /** Yayın öncesi ikinci kesinleştirme penceresi. */
   const [confirmingPublish, setConfirmingPublish] = useState(false);
 
-  const selected = criteria.find((item) => item.id === selectedId) ?? criteria[0];
+  const selected = criteria.find((item) => item.id === selectedId) ?? null;
   // Pasif kriter yoktur: listedeki her kriter yayımlanır. Yönetici istemediği
   // kriteri siler; "aktif/pasif" ikilemi ve yarı yayımlanmış set kaldırıldı.
   const active = criteria;
@@ -563,23 +564,141 @@ function CriteriaReview({
     if (!selected) return;
     const remaining = criteria.filter((item) => item.id !== selected.id);
     setCriteria(remaining);
-    setSelectedId(remaining[0]?.id ?? "");
+    setSelectedId("");
     setConfirmingDelete(false);
     setReviewConfirmed(false);
   }
 
-  function renderRow(item: Criterion) {
+  /** Seçili kriterin düzenleme alanı; renderRow içinde açık satırın altına yerleştirilir. */
+  function renderInspector() {
+    if (!selected) return null;
     return (
+      <div className="criterion-inspector" id="criterion-detail">
+        <div className="inspector-title">
+          <div><span>Seçili kriter</span><h2>{selected.name}</h2></div>
+          <button type="button" className="text-button" onClick={() => { setSelectedId(""); setConfirmingDelete(false); }}>Kapat ▴</button>
+        </div>
+        <div className="inspector-topline">
+          <div>
+            {stageBadge(selected.stage)}
+            <span className={`required-chip ${selected.required ? "required" : "other"}`}>{selected.required ? "Zorunlu" : "Zorunlu olmayan"}</span>
+            <span className="origin-label">{selected.origin === "document" ? "AI tarafından belgeden çıkarıldı" : "Yönetici tarafından eklendi"}</span>
+          </div>
+        </div>
+
+        <div className="inspector-section edit-section">
+          <span className="inspector-label">Kriter tanımı</span>
+          <div className="form-grid two-col">
+            <Field label="Kriter adı">
+              <input value={selected.name} onChange={(event) => update({ name: event.target.value })} />
+            </Field>
+            <Field label="Kontrol aşaması" hint={checkStageOf(selected.stage).detail}>
+              <select value={selected.stage} onChange={(event) => {
+                const stage = event.target.value as CheckStage;
+                update({ stage, controlType: controlTypeForStage(stage) });
+              }}>
+                {CHECK_STAGES.map((stage) => <option key={stage.id} value={stage.id}>{stage.order}. {stage.title}</option>)}
+              </select>
+            </Field>
+            <Field label="Kuralın önemi" hint="Bağlayıcı kurallar mutlaka karşılanmalı; tavsiye ve beklentiler iyileştirme olarak izlenir.">
+              <select value={selected.required ? "required" : "other"} onChange={(event) => update({ required: event.target.value === "required" })}>
+                <option value="required">Mutlaka karşılanmalı</option>
+                <option value="other">İyileştirme bekleniyor</option>
+              </select>
+            </Field>
+            {/*
+              PDF'den denetlenebilirlik alanı ARAYÜZDE YOKTUR (madde 1):
+              sistem, kriter metninden otomatik belirler ve yalnızca PDF
+              dışı kuralların hakem rapor analizine gönderilmesini
+              engellemek için kullanır. Kullanıcı seçemez ve düzenleyemez.
+            */}
+            <Field label="Kontrol biçimi">
+              <select value={selected.controlType ?? controlTypeForStage(selected.stage)} onChange={(event) => update({ controlType: event.target.value as CriterionControlType })}>
+                {criterionControlTypesForStage(selected.stage).map((value) => <option key={value} value={value}>{CONTROL_TYPE_LABELS[value]}</option>)}
+              </select>
+            </Field>
+          </div>
+          <Field label="Kural açıklaması" hint="Koşul ve raporda ne aranacağı tek anlamlı yazılmalı; rapor değerlendirmesinde bu metin kullanılır.">
+            <textarea value={selected.description} onChange={(event) => update({ description: event.target.value })} />
+          </Field>
+        </div>
+
+        <div className="inspector-section evidence-section">
+          <div className="inspector-section-heading">
+            <span className="inspector-label">Belgedeki dayanak</span>
+            {selected.sourcePage && documentUrl ? (
+              <a className="source-page-link" href={`${documentUrl}#page=${selected.sourcePage}`} target="_blank" rel="noreferrer">Kaynak sayfayı aç · s. {selected.sourcePage} ↗</a>
+            ) : selected.sourcePage ? (
+              <span title="Şartname PDF'i sunucuda saklanmamış; kriterleri yeniden yayımlayın.">Kaynak s. {selected.sourcePage} · belge kayıtlı değil</span>
+            ) : <span>Kaynak sayfa girilmedi</span>}
+          </div>
+          {/*
+            KAYNAK KİLİDİ (madde 12)
+            Kaynak sayfa ve kaynak alıntı AI'nin belgeden çıkardığı kanıttır
+            ve elle DEĞİŞTİRİLEMEZ; salt okunur gösterilir. Sunucu da aynı
+            kuralı uygular: istek elle düzenlense bile ilk yayımdaki değer
+            geri konur. Kaynak yanlışsa çözüm "Yeniden analiz et" ya da
+            kriteri silip yerine yenisini oluşturmaktır.
+          */}
+          <div className="manual-evidence-grid locked-evidence-grid">
+            <div className="field locked-field">
+              <span className="field-label">Kaynak PDF sayfası</span>
+              <output className="locked-value">
+                {selected.sourcePage ?? (selected.origin === "manager" ? "Manuel kriter · kaynak yok" : "Kaynak sayfa yok")}
+              </output>
+              <span className="field-hint">Salt okunur. Değiştirilemez.</span>
+            </div>
+            <div className="field locked-field">
+              <span className="field-label">Kaynak alıntı</span>
+              <output className="locked-value locked-quote">
+                {selected.sourceText || (selected.origin === "manager" ? "Manuel kriter · alıntı yok" : "Alıntı yok")}
+              </output>
+              <span className="field-hint">Salt okunur. Değiştirilemez.</span>
+            </div>
+          </div>
+          <p className="locked-evidence-note">
+            Kaynak sayfa ve alıntı yapay zekânın belgeden çıkardığı kanıttır; düzenlenemez.
+            Kaynak yanlışsa <strong>şartnameyi yeniden analiz edin</strong> veya bu kriteri silip
+            doğru kaynağıyla yeni bir kriter oluşturun.
+          </p>
+        </div>
+
+        <div className="inspector-section delete-section">
+          <span className="inspector-label">Kriteri kaldır</span>
+          {confirmingDelete ? (
+            <div className="delete-confirm-row" role="alertdialog" aria-label="Kriter silme onayı">
+              <p><strong>“{selected.name}”</strong> listeden kalıcı olarak silinecek. Emin misiniz?</p>
+              <div>
+                <button type="button" className="danger-button" onClick={removeSelectedCriterion}>Evet, kriteri sil</button>
+                <button type="button" className="text-button" onClick={() => setConfirmingDelete(false)}>Vazgeç</button>
+              </div>
+            </div>
+          ) : (
+            <div className="delete-confirm-row">
+              <p>Yanlış çıkarılan veya bu yarışmada uygulanmayacak kriterleri silin. Yayımlanan sette pasif kriter bulunmaz: listede kalan her kriter değerlendirmede kullanılır.</p>
+              <div>
+                <button type="button" className="danger-button ghost" onClick={() => setConfirmingDelete(true)}>Kriteri sil</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function renderRow(item: Criterion) {
+    const open = item.id === selected?.id;
+    return (
+      <div key={item.id} className={`criterion-entry ${open ? "open" : ""}`.trim()}>
       <button
-        key={item.id}
         type="button"
-        role="option"
-        aria-selected={item.id === selected?.id}
-        className={`criterion-row ${item.id === selected?.id ? "selected" : ""}`}
+        aria-expanded={open}
+        aria-controls={open ? "criterion-detail" : undefined}
+        className={`criterion-row ${open ? "selected" : ""}`}
         onClick={() => {
-          setSelectedId(item.id);
+          // Aynı satıra ikinci tıklama editörü kapatır; yanlış tıklama sayfayı aşağı sürüklemez.
+          setSelectedId(open ? "" : item.id);
           setConfirmingDelete(false);
-          requestAnimationFrame(() => document.getElementById("criterion-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }));
         }}
       >
         <span className={`type-mark stage-${checkStageOf(item.stage).order}`} aria-hidden="true" />
@@ -618,7 +737,11 @@ function CriteriaReview({
         <span className={`criterion-value ${item.required ? "required" : "other"}`}>
           {item.required ? "Zorunlu" : "Zorunlu olmayan"}
         </span>
+        <span className="criterion-chevron" aria-hidden="true">{open ? "▴" : "▾"}</span>
       </button>
+      {/* Editör ayrı bir alt bölüm değil, tıklanan satırın hemen altında açılır. */}
+      {open ? renderInspector() : null}
+      </div>
     );
   }
 
@@ -831,7 +954,7 @@ function CriteriaReview({
                 <h3 id={`ledger-group-${group.id}`}>{group.title}</h3>
                 <span>{group.items.length} kriter · {group.hint}</span>
               </div>
-              <div className="ledger-list" role="listbox" aria-label={group.title}>
+              <div className="ledger-list">
                 {group.items.map(renderRow)}
                 {!group.items.length ? <div className="empty-ledger">Bu bölümde kriter yok.</div> : null}
               </div>
@@ -839,118 +962,6 @@ function CriteriaReview({
           ))}
         </div>
 
-        {selected ? (
-          <div className="criterion-inspector" id="criterion-detail">
-            <div className="inspector-title">
-              <div><span>Seçili kriter</span><h2>{selected.name}</h2></div>
-              <a href="#criteria-list">Kriter listesine dön ↑</a>
-            </div>
-            <div className="inspector-topline">
-              <div>
-                {stageBadge(selected.stage)}
-                <span className={`required-chip ${selected.required ? "required" : "other"}`}>{selected.required ? "Zorunlu" : "Zorunlu olmayan"}</span>
-                <span className="origin-label">{selected.origin === "document" ? "AI tarafından belgeden çıkarıldı" : "Yönetici tarafından eklendi"}</span>
-              </div>
-            </div>
-
-            <div className="inspector-section edit-section">
-              <span className="inspector-label">Kriter tanımı</span>
-              <div className="form-grid two-col">
-                <Field label="Kriter adı">
-                  <input value={selected.name} onChange={(event) => update({ name: event.target.value })} />
-                </Field>
-                <Field label="Kontrol aşaması" hint={checkStageOf(selected.stage).detail}>
-                  <select value={selected.stage} onChange={(event) => {
-                    const stage = event.target.value as CheckStage;
-                    update({ stage, controlType: controlTypeForStage(stage) });
-                  }}>
-                    {CHECK_STAGES.map((stage) => <option key={stage.id} value={stage.id}>{stage.order}. {stage.title}</option>)}
-                  </select>
-                </Field>
-                <Field label="Kuralın önemi" hint="Bağlayıcı kurallar mutlaka karşılanmalı; tavsiye ve beklentiler iyileştirme olarak izlenir.">
-                  <select value={selected.required ? "required" : "other"} onChange={(event) => update({ required: event.target.value === "required" })}>
-                    <option value="required">Mutlaka karşılanmalı</option>
-                    <option value="other">İyileştirme bekleniyor</option>
-                  </select>
-                </Field>
-                {/*
-                  PDF'den denetlenebilirlik alanı ARAYÜZDE YOKTUR (madde 1):
-                  sistem, kriter metninden otomatik belirler ve yalnızca PDF
-                  dışı kuralların hakem rapor analizine gönderilmesini
-                  engellemek için kullanır. Kullanıcı seçemez ve düzenleyemez.
-                */}
-                <Field label="Kontrol biçimi">
-                  <select value={selected.controlType ?? controlTypeForStage(selected.stage)} onChange={(event) => update({ controlType: event.target.value as CriterionControlType })}>
-                    {criterionControlTypesForStage(selected.stage).map((value) => <option key={value} value={value}>{CONTROL_TYPE_LABELS[value]}</option>)}
-                  </select>
-                </Field>
-              </div>
-              <Field label="Kural açıklaması" hint="Koşul ve raporda ne aranacağı tek anlamlı yazılmalı; rapor değerlendirmesinde bu metin kullanılır.">
-                <textarea value={selected.description} onChange={(event) => update({ description: event.target.value })} />
-              </Field>
-            </div>
-
-            <div className="inspector-section evidence-section">
-              <div className="inspector-section-heading">
-                <span className="inspector-label">Belgedeki dayanak</span>
-                {selected.sourcePage && documentUrl ? (
-                  <a className="source-page-link" href={`${documentUrl}#page=${selected.sourcePage}`} target="_blank" rel="noreferrer">Kaynak sayfayı aç · s. {selected.sourcePage} ↗</a>
-                ) : selected.sourcePage ? (
-                  <span title="Şartname PDF'i sunucuda saklanmamış; kriterleri yeniden yayımlayın.">Kaynak s. {selected.sourcePage} · belge kayıtlı değil</span>
-                ) : <span>Kaynak sayfa girilmedi</span>}
-              </div>
-              {/*
-                KAYNAK KİLİDİ (madde 12)
-                Kaynak sayfa ve kaynak alıntı AI'nin belgeden çıkardığı kanıttır
-                ve elle DEĞİŞTİRİLEMEZ; salt okunur gösterilir. Sunucu da aynı
-                kuralı uygular: istek elle düzenlense bile ilk yayımdaki değer
-                geri konur. Kaynak yanlışsa çözüm "Yeniden analiz et" ya da
-                kriteri silip yerine yenisini oluşturmaktır.
-              */}
-              <div className="manual-evidence-grid locked-evidence-grid">
-                <div className="field locked-field">
-                  <span className="field-label">Kaynak PDF sayfası</span>
-                  <output className="locked-value">
-                    {selected.sourcePage ?? (selected.origin === "manager" ? "Manuel kriter · kaynak yok" : "Kaynak sayfa yok")}
-                  </output>
-                  <span className="field-hint">Salt okunur. Değiştirilemez.</span>
-                </div>
-                <div className="field locked-field">
-                  <span className="field-label">Kaynak alıntı</span>
-                  <output className="locked-value locked-quote">
-                    {selected.sourceText || (selected.origin === "manager" ? "Manuel kriter · alıntı yok" : "Alıntı yok")}
-                  </output>
-                  <span className="field-hint">Salt okunur. Değiştirilemez.</span>
-                </div>
-              </div>
-              <p className="locked-evidence-note">
-                Kaynak sayfa ve alıntı yapay zekânın belgeden çıkardığı kanıttır; düzenlenemez.
-                Kaynak yanlışsa <strong>şartnameyi yeniden analiz edin</strong> veya bu kriteri silip
-                doğru kaynağıyla yeni bir kriter oluşturun.
-              </p>
-            </div>
-
-            <div className="inspector-section delete-section">
-              <span className="inspector-label">Kriteri kaldır</span>
-              {confirmingDelete ? (
-                <div className="delete-confirm-row" role="alertdialog" aria-label="Kriter silme onayı">
-                  <p><strong>“{selected.name}”</strong> listeden kalıcı olarak silinecek. Emin misiniz?</p>
-                  <div>
-                    <button type="button" className="danger-button" onClick={removeSelectedCriterion}>Evet, kriteri sil</button>
-                    <button type="button" className="text-button" onClick={() => setConfirmingDelete(false)}>Vazgeç</button>
-                  </div>
-                </div>
-              ) : (
-                <div className="delete-confirm-row">
-                  <p>Yanlış çıkarılan veya bu yarışmada uygulanmayacak kriterleri silin. Yayımlanan sette pasif kriter bulunmaz: listede kalan her kriter değerlendirmede kullanılır.</p>
-                  <div>
-                    <button type="button" className="danger-button ghost" onClick={() => setConfirmingDelete(true)}>Kriteri sil</button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        ) : null}
       </div>
 
       <div className="approval-bar">

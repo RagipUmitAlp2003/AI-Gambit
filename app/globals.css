@@ -198,6 +198,14 @@
 /* Baş Yönetici hesap ve denetim ekranı */
 .management-main > .workspace { width: min(1120px,calc(100% - 56px)); margin: 40px auto; }
 .password-choice { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+/* Admin paneli görünüm sekmeleri: form, hesap listesi ve bildirimler tek seferde biri açılır */
+.admin-view-nav { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; margin: 22px 38px 6px; }
+.admin-view-nav button { display: grid; gap: 5px; justify-items: start; min-height: 74px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fbfdfd; color: var(--ink); text-align: left; cursor: pointer; transition: border-color 150ms ease, background 150ms ease, transform 150ms ease, box-shadow 150ms ease; }
+.admin-view-nav button:hover { transform: translateY(-1px); border-color: #8cb7b3; }
+.admin-view-nav button.active { border-color: var(--teal); background: #eef9f7; box-shadow: inset 0 0 0 1px var(--teal); }
+.admin-view-nav button strong { font-size: 13.5px; letter-spacing: -.01em; }
+.admin-view-nav button small { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.admin-view-nav button.active small { color: var(--teal-deep); }
 .credential-card, .admin-list { margin: 22px 38px; }
 .credential-card { padding: 18px; border-radius: 14px; background: var(--teal-soft); }
 .credential-head, .credential-secret { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
@@ -439,6 +447,8 @@
   .password-choice, .admin-row { grid-template-columns: 1fr; }
   .admin-row-head { display: none; }
   .credential-card, .admin-list { margin-left: 18px; margin-right: 18px; }
+  .admin-view-nav { grid-template-columns: 1fr; margin: 16px 18px 4px; }
+  .admin-view-nav button { min-height: 0; }
   .credential-head, .credential-secret { flex-direction: column; }
   .audit-list li { grid-template-columns: 1fr; gap: 4px; }
   .participant-topbar { align-items: flex-start; }
@@ -676,9 +686,16 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 .search-box span { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--muted); }
 .search-box input { padding-left: 30px; }
 .ledger-list { border-top: 1px solid var(--line); }
-.criterion-row { position: relative; width: 100%; display: grid; grid-template-columns: 4px minmax(0,1fr) auto; gap: 16px; align-items: center; padding: 18px 8px 18px 4px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); text-align: left; }
+.criterion-row { position: relative; width: 100%; display: grid; grid-template-columns: 4px minmax(0,1fr) auto auto; gap: 16px; align-items: center; padding: 18px 8px 18px 4px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); text-align: left; cursor: pointer; }
 .criterion-row:hover { background: #edf3f4; }
-.criterion-row.selected { background: #f1faf8; }
+.criterion-row.selected { background: #f1faf8; border-bottom-color: transparent; }
+.criterion-chevron { color: var(--muted); font-size: 11px; }
+/* Açık satır ve altındaki editör tek bir kutu gibi görünür; editör satır altında açılır, sayfa altına atlamaz. */
+.criterion-entry.open { margin: 6px 0; border: 1px solid var(--teal); border-radius: var(--radius-md); background: #fff; box-shadow: 0 8px 22px rgba(16,42,67,.06); overflow: hidden; }
+.criterion-entry.open .criterion-row { padding-left: 12px; padding-right: 14px; }
+.criterion-entry.open .criterion-inspector { padding: 22px 20px 26px; border-top: 1px solid var(--line); scroll-margin-top: 90px; }
+.criterion-entry.open .inspector-title h2 { font-size: 20px; }
+.criterion-entry.open .inspector-section:last-child { padding-bottom: 0; border-bottom: 0; }
 .type-mark { width: 4px; height: 34px; border-radius: 999px; background: #8ca0a9; }
 .type-mark.qualitative_score { background: var(--teal); }
 .type-mark.technical_upload { background: #245b83; }
@@ -1055,6 +1072,7 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
   .workspace { width: min(100% - 24px,1280px); margin-top: 8px; }
   .workspace-heading, .review-heading { padding: 26px 24px 22px; }
   .setup-form { padding-left: 24px; padding-right: 24px; }
+  .admin-view-nav { margin-left: 24px; margin-right: 24px; }
   .source-explainer, .workspace-actions { margin-left: 24px; margin-right: 24px; }
   .upload-layout { padding-left: 24px; padding-right: 24px; }
   .approval-bar { grid-template-columns: 1fr auto; }
@@ -1105,8 +1123,10 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
   .analysis-warning-list { margin-left: 18px; margin-right: 18px; }
   .unselected-review { margin-left: 18px; margin-right: 18px; }
   .admin-boundary { margin-left: 18px; margin-right: 18px; }
-  .criterion-row { grid-template-columns: 4px minmax(0,1fr); }
+  .criterion-row { grid-template-columns: 4px minmax(0,1fr) auto; }
   .criterion-value { grid-column: 2; justify-self: start; min-width: 0; max-width: none; }
+  .criterion-chevron { grid-column: 3; grid-row: 1; }
+  .criterion-entry.open .criterion-inspector { padding-left: 14px; padding-right: 14px; }
   .inspector-title { flex-direction: column; }
   .sample-library { margin-left: 18px; margin-right: 18px; }
   .sample-document-list article { grid-template-columns: 44px minmax(0,1fr); }

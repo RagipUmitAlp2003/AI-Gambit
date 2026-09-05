@@ -130,8 +130,15 @@ export default function CompetitionPicker({ profiles, applications, competitions
       ? `${entry.competition.isActive ? "Aktif" : "Pasif"} · ${COMPETITION_STATUS_LABELS[entry.competition.status]}`
       : "Yarışma durumu alınamadı";
     const criteria = entry.profile ? `${entry.profile.profile.criteria.length} kriter` : "Kriter profili yok";
-    return `${state} · ${criteria} · ${entry.count} ${history ? "tamamlanan" : "bekleyen"} başvuru`;
+    return `${state} · ${criteria}`;
   }
+
+  // Başvuru sayısı hakemin iş yükünü gösterir; satırın en belirgin ikinci bilgisidir.
+  function countLabel(entry: PickerEntry) {
+    return `${entry.count} ${history ? "tamamlanan" : "bekleyen"} başvuru`;
+  }
+
+  const priorityEntries = entries.filter((entry) => entry.priority);
 
   // Yazarken kutuda yazılan metin, aksi hâlde seçili yarışmanın adı görünür;
   // böylece dışarı tıklayınca yarım kalan arama seçimi bozmaz.
@@ -141,7 +148,7 @@ export default function CompetitionPicker({ profiles, applications, competitions
   return (
     <section className="eval-competition-picker" aria-label="Yarışma seçimi">
       <div className="eval-competition-picker-head">
-        <label htmlFor={inputId}>Yarışma</label>
+        <label htmlFor={inputId}>Yarışma ara</label>
         <small>Yayımlanmış yarışmalar tek kutuda; adını yazarak listeyi daraltın.</small>
       </div>
       <div className="combo" ref={wrapRef}>
@@ -195,6 +202,7 @@ export default function CompetitionPicker({ profiles, applications, competitions
                   {entry.priority ? <em className="priority-badge">🔥 ACİL / ÖNCELİKLİ</em> : null}
                   <strong>{entry.name}</strong>
                 </span>
+                <span className={`combo-option-count ${entry.count ? "" : "empty"}`.trim()}>{countLabel(entry)}</span>
                 <small>{describe(entry)}</small>
               </button>
             ))}
@@ -206,12 +214,34 @@ export default function CompetitionPicker({ profiles, applications, competitions
                   ? `${matches.length} eşleşmenin ilk ${visible.length} tanesi listelendi · +${hiddenCount} yarışma daha, aramayı daraltın`
                   : filtering
                     ? `${matches.length} eşleşen yarışma`
-                    : `${entries.length} yayımlanmış yarışma · yazmaya başlayın`}
+                    : `${entries.length} başvuruya açık yarışma · yazmaya başlayın`}
               </div>
             )}
           </div>
         ) : null}
       </div>
+
+      {priorityEntries.length ? (
+        // Değerlendirme Yöneticisi'nin acil işaretlediği yarışmalar kutu kapalıyken de görünür;
+        // hakem listeyi açmadan tek tıkla geçebilir.
+        <div className="eval-priority-pins" aria-label="Öncelikli yarışmalar">
+          {priorityEntries.map((entry) => (
+            <button
+              key={entry.key}
+              type="button"
+              className={`eval-priority-card ${entry.key === selectedKey ? "active" : ""}`.trim()}
+              aria-pressed={entry.key === selectedKey}
+              title={entry.competition?.priorityNote ? `Öncelik gerekçesi: ${entry.competition.priorityNote}` : undefined}
+              onClick={() => choose(entry)}
+            >
+              <em className="priority-badge">🔥 ACİL / ÖNCELİKLİ</em>
+              <strong>{entry.name}</strong>
+              <span>{describe(entry)}</span>
+              <span className="eval-priority-count">{countLabel(entry)}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       {disabled ? (
         <p className="eval-competition-picker-note">
@@ -229,7 +259,7 @@ export default function CompetitionPicker({ profiles, applications, competitions
             </>
           ) : <span className="status-chip neutral">Yarışma durumu alınamadı</span>}
           <span className="status-chip neutral">{selected.profile ? `${selected.profile.profile.criteria.length} kriter` : "Kriter profili yok"}</span>
-          <span className="status-chip neutral">{selected.count} {history ? "tamamlanan" : "bekleyen"} başvuru</span>
+          <span className={`status-chip ${selected.count ? "warning" : "neutral"}`}>{countLabel(selected)}</span>
           {selected.priority && selected.competition?.priorityNote ? (
             <span className="priority-reason">Öncelik gerekçesi: {selected.competition.priorityNote}</span>
           ) : null}

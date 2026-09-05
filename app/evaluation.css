@@ -50,6 +50,16 @@
 .combo-option-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .combo-option.priority { border-left: 3px solid var(--danger); background: var(--danger-soft); }
 .combo-option.priority.highlighted, .combo-option.priority:hover { background: #f7dedb; }
+/* Başvuru sayısı satırda ayrı ve koyu; sıfırsa soluk kalır. */
+.combo-option-count { color: var(--ink); font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.combo-option-count.empty { color: var(--muted); font-weight: 600; }
+/* Öncelikli yarışmalar kutunun altında sabit kart olarak durur. */
+.eval-priority-pins { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.eval-priority-card { display: grid; gap: 4px; justify-items: start; padding: 13px 14px; border: 1px solid #e3b7b2; border-left: 3px solid var(--danger); border-radius: var(--radius-md); background: var(--danger-soft); color: var(--ink); text-align: left; cursor: pointer; transition: background 150ms ease, border-color 150ms ease; }
+.eval-priority-card:hover, .eval-priority-card.active { background: #f7dedb; border-color: var(--danger); }
+.eval-priority-card strong { font-size: 13px; line-height: 1.35; }
+.eval-priority-card span { color: var(--muted); font-size: 11px; }
+.eval-priority-card .eval-priority-count { color: var(--ink); font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; }
 
 /* ------------------------------ Başvuru kutuları ------------------------------ */
 .eval-application-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
