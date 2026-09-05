@@ -366,6 +366,15 @@
 
 /* Aşama şeridinin AI ön değerlendirmesi olduğunu söyleyen üst satır (madde 7). */
 .eval-stage-kicker { margin: 0 0 8px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.02em; }
+.eval-analysis-disclosure { margin: 2px 0 12px; border: 1px solid var(--line); border-radius: 13px; background: #f8fbfb; }
+.eval-analysis-disclosure > summary { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 54px; padding: 12px 15px; cursor: pointer; list-style: none; }
+.eval-analysis-disclosure > summary::-webkit-details-marker { display: none; }
+.eval-analysis-disclosure > summary > span:first-child { display: grid; gap: 3px; }
+.eval-analysis-disclosure > summary strong { color: var(--ink); font-size: 12.5px; }
+.eval-analysis-disclosure > summary small { color: var(--muted); font-size: 10px; font-weight: 500; }
+.eval-analysis-disclosure > summary > span:last-child { color: var(--teal); font-size: 18px; transition: transform .2s ease-out; }
+.eval-analysis-disclosure[open] > summary > span:last-child { transform: rotate(180deg); }
+.eval-analysis-disclosure-body { display: grid; gap: 12px; padding: 14px 15px 16px; border-top: 1px solid var(--line); }
 
 
 /* Similarity is an independent reading surface; only an explicit judge action can change a result. */

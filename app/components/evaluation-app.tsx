@@ -1282,14 +1282,18 @@ function ApplicationDetail({ application, profile, competition, analyzing, other
             </div>
           ) : null}
 
-          <p className="eval-stage-kicker">AI ön değerlendirme özeti — kesinleşen kriter sonuçları aşağıdaki sayaçlardadır.</p>
-          <StageStrip
-            stages={evaluation.stages}
-            findings={evaluation.findings}
-            outsidePdfCount={evaluation.criteriaScope?.outsidePdf ?? 0}
-          />
-          {/* AI sonucunun HEMEN ALTINDA; altbilgide kaybolmaz (madde 10). */}
-          <AiDisclaimer />
+          <details className="eval-analysis-disclosure">
+            <summary>
+              <span><strong>AI analizinin dört aşamalı özetini aç</strong><small>Dil/şablon, başlık/içerik, kategori ve teknik kanıt ayrıntıları</small></span>
+              <span aria-hidden="true">⌄</span>
+            </summary>
+            <div className="eval-analysis-disclosure-body">
+              <p className="eval-stage-kicker">AI ön değerlendirme özeti — kesinleşen kriter sonuçları aşağıdaki sayaçlardadır.</p>
+              <StageStrip
+                stages={evaluation.stages}
+                findings={evaluation.findings}
+                outsidePdfCount={evaluation.criteriaScope?.outsidePdf ?? 0}
+              />
 
           {evaluation.analysisWarnings.length ? (
             <details className="eval-warnings">
@@ -1335,6 +1339,10 @@ function ApplicationDetail({ application, profile, competition, analyzing, other
               ) : null}
             </div>
           ) : null}
+            </div>
+          </details>
+          {/* AI analiz özeti kapalıyken de insan denetimi uyarısı görünür kalır. */}
+          <AiDisclaimer />
 
           <div className="eval-result-summary" aria-label="Kesinleşmiş kriter sonucu özeti">
             <div className="BASARILI"><strong>{counts.uygun}</strong><span>uygun (kesinleşmiş)</span></div>

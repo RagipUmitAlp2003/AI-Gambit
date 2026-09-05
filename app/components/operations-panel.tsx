@@ -2,6 +2,7 @@
 import { useLiveRefresh } from "./use-live-refresh";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import OperationsAnalyticsPanel from "./operations-analytics-panel";
 import { formatDateTime } from "../lib/admin-client";
 import { roleLabel } from "../lib/admin-roles";
 import { fold } from "../lib/competitions";
@@ -48,6 +49,7 @@ type ArchiveTrailEntry = {
  * Hakem açıldığında (veya pano yeniden yüklendiğinde) otomatik dağıtılır.
  */
 export default function OperationsPanel() {
+  const [workspaceView, setWorkspaceView] = useState<"process" | "analytics">("process");
   const [applications, setApplications] = useState<CompetitionApplication[]>([]);
   const [overview, setOverview] = useState<CompetitionOverview[]>([]);
   const [summary, setSummary] = useState<OperationsSummary | null>(null);
@@ -240,6 +242,11 @@ export default function OperationsPanel() {
         <h1 id="operations-title">Değerlendirme süreci</h1>
         <p>Hakem yüklerini, atanamayan başvuruları ve analiz hatalarını izleyin; hatırlatma ve hata kuyruğunu yönetin. Hakem ataması sistem tarafından otomatik yapılır; teknik karar yalnızca Hakeme aittir.</p>
       </header>
+      <nav className="operations-view-switch" aria-label="Değerlendirme yöneticisi bölümleri">
+        <button type="button" className={workspaceView === "process" ? "active" : ""} onClick={() => setWorkspaceView("process")}>Süreç ve iş yükü</button>
+        <button type="button" className={workspaceView === "analytics" ? "active" : ""} onClick={() => setWorkspaceView("analytics")}>Katılım ve karar analitiği</button>
+      </nav>
+      {workspaceView === "analytics" ? <OperationsAnalyticsPanel /> : <>
       {error ? <p className="admin-error">{error}</p> : null}
       {notice ? <p className="success-note" role="status">{notice}</p> : null}
 
@@ -475,7 +482,7 @@ export default function OperationsPanel() {
           {!recent.length ? <li className="page-note">Henüz süreç hareketi kaydedilmedi.</li> : null}
         </ol>
       </section>
-
+      </>}
     </section>
   );
 }

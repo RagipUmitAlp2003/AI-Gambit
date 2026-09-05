@@ -7,6 +7,11 @@ import { criteriaContentHash, criteriaHash } from "./criteria-hash";
 import { applySourceLock, buildSourceLockIndex, type SourceLockIndex } from "./source-lock";
 import { validateProfileExport } from "./profile-loader";
 import { findingRejectionAuditLine, judgeDecisionCounts, validateCriterionDecisions, visibleFindingsOf } from "./judge-review";
+import {
+  buildOperationsAnalytics,
+  type AnalyticsApplicationFact,
+  type AnalyticsRegistrationFact,
+} from "./operations-analytics";
 // Ağır PDF ayrıştırıcısı bu modülün içinde DEĞİL; `readReportTextLayer` PDF.js'i
 // yalnızca gerçekten çağrıldığında dinamik olarak yükler.
 import { quoteFoundOnPage, readReportTextLayer, type ReportTextLayer } from "./report-text-layer";
@@ -35,6 +40,8 @@ import {
   type CriteriaExtractionRun,
   type CriteriaVersion,
   type OperationsSummary,
+  type OperationsAnalytics,
+  type OperationsAnalyticsFilters,
   type ProfileReviewDecision,
   type ProfileStatus,
 } from "./workflow-types";
@@ -102,6 +109,22 @@ const WORKFLOW_SCHEMA = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_application_team_members_application
    ON application_team_members (application_id, member_order)`,
+  `CREATE TABLE IF NOT EXISTS application_participant_snapshots (
+    application_id TEXT PRIMARY KEY,
+    participant_id TEXT NOT NULL,
+    education_status TEXT NOT NULL DEFAULT 'belirtilmedi',
+    education_grade TEXT NOT NULL DEFAULT '',
+    institution_name TEXT NOT NULL DEFAULT 'Belirtilmedi',
+    city TEXT NOT NULL DEFAULT 'Belirtilmedi',
+    gender TEXT,
+    discovery_source TEXT NOT NULL DEFAULT 'belirtilmedi',
+    teknofest_history TEXT NOT NULL DEFAULT 'belirtilmedi',
+    team_size INTEGER NOT NULL DEFAULT 1,
+    captured_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_application_snapshots_dimensions
+   ON application_participant_snapshots
+   (education_status, city, discovery_source, teknofest_history, team_size)`,
   `CREATE TABLE IF NOT EXISTS criteria_extraction_runs (
     id TEXT PRIMARY KEY,
     source_document_name TEXT NOT NULL,
@@ -1994,6 +2017,26 @@ export async function createApplication(input: {
   const id = crypto.randomUUID();
   const versionId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
+  const participantProfile = await database.prepare(
+    `SELECT education_status, education_grade, institution_name, city, gender,
+            discovery_source, teknofest_history
+     FROM participant_profiles WHERE account_id = ?`,
+  ).bind(input.participant.id).first<{
+    education_status: string;
+    education_grade: string;
+    institution_name: string;
+    city: string;
+    gender: string | null;
+    discovery_source: string;
+    teknofest_history: string;
+  }>();
+  // Başvuru sahibi dahil, yinelenen adlar tek kişi sayılır. Bu yalnızca
+  // analitik takım büyüklüğüdür; kayıtlı ekip üyesi listesini değiştirmez.
+  const teamSize = new Set(
+    [input.applicantFullName, ...input.teamMembers]
+      .map((name) => fold(name.trim()))
+      .filter(Boolean),
+  ).size || 1;
   const statements = [database.prepare(
     `INSERT INTO competition_applications
       (id, participant_id, participant_name, participant_email, competition_key, competition_name,
@@ -2020,6 +2063,23 @@ export async function createApplication(input: {
       (application_id, applicant_full_name, team_name, outcome, outcome_note)
      VALUES (?, ?, ?, 'pending', '')`,
   ).bind(id, input.applicantFullName, input.teamName), database.prepare(
+    `INSERT INTO application_participant_snapshots
+      (application_id, participant_id, education_status, education_grade, institution_name,
+       city, gender, discovery_source, teknofest_history, team_size, captured_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    id,
+    input.participant.id,
+    participantProfile?.education_status ?? "belirtilmedi",
+    participantProfile?.education_grade ?? "",
+    participantProfile?.institution_name ?? "Belirtilmedi",
+    participantProfile?.city ?? "Belirtilmedi",
+    participantProfile?.gender ?? null,
+    participantProfile?.discovery_source ?? "belirtilmedi",
+    participantProfile?.teknofest_history ?? "belirtilmedi",
+    teamSize,
+    timestamp,
+  ), database.prepare(
     `INSERT INTO submission_versions
       (id, application_id, version_number, file_key, file_name, mime_type, size_bytes,
        pdf_hash, byte_length, submitted_by, submitted_at)
@@ -4394,4 +4454,118 @@ export async function operationsSummary(account: AdminAccount): Promise<Operatio
     failed: at("analysis_failed"),
     completionRate: total ? Math.round((completed / total) * 100) : 0,
   };
+}
+
+/**
+ * Değerlendirme Yöneticisine yalnızca toplulaştırılmış katılım ve karar uyumu
+ * verisi üretir. Satır kimlikleri, katılımcı adları, PDF ve serbest gerekçeler
+ * bu fonksiyonun dönüş tipine hiçbir zaman girmez.
+ */
+export async function operationsAnalytics(
+  filters: OperationsAnalyticsFilters = {},
+): Promise<OperationsAnalytics> {
+  const database = await workflowDatabase();
+  const result = await database.prepare(
+    `SELECT
+       a.participant_id,
+       a.competition_key,
+       a.competition_name,
+       a.submitted_at,
+       a.evaluation_json,
+       a.review_json,
+       p.profile_json,
+       COALESCE(a.judge_id, a.assigned_judge_id, '') AS judge_id,
+       COALESCE(a.judge_name, a.assigned_judge_name, '') AS judge_name,
+       COALESCE(d.outcome, 'pending') AS outcome,
+       COALESCE(p.stage, '') AS profile_stage,
+       COALESCE(s.education_status, pp.education_status, 'belirtilmedi') AS education_status,
+       COALESCE(s.education_grade, pp.education_grade, '') AS education_grade,
+       COALESCE(s.institution_name, pp.institution_name, 'Belirtilmedi') AS institution_name,
+       COALESCE(s.city, pp.city, 'Belirtilmedi') AS city,
+       COALESCE(s.gender, pp.gender) AS gender,
+       COALESCE(s.discovery_source, pp.discovery_source, 'belirtilmedi') AS discovery_source,
+       COALESCE(s.teknofest_history, pp.teknofest_history, 'belirtilmedi') AS teknofest_history,
+       COALESCE(s.team_size, 1) AS team_size
+     FROM competition_applications a
+     LEFT JOIN application_submission_details d ON d.application_id = a.id
+     LEFT JOIN application_participant_snapshots s ON s.application_id = a.id
+     LEFT JOIN participant_profiles pp ON pp.account_id = a.participant_id
+     LEFT JOIN competition_profiles p ON p.id = a.profile_id
+     WHERE a.deleted_at IS NULL
+     ORDER BY a.submitted_at DESC`,
+  ).all<{
+    participant_id: string;
+    competition_key: string;
+    competition_name: string;
+    submitted_at: string;
+    evaluation_json: string | null;
+    review_json: string | null;
+    profile_json: string | null;
+    judge_id: string;
+    judge_name: string;
+    outcome: string;
+    profile_stage: string;
+    education_status: string;
+    education_grade: string;
+    institution_name: string;
+    city: string;
+    gender: string | null;
+    discovery_source: string;
+    teknofest_history: string;
+    team_size: number;
+  }>();
+  const applications: AnalyticsApplicationFact[] = (result.results ?? []).map((row) => {
+    const evaluation = parseJson<ReportEvaluation>(row.evaluation_json);
+    const review = parseJson<JudgeReview>(row.review_json);
+    const profile = parseJson<ProfileExport>(row.profile_json);
+    const outcome: AnalyticsApplicationFact["outcome"] = ["accepted", "rejected", "revision_required"].includes(row.outcome)
+      ? row.outcome as AnalyticsApplicationFact["outcome"]
+      : "pending";
+    return {
+      participantId: row.participant_id,
+      competitionKey: row.competition_key,
+      competitionName: row.competition_name,
+      year: evaluation?.profileRef.year || profile?.setup.year || row.submitted_at.slice(0, 4) || "Belirtilmedi",
+      stage: evaluation?.profileRef.stage || row.profile_stage || "Belirtilmedi",
+      outcome,
+      teamSize: Math.max(1, Number(row.team_size) || 1),
+      judgeId: row.judge_id,
+      judgeName: row.judge_name,
+      review,
+      evaluation,
+      educationStatus: row.education_status,
+      educationGrade: row.education_grade,
+      institutionName: row.institution_name,
+      city: row.city,
+      gender: row.gender,
+      discoverySource: row.discovery_source,
+      teknofestHistory: row.teknofest_history,
+    };
+  });
+  const registrationResult = await database.prepare(
+    `SELECT pp.account_id, pp.education_status, pp.education_grade, pp.institution_name,
+            pp.city, pp.gender, pp.discovery_source, pp.teknofest_history
+     FROM participant_profiles pp
+     INNER JOIN admin_accounts a ON a.id = pp.account_id AND a.role_code = '03'`,
+  ).all<{
+    account_id: string;
+    education_status: string;
+    education_grade: string;
+    institution_name: string;
+    city: string;
+    gender: string | null;
+    discovery_source: string;
+    teknofest_history: string;
+  }>();
+  const registrations: AnalyticsRegistrationFact[] = (registrationResult.results ?? []).map((row) => ({
+    participantId: row.account_id,
+    educationStatus: row.education_status,
+    educationGrade: row.education_grade,
+    institutionName: row.institution_name,
+    city: row.city,
+    gender: row.gender,
+    discoverySource: row.discovery_source,
+    teknofestHistory: row.teknofest_history,
+  }));
+  return buildOperationsAnalytics(applications, registrations, filters);
 }

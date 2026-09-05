@@ -5,6 +5,21 @@ import { adminApi } from "../lib/admin-client";
 import type { BootstrapStatus } from "../lib/admin-client";
 import type { AdminAccount } from "../lib/admin-types";
 import { workflowApi } from "../lib/workflow-client";
+import {
+  DEMO_INSTITUTIONS,
+  DISCOVERY_SOURCE_LABELS,
+  DISCOVERY_SOURCE_VALUES,
+  EDUCATION_GRADE_OPTIONS,
+  EDUCATION_STATUS_LABELS,
+  EDUCATION_STATUS_VALUES,
+  GENDER_LABELS,
+  GENDER_VALUES,
+  TEKNOFEST_HISTORY_LABELS,
+  TEKNOFEST_HISTORY_VALUES,
+  TURKEY_CITIES,
+  validateParticipantProfileInput,
+} from "../lib/participant-profile";
+import SearchSelect from "./search-select";
 import T3Lockup from "./t3-lockup";
 
 type Props = { onSignedIn: (account: AdminAccount) => void | Promise<void> };
@@ -32,6 +47,15 @@ export default function AccessLogin({ onSignedIn }: Props) {
   const [registerName, setRegisterName] = useState("");
   const [registerEmail, setRegisterEmail] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
+  const [registerProfile, setRegisterProfile] = useState({
+    educationStatus: "",
+    educationGrade: "",
+    institutionName: "",
+    city: "",
+    gender: "",
+    discoverySource: "",
+    teknofestHistory: "",
+  });
 
   useEffect(() => {
     let active = true;
@@ -61,7 +85,17 @@ export default function AccessLogin({ onSignedIn }: Props) {
     setBusy(true);
     setError("");
     try {
-      const result = await workflowApi.registerParticipant(registerName.trim(), registerEmail.trim(), registerPassword);
+      const validation = validateParticipantProfileInput(registerProfile);
+      if (!validation.ok) {
+        setError(validation.error);
+        return;
+      }
+      const result = await workflowApi.registerParticipant(
+        registerName.trim(),
+        registerEmail.trim(),
+        registerPassword,
+        validation.value,
+      );
       await onSignedIn(result.account);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Yarışmacı hesabı oluşturulamadı.");
@@ -235,18 +269,95 @@ export default function AccessLogin({ onSignedIn }: Props) {
               <p>Hesabınızı açtıktan sonra yarışma seçip PDF raporunuzu gönderebilirsiniz.</p>
             </header>
             <form className="participant-login-form" onSubmit={registerParticipant}>
-              <label className="field">
-                <span className="field-label">İsim Soyisim</span>
-                <input value={registerName} onChange={(event) => setRegisterName(event.target.value)} autoComplete="name" required />
-              </label>
-              <label className="field">
-                <span className="field-label">E-posta</span>
-                <input type="email" value={registerEmail} onChange={(event) => setRegisterEmail(event.target.value)} autoComplete="username" required />
-              </label>
-              <label className="field">
-                <span className="field-label">Şifre</span>
-                <input type="password" minLength={8} value={registerPassword} onChange={(event) => setRegisterPassword(event.target.value)} autoComplete="new-password" required />
-              </label>
+              <div className="registration-account-grid">
+                <label className="field">
+                  <span className="field-label">İsim Soyisim</span>
+                  <input value={registerName} onChange={(event) => setRegisterName(event.target.value)} autoComplete="name" required />
+                </label>
+                <label className="field">
+                  <span className="field-label">E-posta</span>
+                  <input type="email" value={registerEmail} onChange={(event) => setRegisterEmail(event.target.value)} autoComplete="username" required />
+                </label>
+                <label className="field registration-password-field">
+                  <span className="field-label">Şifre</span>
+                  <input type="password" minLength={8} value={registerPassword} onChange={(event) => setRegisterPassword(event.target.value)} autoComplete="new-password" required />
+                  <span className="field-hint">En az 8 karakter.</span>
+                </label>
+              </div>
+
+              <fieldset className="registration-profile">
+                <legend>Katılım profili</legend>
+                <p>Bu bilgiler yalnızca toplu katılım ve başarı istatistiklerinde kullanılır; hakem kararını etkilemez.</p>
+                <div className="registration-profile-grid">
+                  <label className="field">
+                    <span className="field-label">Eğitim durumu</span>
+                    <select
+                      value={registerProfile.educationStatus}
+                      required
+                      onChange={(event) => setRegisterProfile((current) => ({ ...current, educationStatus: event.target.value, educationGrade: "" }))}
+                    >
+                      <option value="">Seçin</option>
+                      {EDUCATION_STATUS_VALUES.map((value) => <option key={value} value={value}>{EDUCATION_STATUS_LABELS[value]}</option>)}
+                    </select>
+                  </label>
+                  {registerProfile.educationStatus && registerProfile.educationStatus !== "mezun" ? (
+                    <label className="field">
+                      <span className="field-label">Sınıf / eğitim aşaması</span>
+                      <select
+                        value={registerProfile.educationGrade}
+                        required
+                        onChange={(event) => setRegisterProfile((current) => ({ ...current, educationGrade: event.target.value }))}
+                      >
+                        <option value="">Seçin</option>
+                        {EDUCATION_GRADE_OPTIONS[registerProfile.educationStatus as keyof typeof EDUCATION_GRADE_OPTIONS]
+                          .map((value) => <option key={value} value={value}>{value}</option>)}
+                      </select>
+                    </label>
+                  ) : null}
+                  <label className="field registration-combo-field">
+                    <span className="field-label">Okul / kurum</span>
+                    <SearchSelect
+                      value={registerProfile.institutionName}
+                      onChange={(value) => setRegisterProfile((current) => ({ ...current, institutionName: value }))}
+                      options={[...DEMO_INSTITUTIONS]}
+                      placeholder="Kurumunuzu arayın veya yazın"
+                      ariaLabel="Okul veya kurum seçimi"
+                    />
+                    <span className="field-hint">Listede yoksa kurum adını kendiniz yazabilirsiniz.</span>
+                  </label>
+                  <label className="field registration-combo-field">
+                    <span className="field-label">Şehir</span>
+                    <SearchSelect
+                      value={registerProfile.city}
+                      onChange={(value) => setRegisterProfile((current) => ({ ...current, city: value }))}
+                      options={[...TURKEY_CITIES]}
+                      placeholder="Şehir ara"
+                      ariaLabel="Şehir seçimi"
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="field-label">Cinsiyet <small>(isteğe bağlı)</small></span>
+                    <select value={registerProfile.gender} onChange={(event) => setRegisterProfile((current) => ({ ...current, gender: event.target.value }))}>
+                      <option value="">Seçmek istemiyorum</option>
+                      {GENDER_VALUES.map((value) => <option key={value} value={value}>{GENDER_LABELS[value]}</option>)}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span className="field-label">TEKNOFEST&apos;i nereden duydunuz?</span>
+                    <select value={registerProfile.discoverySource} required onChange={(event) => setRegisterProfile((current) => ({ ...current, discoverySource: event.target.value }))}>
+                      <option value="">Seçin</option>
+                      {DISCOVERY_SOURCE_VALUES.map((value) => <option key={value} value={value}>{DISCOVERY_SOURCE_LABELS[value]}</option>)}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span className="field-label">Kaçıncı TEKNOFEST katılımınız?</span>
+                    <select value={registerProfile.teknofestHistory} required onChange={(event) => setRegisterProfile((current) => ({ ...current, teknofestHistory: event.target.value }))}>
+                      <option value="">Seçin</option>
+                      {TEKNOFEST_HISTORY_VALUES.map((value) => <option key={value} value={value}>{TEKNOFEST_HISTORY_LABELS[value]}</option>)}
+                    </select>
+                  </label>
+                </div>
+              </fieldset>
               {error ? <p className="admin-error login-feedback" role="alert">{error}</p> : null}
               <button type="submit" className="primary-button" disabled={busy}>
                 {busy ? "Hesap oluşturuluyor…" : "Hesabımı oluştur"}

@@ -113,6 +113,12 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
       ?? null,
     [competition, openCompetitions],
   );
+  const teamSize = useMemo(() => {
+    const names = [applicantFullName, ...teamMembers]
+      .map((name) => name.trim().toLocaleLowerCase("tr-TR"))
+      .filter(Boolean);
+    return new Set(names).size || 1;
+  }, [applicantFullName, teamMembers]);
 
   useEffect(() => {
     let active = true;
@@ -281,8 +287,8 @@ export default function ParticipantPortal({ account, onSignOut }: { account: Adm
               <label className="field"><span className="field-label">Takım adı</span><input value={teamName} maxLength={120} onChange={(event) => setTeamName(event.target.value)} placeholder="Takımınızın adı" /></label>
             </div>
             <fieldset className="participant-members">
-              <legend>Ekip üyeleri</legend>
-              <p>Başvuru sahibi dışındaki üyeleri ekleyin. Bireysel başvuruda boş bırakabilirsiniz.</p>
+              <legend>Ekip üyeleri <span className="team-size-badge">Toplam {teamSize} kişi</span></legend>
+              <p>Başvuru sahibi toplam sayıya otomatik eklenir. Aynı isim iki kez yazılırsa bir kişi sayılır.</p>
               {teamMembers.map((member, index) => (
                 <div key={`member-${index}`}>
                   <label><span>{index + 1}. ekip üyesi adı soyadı</span><input value={member} maxLength={120} onChange={(event) => setTeamMembers((current) => current.map((item, itemIndex) => itemIndex === index ? event.target.value : item))} /></label>

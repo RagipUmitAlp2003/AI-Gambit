@@ -281,6 +281,99 @@ export type OperationsSummary = {
   completionRate: number;
 };
 
+/** Toplu katılım analitiği filtreleri; boş değer o boyutta "tümü" demektir. */
+export type OperationsAnalyticsFilters = {
+  competitionKey?: string;
+  year?: string;
+  stage?: string;
+  outcome?: string;
+  educationStatus?: string;
+  institutionName?: string;
+  city?: string;
+  gender?: string;
+  discoverySource?: string;
+  teknofestHistory?: string;
+  teamSize?: string;
+};
+
+export type AnalyticsOption = { value: string; label: string; count: number };
+
+export type AnalyticsBreakdownRow = {
+  key: string;
+  label: string;
+  total: number;
+  completed: number;
+  accepted: number;
+  rejected: number;
+  revision: number;
+  /** Payda tamamlanmış nihai kararlardır; küçük örneklemde null. */
+  successRate: number | null;
+};
+
+export type AcquisitionBreakdownRow = AnalyticsBreakdownRow & {
+  registrations: number;
+  applicants: number;
+  applicationConversionRate: number | null;
+};
+
+export type JudgeAlignmentRow = {
+  key: string;
+  label: string;
+  decisions: number;
+  findingsApproved: number;
+  findingsRejected: number;
+  findingReuseRate: number | null;
+  finalVerdictMatches: number;
+  finalVerdictAgreementRate: number | null;
+  sameResultRewritten: number;
+};
+
+export type OperationsAnalytics = {
+  generatedAt: string;
+  minimumRateSample: number;
+  filters: OperationsAnalyticsFilters;
+  options: {
+    competitions: AnalyticsOption[];
+    years: AnalyticsOption[];
+    stages: AnalyticsOption[];
+    outcomes: AnalyticsOption[];
+    educationStatuses: AnalyticsOption[];
+    institutions: AnalyticsOption[];
+    cities: AnalyticsOption[];
+    genders: AnalyticsOption[];
+    discoverySources: AnalyticsOption[];
+    teknofestHistories: AnalyticsOption[];
+    teamSizes: AnalyticsOption[];
+  };
+  sample: {
+    registrations: number;
+    applications: number;
+    completed: number;
+    pending: number;
+    accepted: number;
+    rejected: number;
+    revision: number;
+    successRate: number | null;
+  };
+  dimensions: {
+    acquisition: AcquisitionBreakdownRow[];
+    education: AnalyticsBreakdownRow[];
+    institutions: AnalyticsBreakdownRow[];
+    cities: AnalyticsBreakdownRow[];
+    genders: AnalyticsBreakdownRow[];
+    teknofestHistory: AnalyticsBreakdownRow[];
+    teamSizes: AnalyticsBreakdownRow[];
+  };
+  aiJudge: {
+    overall: JudgeAlignmentRow;
+    byJudge: JudgeAlignmentRow[];
+    byStage: JudgeAlignmentRow[];
+    matrix: { aiUygunJudgeUygun: number; aiUygunJudgeOlumsuz: number; aiOlumsuzJudgeUygun: number; aiOlumsuzJudgeOlumsuz: number };
+    topOverrides: Array<{ criterionName: string; count: number }>;
+  };
+  insights: string[];
+};
+
 /**
  * Değerlendirme Yöneticisinin (04) yarışma bazlı izleme satırı.
  *

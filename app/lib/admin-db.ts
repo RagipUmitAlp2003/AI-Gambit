@@ -12,6 +12,7 @@ import type {
   WorkflowSubject,
 } from "./admin-types";
 import type { PasswordRecord } from "./password";
+import type { ParticipantProfileInput } from "./participant-profile";
 
 /**
  * Yönetici sistemi veri tabanı katmanı (Cloudflare D1).
@@ -56,6 +57,20 @@ const SCHEMA = [
     revoked_reason TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_admin_accounts_role ON admin_accounts (role_code, status)`,
+  `CREATE TABLE IF NOT EXISTS participant_profiles (
+    account_id TEXT PRIMARY KEY,
+    education_status TEXT NOT NULL,
+    education_grade TEXT NOT NULL DEFAULT '',
+    institution_name TEXT NOT NULL,
+    city TEXT NOT NULL,
+    gender TEXT,
+    discovery_source TEXT NOT NULL,
+    teknofest_history TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_participant_profiles_dimensions
+   ON participant_profiles (education_status, city, discovery_source, teknofest_history)`,
   `CREATE TABLE IF NOT EXISTS admin_mail_outbox (
     id TEXT PRIMARY KEY,
     account_id TEXT,
@@ -353,6 +368,8 @@ export async function insertAccount(input: {
   createdBy: string | null;
   /** Kurulum hesabının şifresi ilk girişte değiştirilmiş sayılmaz; varsayılan true. */
   mustChangePassword?: boolean;
+  /** Yalnızca yarışmacının kendi kayıt akışında, hesapla aynı D1 batch'inde yazılır. */
+  participantProfile?: ParticipantProfileInput;
 }): Promise<AdminAccount> {
   const database = await getDatabase();
   const email = normalizeEmail(input.email);
@@ -389,8 +406,7 @@ export async function insertAccount(input: {
   };
 
   try {
-    await database
-      .prepare(
+    const accountInsert = database.prepare(
         `INSERT INTO admin_accounts
           (id, full_name, email, username, role_code, password_hash, password_salt, password_iterations,
            must_change_password, status, created_at, created_by, revoked_at, revoked_reason)
@@ -408,8 +424,32 @@ export async function insertAccount(input: {
         account.mustChangePassword ? 1 : 0,
         account.createdAt,
         account.createdBy,
-      )
-      .run();
+      );
+    if (input.participantProfile) {
+      const profile = input.participantProfile;
+      await database.batch([
+        accountInsert,
+        database.prepare(
+          `INSERT INTO participant_profiles
+            (account_id, education_status, education_grade, institution_name, city, gender,
+             discovery_source, teknofest_history, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          account.id,
+          profile.educationStatus,
+          profile.educationGrade,
+          profile.institutionName,
+          profile.city,
+          profile.gender,
+          profile.discoverySource,
+          profile.teknofestHistory,
+          account.createdAt,
+          account.createdAt,
+        ),
+      ]);
+    } else {
+      await accountInsert.run();
+    }
   } catch (error) {
     // EŞZAMANLILIK: yukarıdaki ön-SELECT'ler iki eşzamanlı istekte yarışı
     // kaçırabilir; UNIQUE ihlali burada tutarlı 409'a çevrilir (belirsiz 500

@@ -235,6 +235,15 @@ export const workflowApi = {
       createdAt: string;
     }>;
   }>("/api/operations"),
+  operationsAnalytics: (filters: import("./workflow-types").OperationsAnalyticsFilters = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) {
+      if (value) query.set(key, value);
+    }
+    return jsonRequest<{ analytics: import("./workflow-types").OperationsAnalytics }>(
+      `/api/operations/analytics${query.size ? `?${query.toString()}` : ""}`,
+    );
+  },
   /** Role göre yarışma listesi; 02 öncelik rozetini buradan okur. */
   competitions: () => jsonRequest<{ competitions: CompetitionWorkflow[] }>("/api/competitions"),
   /** Başvuruyu açma/kapatma ve sonuç yayımlama — yalnızca yarışmanın sahibi 01. */
@@ -278,9 +287,9 @@ export const workflowApi = {
         method: "POST", credentials: "same-origin", body: form,
       }));
   },
-  registerParticipant: (fullName: string, email: string, password: string) =>
+  registerParticipant: (fullName: string, email: string, password: string, profile: import("./participant-profile").ParticipantProfileInput) =>
     jsonRequest<{ account: AdminAccount; expiresAt: string }>("/api/participant/register", {
       method: "POST",
-      body: JSON.stringify({ fullName, email, password }),
+      body: JSON.stringify({ fullName, email, password, profile }),
     }),
 };
