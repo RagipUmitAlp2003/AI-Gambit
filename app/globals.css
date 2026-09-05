@@ -339,10 +339,10 @@
 .history-workspace h1 { margin: 8px 0 10px; font-size: clamp(30px,4vw,46px); letter-spacing: -.035em; }
 .history-workspace > header p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
 /* Kriter Geçmişi tek ekran; iki liste sekmeyle ayrılır. */
-.history-tabs { display: flex; gap: 6px; margin-top: 26px; border-bottom: 1px solid var(--line); }
-.history-tabs button { display: inline-flex; align-items: center; gap: 7px; padding: 10px 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font: inherit; font-size: 11px; font-weight: 800; }
-.history-tabs button.active { border-bottom-color: var(--teal); color: var(--ink); }
-.history-tabs button span { padding: 2px 7px; border-radius: 999px; background: #eef6f5; color: var(--ink-soft); font-size: 9.5px; }
+.history-tabs, .operations-tabs { display: flex; gap: 6px; margin-top: 26px; border-bottom: 1px solid var(--line); }
+.history-tabs button, .operations-tabs button { display: inline-flex; align-items: center; gap: 7px; padding: 10px 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font: inherit; font-size: 11px; font-weight: 800; }
+.history-tabs button.active, .operations-tabs button.active { border-bottom-color: var(--teal); color: var(--ink); }
+.history-tabs button span, .operations-tabs button span { padding: 2px 7px; border-radius: 999px; background: #eef6f5; color: var(--ink-soft); font-size: 9.5px; }
 .history-search { max-width: 440px; margin: 28px 0 18px; }
 .history-search { margin-top: 18px; }
 .history-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; }
@@ -759,8 +759,6 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
 /* 🔥 Öncelik rozeti: hakem listesinde ve yönetici ekranında aynı görünür. */
 .priority-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 999px; background: var(--danger-soft); color: var(--danger); font-size: 9.5px; font-weight: 800; font-style: normal; letter-spacing: .04em; }
 .priority-note, .priority-reason { margin: 0; color: var(--danger); font-size: 10.5px; line-height: 1.5; }
-.eval-competition-list button.priority { border-left: 3px solid var(--danger); background: var(--danger-soft); }
-.eval-competition-list button.priority.active { background: #f7dedb; }
 
 /* --- Yarışma Yöneticisi · başvuru durumu --- */
 .stage-panel { margin-top: 26px; padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--paper); }
@@ -1278,3 +1276,18 @@ input:hover, select:hover, textarea:hover, input:focus, select:focus, textarea:f
   .archive-table-head { display: none; }
   .archive-table-row { grid-template-columns: 1fr; gap: 6px; }
 }
+
+/* 04 panosu · "Değerlendirme Operasyonları" sekmeli bölüm.
+   Sekme çubuğu stilini .history-tabs ile paylaşır; yalnızca seçili sekmenin içeriği çizilir. */
+.operations-tabs-section { margin-top: 32px; padding-top: 28px; border-top: 1px solid var(--line); }
+.operations-tabs-section > div:first-child h2 { margin: 0 0 4px; font-size: 18px; }
+.operations-tabs-section > div:first-child p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.operations-tabs { flex-wrap: wrap; margin-top: 18px; }
+.operations-tabpanel { padding-top: 22px; }
+/* Sekme içindeki bölümler kendi üst boşluğunu ve ayırıcı çizgisini taşımaz; sekme çubuğu zaten ayırır. */
+.operations-tabpanel > .competition-overview { margin-top: 0; }
+.operations-tabpanel > .operations-timeline { margin-top: 0; padding-top: 0; border-top: 0; }
+.operations-tabpanel > .judge-workloads { margin-bottom: 22px; }
+.operations-tabpanel > .operations-archive { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
+.operations-archive > div:first-child h2 { margin: 0 0 4px; font-size: 15px; }
+.operations-archive > div:first-child p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }

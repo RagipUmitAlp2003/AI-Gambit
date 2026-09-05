@@ -32,15 +32,24 @@
 .eval-home-badge { display: inline-grid; place-items: center; min-width: 40px; height: 40px; padding: 0 10px; border-radius: 12px; background: var(--ink); color: #fff; font-size: 15px; font-weight: 800; }
 
 /* ------------------------------ Atölye düzeni ------------------------------ */
-.eval-workshop-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 28px; padding: 8px 38px 38px; }
-.eval-competition-list { display: grid; align-content: start; gap: 8px; }
-.eval-competition-list button { display: grid; gap: 4px; padding: 13px 14px; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; color: var(--ink); text-align: left; cursor: pointer; }
-.eval-competition-list button:hover { border-color: var(--teal); }
-.eval-competition-list button.active { border-color: var(--teal); background: #eef9f7; }
-.eval-competition-list strong { font-size: 13px; line-height: 1.35; }
-.eval-competition-list span { color: var(--muted); font-size: 11px; }
+.eval-workshop-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; padding: 8px 38px 38px; }
 .eval-workshop-main { min-width: 0; display: grid; align-content: start; gap: 18px; }
 .eval-back-to-grid { justify-self: start; }
+
+/* ------------------------------ Yarışma seçici ------------------------------ */
+/* Yayımlanmış yarışmalar tek arama kutusunda; ÖNCELİKLİ olanlar listenin başında ve kırmızı şeritli. */
+.eval-competition-picker { display: grid; gap: 10px; padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--radius-md); background: #fff; }
+.eval-competition-picker-head { display: grid; gap: 2px; }
+.eval-competition-picker-head label { color: var(--ink); font-size: 13px; font-weight: 800; }
+.eval-competition-picker-head small { color: var(--muted); font-size: 11px; }
+.eval-competition-picker .combo { max-width: 560px; }
+.eval-competition-picker input:disabled { color: var(--muted); background: #f3f6f7; cursor: not-allowed; }
+.eval-competition-picker-note { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.eval-competition-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.eval-competition-summary .priority-reason { flex-basis: 100%; }
+.combo-option-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.combo-option.priority { border-left: 3px solid var(--danger); background: var(--danger-soft); }
+.combo-option.priority.highlighted, .combo-option.priority:hover { background: #f7dedb; }
 
 /* ------------------------------ Başvuru kutuları ------------------------------ */
 .eval-application-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
@@ -159,8 +168,7 @@
 
 @media (max-width: 1120px) {
   .eval-stage-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .eval-workshop-layout { grid-template-columns: 1fr; padding-left: 18px; padding-right: 18px; }
-  .eval-competition-list { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+  .eval-workshop-layout { padding-left: 18px; padding-right: 18px; }
   .eval-home-choices { padding-left: 18px; padding-right: 18px; }
   .eval-notice, .eval-persist-error { margin-left: 18px; margin-right: 18px; }
   .eval-panel-margin { margin-left: 18px; margin-right: 18px; }

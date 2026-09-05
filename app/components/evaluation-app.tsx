@@ -4,8 +4,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import ElapsedTime from "./elapsed-time";
 import SimilarityWorkspace from "./similarity-workspace";
+import CompetitionPicker from "./competition-picker";
 import { useLiveRefresh } from "./use-live-refresh";
-import { competitionReadOnly, COMPETITION_STATUS_LABELS } from "../lib/workflow-types";
+import { competitionReadOnly } from "../lib/workflow-types";
 import TopbarSession from "./topbar-session";
 import { formatDateTime } from "../lib/admin-client";
 import { extractPdfText } from "../lib/pdf-reader";
@@ -232,63 +233,6 @@ function HomeView({ pending, completed, onChoose }: { pending: number; completed
         </button>
       </div>
     </section>
-  );
-}
-
-function CompetitionList({ profiles, applications, competitions, selectedKey, history, onSelect }: {
-  profiles: CompetitionProfile[];
-  applications: CompetitionApplication[];
-  /** Öncelik bayrakları; Değerlendirme Yöneticisi tarafından atanır. */
-  competitions: CompetitionWorkflow[];
-  selectedKey: string | null;
-  history: boolean;
-  onSelect: (key: string) => void;
-}) {
-  // Kriteri çıkarılmış (yayımlı) her yarışma listelenir; henüz başvurusu olmayan da görünür.
-  const entries = useMemo(() => {
-    const priorityByKey = new Map(competitions.map((item) => [item.competitionKey, item]));
-    const byKey = new Map<string, { key: string; name: string; profile: CompetitionProfile | null; items: CompetitionApplication[] }>();
-    for (const profile of profiles.filter((item) => item.status === "approved")) {
-      byKey.set(profile.competitionKey, { key: profile.competitionKey, name: profile.competitionName, profile, items: [] });
-    }
-    for (const application of applications) {
-      const entry = byKey.get(application.competitionKey) ?? { key: application.competitionKey, name: application.competitionName, profile: null, items: [] };
-      entry.items.push(application);
-      byKey.set(application.competitionKey, entry);
-    }
-    // ÖNCELİKLİ yarışmalar her zaman listenin başında; gerisi ada göre sıralı.
-    return [...byKey.values()]
-      .map((entry) => ({ ...entry, competition: priorityByKey.get(entry.key) ?? null }))
-      .sort((left, right) =>
-        Number(Boolean(right.competition?.isPriority)) - Number(Boolean(left.competition?.isPriority))
-        || left.name.localeCompare(right.name, "tr"));
-  }, [profiles, applications, competitions]);
-
-  return (
-    <nav className="eval-competition-list" aria-label="Kriteri çıkarılmış yarışmalar">
-      {entries.map((entry) => {
-        const count = entry.items.filter((item) => history ? item.status === "completed" : item.status !== "completed").length;
-        const criteriaCount = entry.profile?.profile.criteria.length ?? 0;
-        const priority = entry.competition?.isPriority ?? false;
-        return (
-          <button
-            key={entry.key}
-            type="button"
-            className={`${entry.key === selectedKey ? "active" : ""} ${priority ? "priority" : ""}`.trim()}
-            onClick={() => onSelect(entry.key)}
-            title={priority && entry.competition?.priorityNote ? `Öncelik gerekçesi: ${entry.competition.priorityNote}` : undefined}
-          >
-            {/* Değerlendirme Yöneticisi bu yarışmayı acil işaretledi. */}
-            {priority ? <em className="priority-badge">🔥 ACİL / ÖNCELİKLİ</em> : null}
-            <strong>{entry.name}</strong>
-            <span>{entry.competition ? `${entry.competition.isActive ? "Aktif" : "Pasif"} · ${COMPETITION_STATUS_LABELS[entry.competition.status]}` : "Yarışma durumu alınamadı"}</span>
-            <span>{entry.profile ? `${criteriaCount} kriter` : "Kriter profili yok"} · {count} {history ? "tamamlanan" : "bekleyen"} başvuru</span>
-            {priority && entry.competition?.priorityNote ? <span className="priority-reason">{entry.competition.priorityNote}</span> : null}
-          </button>
-        );
-      })}
-      {!entries.length ? <p className="library-empty">Kriteri çıkarılmış yarışma yok. Yarışma Yöneticisi Kriter Atölyesi&apos;nde profil yayımladığında burada görünür.</p> : null}
-    </nav>
   );
 }
 
@@ -1784,7 +1728,7 @@ export default function EvaluationApp() {
               </div>
             </div>
             <div className="eval-workshop-layout">
-              <CompetitionList
+              <CompetitionPicker
                 profiles={profiles}
                 applications={applications}
                 competitions={competitions}
@@ -1794,7 +1738,7 @@ export default function EvaluationApp() {
               />
               <div className="eval-workshop-main">
                 {!competitionKey ? (
-                  <p className="library-empty">Soldan bir yarışma seçin.</p>
+                  <p className="library-empty">Yukarıdaki kutudan bir yarışma seçin.</p>
                 ) : selected ? (
                   <ApplicationDetail
                     key={`${selected.id}-${selected.evaluation?.analyzedAt ?? ""}-${selected.status === "completed"}`}
