@@ -79,11 +79,12 @@ async function jsonRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const workflowApi = {
-  bulkSimilarity: (competitionId: string) => jsonRequest<{
-    poolSize: number; analyzedCount: number; missingCount: number; possiblePairCount: number;
-    candidates: Array<{ pairKey: string; leftLabel: string; rightLabel: string; mathematicalPercent: number }>;
-    llmStatus: "not_requested"; note: string;
-  }>(`/api/competitions/${encodeURIComponent(competitionId)}/bulk-similarity`),
+  bulkSimilarity: (competitionId: string) => jsonRequest<import("./similarity-bulk-types").BulkOverview>(
+    `/api/competitions/${encodeURIComponent(competitionId)}/bulk-similarity`),
+  bulkSimilarityAction: (competitionId: string, action: "start" | "continue" | "prepare", applicationId?: string) =>
+    jsonRequest<import("./similarity-bulk-types").BulkOverview>(
+      `/api/competitions/${encodeURIComponent(competitionId)}/bulk-similarity`,
+      { method: "POST", body: JSON.stringify({ action, applicationId }) }),
   /** `openCompetitions`: şu anda başvuruya açık yarışmalar (yayımlanmış profili olanlar). */
   applications: () => jsonRequest<{ applications: CompetitionApplication[]; openCompetitions?: CompetitionEntry[] }>("/api/applications"),
   submitApplication: async (input: {
@@ -136,7 +137,7 @@ export const workflowApi = {
    * Embedding maliyeti ilk çağrıda kalıcıdır; devam çağrıları API'yi tekrar
    * ÇAĞIRMAZ.
    */
-  similarityCheck: (id: string, input: { pages: string[]; pdfHash: string; resumeRunId?: string }) => jsonRequest<{
+  similarityCheck: (id: string, input: { pages: string[]; pdfHash: string; resumeRunId?: string; prepareOnly?: boolean }) => jsonRequest<{
     /** Tam sonuç; yalnızca koşu tamamlandığında bulunur. */
     similarity?: SimilarityReport;
     /** Geriye uyum: 3. aşama şeridinin eski kaydı (yeni ekran kullanmaz). */
@@ -147,6 +148,8 @@ export const workflowApi = {
     progress?: { processed: number; total: number };
     /** Embedding 429 aldı: kriter analizinin arkasından kısa gecikmeyle yeniden denenebilir. */
     embeddingRateLimited?: boolean;
+    /** Nihai onay sonrasında yalnızca kalıcı karşılaştırma verisi hazırlandı. */
+    prepared?: boolean;
   }>(
     `/api/applications/${encodeURIComponent(id)}/similarity`,
     {
@@ -155,6 +158,7 @@ export const workflowApi = {
         pages: input.pages,
         pdfHash: input.pdfHash,
         ...(input.resumeRunId ? { resumeRunId: input.resumeRunId } : {}),
+        ...(input.prepareOnly ? { prepareOnly: true } : {}),
       }),
     },
   ),

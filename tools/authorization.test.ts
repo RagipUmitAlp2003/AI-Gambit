@@ -496,11 +496,11 @@ test("hakem ekranında kanıtı PDF'de gösteren uygulama içi panel ve aşama i
   assert.match(evaluation, /function StageIcon/, "Aşamalar yeşil/sarı/kırmızı ikonla gösterilmelidir.");
   // GÖREV 3 · madde 7: benzerlik dört aşamanın parçası DEĞİLDİR; aşama
   // şeridindeki "ŞÜPHELİ/Normal" satırı kaldırıldı, bağımsız kart gösterir.
-  assert.match(evaluation, /Raporlar arası benzerlik/, "Bağımsız benzerlik kartı bulunmalıdır.");
+  assert.match(evaluation, /<SimilarityWorkspace/, "Benzerlik ayrı çalışma alanında bulunmalıdır.");
   // Şüpheli/Normal işareti kaybolmaz; yalnızca kendi notunda (bağımsız kartta) durur.
   // "ŞÜPHELİ" suçlayıcı ifadesi kaldırıldı (madde 3): işaret kendi notunda
   // "inceleme önerilir" olarak, karar hakemde kalacak biçimde gösterilir.
-  assert.match(evaluation, /inceleme önerilir/, "Benzerlik işareti kendi notunda gösterilmelidir.");
+  assert.doesNotMatch(evaluation, /<SimilarityCard/, "Eski benzerlik kartı hakem analizi altında kalmamalıdır.");
   const strip = evaluation.slice(evaluation.indexOf("function StageStrip"), evaluation.indexOf("type RejectDraft"));
   assert.doesNotMatch(strip, /inceleme önerilir|ŞÜPHELİ/, "Benzerlik işareti aşama şeridine geri sızmamalıdır.");
 

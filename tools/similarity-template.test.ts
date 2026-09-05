@@ -206,14 +206,11 @@ test("şablon değişikliği önbellekli parçalara KISMEN uygulanır ve rapor b
   // yalnızca parça düzeyi shingle işaretlerini güncel şablonla yeniler.
   // Sonuç, sahip olmadığı bir güncelliği İDDİA EDEMEZ: damga eskiyse rapora
   // Türkçe sınır notu eklenir (is_stale anlamı değişmez).
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
+  const route = readFileSync("app/lib/similarity-preparation.ts", "utf8");
   assert.match(route, /const templateStampChanged = cacheValid && cachedTemplateVersion !== templateVersion;/,
     "Önbellek şablon damgası güncel şablonla karşılaştırılmalıdır.");
-  assert.match(route, /templateStampChanged\s*\?\s*\n?\s*" Şablon değişikliği parça düzeyinde uygulandı; blok düzeyi ayıklama raporun yeniden analizinde tam uygulanır\."/,
-    "Kısmi uygulama notu yalnızca damga eskiyken rapora eklenmelidir.");
-  // Not, kartın gösterdiği report.note alanına eklenir (buildNote + ek).
-  assert.match(route, /buildNote\(\{ level, comparedCount, approxPercent: percent, closestLabel, method \}\) \+ noteSuffix/,
-    "Sınır notu kaydedilen raporun note alanında taşınmalıdır.");
+  assert.match(route, /cached!\.map\(\(row\) => row\.embedding\)/,
+    "Şablon damgası yenilenirken embedding önbelleği korunmalıdır.");
 });
 
 test("şablon ucu 01-sahiplik ister, 413 kapısını gövde okumadan uygular ve OCR çağırmaz", () => {

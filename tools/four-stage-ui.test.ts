@@ -35,7 +35,6 @@ import {
 
 const EVALUATION_APP = readFileSync("app/components/evaluation-app.tsx", "utf8");
 const CRITERIA_APP = readFileSync("app/components/criteria-app.tsx", "utf8");
-const PRECHECKS = readFileSync("app/lib/report-prechecks.ts", "utf8");
 const EVALUATE_ROUTE = readFileSync("app/api/evaluate-report/route.ts", "utf8");
 const JUDGE_REVIEW = readFileSync("app/lib/judge-review.ts", "utf8");
 const ANALYZE_ROUTE = readFileSync("app/api/analyze/route.ts", "utf8");
@@ -93,27 +92,17 @@ test("17 · applySimilarity kriter bulgularını ve aşama sonuçlarını DEĞİ
   assert.equal(JSON.stringify(before.findings), frozenFindings);
 });
 
-test("17 · kaynak sözleşmesi: benzerlik yolu hiçbir yerde bulgu/aşama kararı yazmaz, hakem akışı benzerliği okumaz", () => {
-  const applyBody = PRECHECKS.slice(
-    PRECHECKS.indexOf("export function applySimilarity"),
-    PRECHECKS.indexOf("export function feedbackOf"),
-  );
-  assert.ok(applyBody.length > 0, "applySimilarity bulunmalıdır.");
-  assert.doesNotMatch(applyBody, /verdict/, "applySimilarity hiçbir sonuç (verdict) alanına dokunmamalıdır.");
-  assert.doesNotMatch(applyBody, /findings/, "applySimilarity bulgu listesine dokunmamalıdır.");
-  assert.match(applyBody, /stage\.stage === "category_similarity"/, "Yalnızca 3. aşama kaydı güncellenir.");
-
+test("17 · kaynak sözleşmesi: benzerlik hakem kriter kararından tamamen ayrıdır", () => {
   // Değerlendirme ucu benzerlik üretmez ve modelden benzerlik kararı istemez.
   assert.doesNotMatch(EVALUATE_ROUTE, /applySimilarity|buildSimilarityCheck/,
     "Kriter analizi ucu benzerlik hesaplamaz; benzerlik ayrı sistemdir.");
   assert.match(EVALUATE_ROUTE, /benzerlik kararı VERME/, "Modele benzerlik kararı yasaklanır.");
-  assert.match(EVALUATE_ROUTE, /result\.similarity = null/, "Sunucu 3. aşamaya benzerlik değeri yazmaz; istemci doldurur.");
+  assert.match(EVALUATE_ROUTE, /result\.similarity = null/, "Sunucu 3. aşamaya benzerlik değeri yazmaz.");
 
   // Hakem karar mantığı benzerlikten habersizdir.
   assert.doesNotMatch(JUDGE_REVIEW, /similarity|benzerlik/i, "judge-review benzerlik okumamalıdır.");
-  // Kartın "Bu sonuç intihal kararı değildir." uyarısı tools/similarity.test.ts
-  // içinde sabitlenmiştir; burada yalnızca sayaç/karar ayrımı doğrulanır.
-  assert.match(EVALUATION_APP, /sayaçlara katılmaz/, "Benzerlik sayaçlara ve karara katılmaz.");
+  assert.doesNotMatch(EVALUATION_APP, /similarityReport/, "Hakem kriter ekranı benzerlik raporu okumamalıdır.");
+  assert.match(EVALUATION_APP, /<SimilarityWorkspace/, "Benzerlik ayrı çalışma alanında açılmalıdır.");
 });
 
 /* ------------------------- 20 · Eski profil yüklemesi ------------------------- */

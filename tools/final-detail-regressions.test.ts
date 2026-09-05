@@ -28,11 +28,12 @@ test("uzun geçerli hakem gerekçesi API geri bildirim sınırında reddedilmez"
 });
 
 test("otomatik benzerlik ve toplu hazırlık iki ayrı uçtur", () => {
-  const automatic = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  const bulk = readFileSync("app/api/competitions/[id]/bulk-similarity/route.ts", "utf8");
-  const database = readFileSync("app/lib/workflow-db.ts", "utf8");
-  assert.match(automatic, /saveSimilarityResult/);
-  assert.doesNotMatch(bulk, /GEMINI_API_KEY|explainSimilarityMatches/);
-  assert.match(bulk, /slice\(0, 5\)/);
-  assert.match(database, /CASE WHEN EXISTS[\s\S]*similarity_chunks[\s\S]*AS prepared/);
+  const prep=readFileSync("app/api/applications/[id]/similarity/route.ts","utf8");
+  const bulk=readFileSync("app/lib/similarity-bulk.ts","utf8");
+  assert.match(prep,/prepareApprovedSimilarity/);
+  assert.doesNotMatch(prep,/saveSimilarityResult/);
+  assert.doesNotMatch(bulk,/GEMINI_API_KEY|explainSimilarityMatches|embedTexts\(/);
+  assert.match(bulk,/candidatePairs/);
+  const database=readFileSync("app/lib/workflow-db.ts","utf8");
+  assert.match(database,/a\.status = 'completed' AND d\.outcome = 'accepted'/);
 });

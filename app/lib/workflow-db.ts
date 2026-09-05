@@ -474,7 +474,7 @@ async function upgradeCompetitionTable(database: D1Database): Promise<void> {
 
 let workflowSchemaPromise: Promise<void> | null = null;
 
-async function workflowDatabase(): Promise<D1Database> {
+export async function workflowDatabase(): Promise<D1Database> {
   const database = await getDatabase();
   if (!workflowSchemaPromise) {
     workflowSchemaPromise = database.batch(WORKFLOW_SCHEMA.map((sql) => database.prepare(sql)))
@@ -3390,7 +3390,9 @@ export async function saveSimilarityChunks(input: {
   const timestamp = new Date().toISOString();
   // Eski embedding yeni PDF için KULLANILMAZ: başvurunun önceki sürüm satırları
   // silinir; yalnızca geçerli sürümün parçaları havuzda kalır.
-  await database.prepare(`DELETE FROM similarity_chunks WHERE application_id = ?`).bind(input.applicationId).run();
+  // Never delete a newer version if an older preparation finishes late.
+  await database.prepare(`DELETE FROM similarity_chunks WHERE application_id = ? AND submission_version_id = ?`)
+    .bind(input.applicationId, input.submissionVersionId).run();
   if (!input.chunks.length) return;
   const statements = input.chunks.map((chunk) => database.prepare(
     `INSERT INTO similarity_chunks
@@ -3620,18 +3622,19 @@ export type BulkSimilarityPoolEntry = {
   applicationId: string;
   submissionVersionId: string;
   participantLabel: string;
+  participantId: string | null;
   assignedJudgeId: string | null;
   prepared: boolean;
 };
 
-/** Current, non-archived submissions and whether their current PDF has comparable chunks. */
+/** Nihai olarak ONAYLANMIŞ güncel raporlar ve karşılaştırma verilerinin hazırlık durumu. */
 export async function listBulkSimilarityPool(
   competitionKey: string,
   pipelineVersion: string,
 ): Promise<BulkSimilarityPoolEntry[]> {
   const database = await workflowDatabase();
   const result = await database.prepare(
-    `SELECT a.id, a.current_version_id, a.assigned_judge_id,
+    `SELECT a.id, a.current_version_id, a.assigned_judge_id, a.participant_id,
             COALESCE(d.team_name, a.participant_name) AS participant_label,
             CASE WHEN EXISTS (
               SELECT 1 FROM similarity_chunks s
@@ -3642,16 +3645,18 @@ export async function listBulkSimilarityPool(
        FROM competition_applications a
        LEFT JOIN application_submission_details d ON d.application_id = a.id
        WHERE a.competition_key = ? AND a.deleted_at IS NULL
-         AND a.current_version_id IS NOT NULL
+          AND a.status = 'completed' AND d.outcome = 'accepted'
+          AND a.current_version_id IS NOT NULL
        ORDER BY a.id`,
   ).bind(pipelineVersion, competitionKey).all<{
     id: string; current_version_id: string; assigned_judge_id: string | null;
-    participant_label: string; prepared: number;
+    participant_label: string; participant_id: string | null; prepared: number;
   }>();
   return (result.results ?? []).map((row) => ({
     applicationId: row.id,
     submissionVersionId: row.current_version_id,
     participantLabel: row.participant_label,
+    participantId: row.participant_id,
     assignedJudgeId: row.assigned_judge_id,
     prepared: Number(row.prepared) === 1,
   }));

@@ -368,10 +368,10 @@ test("parça tavanı ortam değişkeniyle ayarlanabilir; geçersiz değer varsay
   assert.equal(similarityMaxChunksPerDoc({ SIMILARITY_MAX_CHUNKS: "-5" }), MAX_CHUNKS_PER_DOC);
   // Route tavanı ortamdan okuyup chunkStructuredBlocks'a geçirir; rapor notu
   // ve denetim nesnesi kesmeyi açıkça taşır (asla sessiz kırpma yok).
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
+  const route = readFileSync("app/lib/similarity-preparation.ts", "utf8");
   assert.match(route, /chunkStructuredBlocks\(classified\.included, similarityMaxChunksPerDoc\(\)\)/,
     "Route parça tavanını ortamdan okumalıdır.");
-  assert.match(route, /excludedWords\.tavan/,
+  assert.match(route, /truncatedBlocks = excluded\.filter\(\(block\) => block\.reason === "tavan"\)\.length/,
     "Tavan kesmesi rapor notunda yüzeye çıkarılmalıdır (asla sessiz değil).");
 });
 
@@ -547,34 +547,24 @@ test("boş veya bozuk embedding asla kabul edilmez", async () => {
 /* --------------------- Akış ve bütünlük (kaynak denetimi) --------------------- */
 
 test("benzerlik ucu PDF özetini bağlar, kapsamı sunucuda çözer ve kendisiyle karşılaştırmaz", () => {
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  // PDF bağlama: istemcinin metni, R2'deki geçerli sürümün SHA-256'sına bağlanır.
-  assert.match(route, /serverPdfHash !== claimedPdfHash/, "Farklı PDF sürümünün metni reddedilmelidir.");
-  assert.match(route, /resolveSimilarityContext\(applicationId, auth\.account\)/, "Kapsam sunucuda çözülmelidir.");
-  assert.ok(!/body\.competition/.test(route), "Kapsam istemcinin bildirdiği yarışma adına göre belirlenmemelidir.");
-  // MinHash katmanı korunur; embedding onu tamamlar.
-  assert.match(route, /buildMinHash\(/, "MinHash birinci katman olarak korunmalıdır.");
-  assert.match(route, /saveAndListSimilarityFingerprints/, "Mevcut parmak izi havuzu korunmalıdır.");
-  const db = readFileSync("app/lib/workflow-db.ts", "utf8");
-  // Eş parça sorguları ortak PEER_CHUNK_SELECT üzerinden geçerli sürüme bağlanır.
-  const shared = db.slice(db.indexOf("const PEER_CHUNK_SELECT"));
-  const sharedBody = shared.slice(0, shared.indexOf("\nexport "));
-  assert.match(sharedBody, /a\.current_version_id = s\.submission_version_id/, "Yalnızca GEÇERLİ PDF sürümleri havuza girer.");
-  const peers = db.slice(db.indexOf("export async function listPeerSimilarityChunks"));
-  const peersBody = peers.slice(0, peers.indexOf("\nexport "));
-  assert.match(peersBody, /s\.application_id <> \?/, "Başvuru KENDİSİYLE karşılaştırılmamalıdır.");
-  assert.match(peersBody, /a\.deleted_at IS NULL/, "Arşivlenmiş başvuru karşılaştırmaya girmez.");
-  assert.match(peersBody, /s\.competition_key = \?/, "Yalnızca aynı yarışma anahtarı (ad+yıl+aşama) karşılaştırılır.");
-  // Parti sorguları AYNI filtreleri taşır (madde 8): kimlik dilimli okuma da
-  // arşiv/sürüm filtresinden kaçamaz.
-  const batch = db.slice(db.indexOf("export async function listSimilarityChunkBatch"));
-  const batchBody = batch.slice(0, batch.indexOf("\nexport "));
-  assert.match(batchBody, /a\.deleted_at IS NULL/, "Parti okuması arşivlenmiş başvuruyu dışarıda bırakmalıdır.");
-  assert.match(batchBody, /PEER_CHUNK_SELECT/, "Parti okuması ortak geçerli-sürüm SELECT'ini kullanmalıdır.");
+  const preparation = readFileSync("app/lib/similarity-preparation.ts","utf8");
+  assert.match(preparation,/resolveSimilarityContext\(applicationId, actor\)/);
+  assert.match(preparation,/crypto\.subtle\.digest\("SHA-256", bytes\)/);
+  assert.doesNotMatch(preparation,/body\.pages|claimedPdfHash/);
+  assert.match(preparation,/buildMinHash\(/);
+  const bulk = readFileSync("app/lib/similarity-bulk.ts","utf8");
+  assert.match(bulk,/findStoredSimilarityChunks/);
+  const engine=readFileSync("app/lib/similarity-bulk-engine.ts","utf8");
+  assert.match(engine,/j=i\+1/);
+  assert.match(engine,/left\.participantId === right\.participantId/);
+  const db=readFileSync("app/lib/workflow-db.ts","utf8");
+  const pool=db.slice(db.indexOf("export async function listBulkSimilarityPool"));
+  assert.match(pool,/a\.status = 'completed' AND d\.outcome = 'accepted'/);
+  assert.match(pool,/a\.deleted_at IS NULL/);
 });
 
 test("aynı PDF sürümü için embedding ikinci kez üretilmez; yeni sürüm eski embedding kullanmaz", () => {
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
+  const route = readFileSync("app/lib/similarity-preparation.ts", "utf8");
   assert.match(route, /findStoredSimilarityChunks/, "Önbellek okuması bulunmalıdır.");
   assert.match(
     route,
@@ -592,31 +582,15 @@ test("aynı PDF sürümü için embedding ikinci kez üretilmez; yeni sürüm es
     "Önbellek anahtarı PDF sürümü ve özetiyle nitelenmelidir.");
 });
 
-test("kriter analizi benzerliği BEKLEMEZ: sonuç hemen kaydedilir, benzerlik kendi kartında ilerler", () => {
-  const app = readFileSync("app/components/evaluation-app.tsx", "utf8");
-  const analyzeBody = app.slice(app.indexOf("async function analyze("));
-  // Kriter analizi ile benzerlik BİRLİKTE beklenemez: eskiden Promise.allSettled
-  // ikisini de bekliyordu ve uzun süren benzerlik hakem analizini bekletiyordu.
-  assert.ok(!/Promise\.allSettled\(\[\s*evaluateReport\(/.test(app),
-    "Kriter analizi benzerlikle birlikte beklenmemelidir (madde 4).");
-  const startIndex = analyzeBody.indexOf("runSimilarity()");
-  const evaluateIndex = analyzeBody.indexOf("await evaluateReport(");
-  const saveIndex = analyzeBody.indexOf('"save_evaluation"');
-  const trackIndex = analyzeBody.indexOf("trackSimilarity(");
-  assert.ok(startIndex >= 0 && startIndex < evaluateIndex, "Benzerlik kriter analiziyle PARALEL başlamalıdır.");
-  assert.ok(evaluateIndex < saveIndex && saveIndex < trackIndex,
-    "Kriter sonucu, benzerlik takibinden ÖNCE kaydedilmelidir.");
-  assert.match(app, /extractPdfText\(file\)/, "PDF metni BİR KEZ çıkarılmalıdır.");
-  assert.ok(!/extractPdfText\([^)]*\)[\s\S]*extractPdfText\(/.test(analyzeBody.slice(0, analyzeBody.indexOf("async function"))),
-    "Aynı PDF iki işlem için tekrar okunmamalıdır.");
-  assert.match(app, /status === 429/, "429'da kontrollü yeniden deneme bulunmalıdır.");
-  assert.match(app, /"attach_similarity"/, "Geç gelen benzerlik sonucu ayrı bir uçla kayda iliştirilmelidir.");
-  assert.match(app, /Benzerliği yenile/, "Benzerlik için BAĞIMSIZ yenileme eylemi bulunmalıdır.");
-  const retryBody = app.slice(app.indexOf("async function retrySimilarity("), app.indexOf("async function analyze("));
-  assert.ok(!/evaluateReport\(|start_analysis/.test(retryBody),
-    "Benzerliği yenilemek kriter analizini yeniden başlatmamalıdır.");
-  // Benzerlik sonucu hakem sayaçlarına girmez ve otomatik karar üretmez.
-  assert.ok(!/similarityReport[\s\S]{0,120}judgeDecisionCounts/.test(app), "Benzerlik, hakem sayaçlarına karışmamalıdır.");
+test("kriter analizi benzerlik başlatmaz; hazırlık nihai onaydan sonra yanıtı engellemeden çalışır", () => {
+  const app=readFileSync("app/components/evaluation-app.tsx","utf8");
+  assert.doesNotMatch(app,/runSimilarity|trackSimilarity|retrySimilarity|similarityCheck\(/);
+  assert.match(app,/await evaluateReport\(/);
+  assert.match(app,/"save_evaluation"/);
+  const route=readFileSync("app/api/applications/[id]/route.ts","utf8");
+  assert.ok(route.indexOf("await saveApplicationReview")<route.indexOf("if (await queueApprovedSimilarity"));
+  assert.match(route,/after\(async/);
+  assert.doesNotMatch(readFileSync("app/lib/judge-review.ts","utf8"),/similarity|benzerlik/i);
 });
 
 test("geç gelen benzerlik sonucu hakem kararlarını, başka başvuruyu ve yeni analizi EZEMEZ", () => {
@@ -655,23 +629,22 @@ test("test temizliği benzerlik izlerini de güvenli biçimde kapsar", () => {
 /* ------------- GÖREV 3 kaynak denetimi: yapısal yol ve şablon damgası ------------- */
 
 test("benzerlik ucu yapısal ayrıştırmayı sunucuda yapar; taranmış PDF'te OCR ÇAĞRILMAZ", () => {
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  assert.match(route, /extractPdfStructure\(bytes\)/, "Yapısal ayrıştırma sunucudaki R2 baytlarıyla yapılmalıdır.");
-  assert.match(route, /instanceof PdfTextLayerError/, "Metin katmanı hatası kontrollü yakalanmalıdır.");
-  assert.match(route, /chunkPages\(cleanedPages\)/, "Yapı çıkarılamazsa sayfa metni YEDEK yolu devrede kalmalıdır.");
-  assert.ok(!/extractPdfStructureViaOcr|pdf-ocr/.test(route),
-    "Benzerlik yolunda OCR (ücretli Gemini) çağrısı OLMAMALIDIR.");
-  assert.match(route, /classifyBlocks\(/, "Bloklar madde 2/4 kurallarıyla sınıflandırılmalıdır.");
-  assert.match(route, /chunkStructuredBlocks\(/, "Parçalama yapı temelli olmalıdır.");
+  const route=readFileSync("app/lib/similarity-preparation.ts","utf8");
+  assert.match(route,/extractPdfStructure\(bytes\)/);
+  assert.match(route,/instanceof PdfTextLayerError/);
+  assert.match(route,/OCR uygulanmış PDF gerekiyor/);
+  assert.doesNotMatch(route,/extractPdfStructureViaOcr|pdf-ocr/);
+  assert.match(route,/classifyBlocks\(/);
+  assert.match(route,/chunkStructuredBlocks\(/);
 });
 
-test("R2 parça nesnesi v2: ayıklanan içerik denetim için saklanır; eski v1 nesnesi okunmaya devam eder", () => {
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  assert.match(route, /v: 2,/, "Parça nesnesi v2 şemasıyla yazılmalıdır.");
-  assert.match(route, /auditLabel: EXCLUSION_AUDIT_LABEL/,
-    "Ayıklanan içerik 'benzerlik puanına katılmayan ortak/şablon içeriği' etiketiyle saklanmalıdır.");
-  assert.match(route, /excluded: excluded\.map/, "Ayıklanan bloklar gerekçesiyle R2 nesnesine yazılmalıdır.");
-  assert.match(route, /Array\.isArray\(raw\)/, "Eş okuma eski (v1, düz dizi) nesneleri de tanımalıdır.");
+test("R2 parça nesnesi v2: kaynak ve ayıklama denetimi korunur, eski önbellek güvenle yeniden hazırlanır", () => {
+  const route=readFileSync("app/lib/similarity-preparation.ts","utf8");
+  assert.match(route,/v: 2,/);
+  assert.match(route,/auditLabel: EXCLUSION_AUDIT_LABEL/);
+  assert.match(route,/excluded: excluded\.map/);
+  assert.match(route,/parsed\.v === 2/);
+  assert.match(route,/if \(!cacheValid\)/);
 });
 
 /* --------------- Katman 1: sıfır shingle koruması (madde 5, senaryo 11) --------------- */
@@ -711,18 +684,11 @@ test("başlangıç değeri koruması yalnızca İKİ TARAFI boş konumları atla
 });
 
 test("benzerlik ucu: boş normalize metin parmak izi havuzuna ve embedding'e ULAŞAMAZ", () => {
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  const gateAt = route.indexOf("noComparableContent: true");
-  assert.ok(gateAt >= 0, "Katman 1 kapısı yapılandırılmış noComparableContent alanını yazmalıdır.");
-  assert.match(route, /karşılaştırılabilir özgün içerik kalmadı; benzerlik oranı hesaplanmadı/,
-    "Kapı, hakeme anlaşılır Türkçe not yazmalıdır.");
-  const fingerprintAt = route.indexOf("saveAndListSimilarityFingerprints(applicationId");
-  const embedAt = route.indexOf("embedTexts(");
-  assert.ok(gateAt < fingerprintAt, "Kapı, parmak izi havuza yazılmadan ÖNCE çalışmalıdır (havuz zehirlenemez).");
-  assert.ok(gateAt < embedAt, "Kapı, embedding ÜCRETİ ödenmeden önce çalışmalıdır.");
-  assert.match(route, /docMinHash\.tokenCount < thresholds\.minComparableWords/,
-    "Kapı karşılaştırılabilir kelime sayısına bakmalıdır.");
-  assert.match(route, /status: "skipped"/, "Boş içerik sonucu 'skipped' olarak kaydedilmelidir.");
+  const route=readFileSync("app/lib/similarity-preparation.ts","utf8");
+  const gate=route.indexOf('state: "empty"');
+  assert.ok(gate>0 && gate<route.indexOf("await embedTexts("));
+  assert.match(route,/docMinHash\.tokenCount < thresholds\.minComparableWords/);
+  assert.doesNotMatch(route.slice(gate,route.indexOf("await embedTexts(")),/saveSimilarityChunks\(/);
 });
 
 /* --------------- Katman 2: doğrulama kapısı (madde 5, embedding tek başına alarm üretemez) --------------- */
@@ -978,16 +944,11 @@ test("yapılandırılmış alanı olmayan ESKİ kayıtta sertleştirilmiş yedek
 });
 
 test("kaynak denetimi: benzerlik yüzdesi hiçbir yerde gösterim cümlesinden regex ile geri okunmaz", () => {
-  const prechecks = readFileSync("app/lib/report-prechecks.ts", "utf8");
-  const resolver = prechecks.slice(prechecks.indexOf("export function similarityResultOf"));
-  const resolverBody = resolver.slice(0, resolver.indexOf("\nexport ") > 0 ? resolver.indexOf("\nexport ") : resolver.length);
-  assert.match(resolverBody, /check\.similarity !== undefined/,
-    "Yapılandırılmış alan İLK okunmalıdır.");
-  assert.ok(!/match\(\/%\\s\?/.test(resolverBody),
-    "İlk serbest %-sayı deseni (takım adına takılan eski hata) kaldırılmış olmalıdır.");
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  assert.match(route, /similarity: report\.level === "none"/,
-    "Sunucu PreCheck'i yapılandırılmış benzerlik alanını yazmalıdır.");
+  const app=readFileSync("app/components/similarity-workspace.tsx","utf8");
+  assert.match(app,/pair\.percent/);
+  assert.doesNotMatch(app,/match\(/);
+  const engine=readFileSync("app/lib/similarity-bulk-engine.ts","utf8");
+  assert.match(engine,/forward\.approxPercent\+backward\.approxPercent/);
 });
 
 test("kill switch: SIMILARITY_LLM_ENABLED off/0 kapatır, tanımsız açıktır", () => {
@@ -1010,7 +971,7 @@ test("embedding önbellek anahtarına şablon sürümü GİRMEZ; damga değişin
     "Yeni parça sütunları çalışma anında da eklenmelidir (PRAGMA korumalı).");
   assert.match(db, /addMissingColumns\(database, "similarity_results", SIMILARITY_RESULT_COLUMNS\)/,
     "Sonuç eskime sütunları çalışma anında da eklenmelidir.");
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
+  const route = readFileSync("app/lib/similarity-preparation.ts", "utf8");
   assert.match(route, /templateStampChanged/, "Şablon damgası eskiyince satırlar embedding korunarak yenilenmelidir.");
   assert.match(route, /cached!\.map\(\(row\) => row\.embedding\)/,
     "Damga yenilemede kayıtlı vektörler satır satır korunmalıdır.");
@@ -1018,56 +979,40 @@ test("embedding önbellek anahtarına şablon sürümü GİRMEZ; damga değişin
 
 /* --------------- Madde 7: bağımsız benzerlik kartı (kaynak denetimi) --------------- */
 
-test("havuz boşken tam madde 7 cümlesi kullanılır; 'Çalıştırılmadı' hiçbir yerde denmez", () => {
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  assert.match(route, /Karşılaştırılabilecek başka güncel rapor henüz bulunmuyor\./,
-    "Boş havuz notu madde 7'deki cümle olmalıdır.");
-  const app = readFileSync("app/components/evaluation-app.tsx", "utf8");
-  assert.ok(!/Çalıştırılmadı/.test(app),
-    "Benzerlik için 'Çalıştırılmadı' gösterimi kaldırılmıştır (madde 7).");
+test("boş veya tek raporlu havuz karşılaştırma için yeterli gösterilmez", () => {
+  const app=readFileSync("app/components/similarity-workspace.tsx","utf8");
+  assert.match(app,/en az iki hazır rapor gerekir/);
+  assert.doesNotMatch(app,/Çalıştırılmadı/);
 });
 
-test("benzerlik 3. aşama şeridinden çıkarıldı; bağımsız kart bütün madde 7 alanlarını taşır", () => {
-  const app = readFileSync("app/components/evaluation-app.tsx", "utf8");
-  assert.ok(!/label: "Benzerlik taraması"/.test(app),
-    "Benzerlik satırı aşama şeridinde OLMAMALIDIR (madde 7: dört aşamanın parçası değildir).");
-  assert.match(app, /Raporlar arası benzerlik/, "Kart başlığı 'Raporlar arası benzerlik' olmalıdır.");
-  assert.match(app, /Bu sonuç intihal veya otomatik ret kararı değildir\./,
-    "Uyarı her durumda ayrı öğe olarak gösterilmeli ve otomatik ret kararı olmadığını da söylemelidir.");
-  assert.match(app, /Karşılaştırılabilir özgün içerik/, "Karşılaştırılabilir içerik miktarı gösterilmelidir.");
-  assert.match(app, /doğrudan \(MinHash\)/, "MinHash/anlamsal eşleşme ayrımı gösterilmelidir.");
-  assert.match(app, /Açıklama kontrolü tamamlanamadı; MinHash ve anlamsal sonuç geçerlidir\./,
-    "LLM arızası deterministik sonucu kaybettirmez; yalnız not düşer (madde 5).");
-  assert.match(app, /llmClassLabel/, "Katman 3 açıklaması kartta gösterilmelidir.");
-  // Yeni analiz benzerliği aşama verisine ENJEKTE ETMEZ; eski kayıt için sade kart kalır.
-  assert.ok(!/applySimilarity\(/.test(app), "analyze() artık applySimilarity çağırmamalıdır.");
-  assert.match(app, /LegacySimilarityCard/, "Eski kayıtlar geriye uyumlu kartla gösterilmelidir.");
+test("benzerlik ayrı çalışma alanındadır; karar kartı ve teknik jargon kullanılmaz", () => {
+  const app=readFileSync("app/components/evaluation-app.tsx","utf8");
+  assert.doesNotMatch(app,/label: "Benzerlik taraması"|<SimilarityCard|<LegacySimilarityCard/);
+  assert.match(app,/<SimilarityWorkspace/);
+  const ui=readFileSync("app/components/similarity-workspace.tsx","utf8");
+  assert.match(ui,/özgünlük puanı veya intihal kararı değildir/);
+  assert.match(ui,/aynı veya çok yakın ifadeler/);
+  assert.match(ui,/benzer anlatım/);
 });
 
 test("rapor sözleşmesi: eşleşme ayrımı ve havuz kesme işareti yapılandırılmış alanlarla taşınır", () => {
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  assert.match(route, /directMatchCount: best \? best\.matches\.filter\(\(match\) => match\.kind === "direct"\)\.length : 0/,
-    "Doğrudan eşleşme sayısı gösterim kesiminden ÖNCE sayılmalıdır.");
-  assert.match(route, /semanticMatchCount: best \? best\.matches\.filter\(\(match\) => match\.kind === "semantic"\)\.length : 0/,
-    "Anlamsal eşleşme sayısı gösterim kesiminden ÖNCE sayılmalıdır.");
-  assert.match(route, /poolTruncated \? \{ poolTruncated: true \} : \{\}/,
-    "Havuz üst sınırı raporda işaretlenmelidir (madde 8).");
+  const engine=readFileSync("app/lib/similarity-bulk-engine.ts","utf8");
+  assert.match(engine,/directCount:matches\.filter\(match=>match\.kind==="direct"\)\.length/);
+  assert.match(engine,/semanticCount:matches\.filter\(match=>match\.kind==="semantic"\)\.length/);
+  const ui=readFileSync("app/components/similarity-workspace.tsx","utf8");
+  assert.match(ui,/seçilmeyen çiftler için oran üretilmedi/);
 });
 
 test("madde 12 · durum 11: her şey ayıklansa bile denetim kaydı R2'ye yazılır, havuz zehirlenmez", () => {
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  const gateStart = route.indexOf("KATMAN 1 KAPISI");
-  assert.ok(gateStart > -1, "Katman 1 kapısı (boş karşılaştırılabilir içerik) bulunmalıdır.");
-  const gate = route.slice(gateStart, route.indexOf("saveAndListSimilarityFingerprints", gateStart));
-  // Ayıklanan içerik METİNLERİYLE saklanır: en ayıklama-yoğun durumda bile
-  // "benzerlik puanına katılmayan ortak/şablon içeriği" kaydı düşmez.
-  assert.match(gate, /reportBucket\(\)\.put\(chunkStoreKey\(applicationId, versionId\)/,
-    "Erken dönüşten ÖNCE R2 denetim nesnesi yazılmalıdır.");
-  assert.match(gate, /auditLabel: EXCLUSION_AUDIT_LABEL/, "Denetim nesnesi ayıklama etiketini taşımalıdır.");
-  assert.match(gate, /included: \[\]/, "Karşılaştırılabilir içerik yokken parça listesi boştur (sıfır parça).");
-  assert.match(gate, /noComparableContent: true/, "Sonuç 'karşılaştırılabilir içerik yok' olarak yapılandırılmış kalır.");
-  // Havuz zehirlenmez: kapı içinde D1 parça satırı ve parmak izi yazımı YOKTUR.
-  assert.ok(!/saveSimilarityChunks\(/.test(gate), "Boş belge için D1 parça satırı yazılMAMALIDIR.");
+  const route=readFileSync("app/lib/similarity-preparation.ts","utf8");
+  const start=route.indexOf('if (!chunks.length || docMinHash.tokenCount');
+  const end=route.indexOf('/* 5) Embedding',start);
+  const gate=route.slice(start,end);
+  assert.match(gate,/reportBucket\(\)\.put\(textStoreKey/);
+  assert.match(gate,/auditLabel: EXCLUSION_AUDIT_LABEL/);
+  assert.match(gate,/included: \[\]/);
+  assert.match(gate,/state: "empty"/);
+  assert.doesNotMatch(gate,/saveSimilarityChunks\(/);
 });
 
 /* --------------- Madde 8: eskitme, havuz sınırı ve tekrar başlatılabilirlik --------------- */
@@ -1119,21 +1064,15 @@ test("çalışma zamanı sınırları ortamla ayarlanabilir: havuz 200 · bütç
 });
 
 test("bütçe dolunca koşu kalıcılaşır ve sürdürülür; embedding maliyeti asla kaybolmaz", () => {
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  // Ödenen embedding parça kaydı, havuz taramasından ÖNCE kalıcıdır.
-  const saveIndex = route.indexOf("saveSimilarityChunks({");
-  const scanIndex = route.indexOf("listSimilarityPeerApps(");
-  assert.ok(saveIndex > -1 && scanIndex > saveIndex,
-    "Parçalar (embedding önbelleği) havuz taramasından ÖNCE yazılmalıdır; CPU kesintisi ücreti kaybettirmez.");
-  assert.match(route, /status: "partial",\s*\n\s*resumeRunId: runId/,
-    "Bütçe dolunca 'partial' + resumeRunId dönmelidir (madde 8).");
-  assert.match(route, /upsertSimilarityRun\(/, "İlerleme koşu satırına yazılmalıdır.");
-  assert.match(route, /limits\.poolMaxApps \+ 1/, "Havuz kesilmesi tespit edilmelidir.");
-  assert.match(route, /batchIndex \+ 1 < batches\.length && Date\.now\(\) - requestStartedAt > limits\.timeBudgetMs/,
-    "Bütçe kontrolü partiler ARASINDA yapılmalıdır.");
-  const app = readFileSync("app/components/evaluation-app.tsx", "utf8");
-  assert.match(app, /result\.status === "partial" && result\.resumeRunId/,
-    "İstemci yarım kalan koşuyu SINIRLI sayıda devam çağrısıyla sürdürmelidir.");
+  const bulk=readFileSync("app/lib/similarity-bulk.ts","utf8");
+  assert.match(bulk,/processed<2/);
+  assert.match(bulk,/run\.data\.cursor\+\+/);
+  assert.match(bulk,/await saveBulkRun/);
+  assert.match(bulk,/current\.snapshot!==context\.snapshot/);
+  assert.doesNotMatch(bulk,/embedTexts\(|generateContent/);
+  const ui=readFileSync("app/components/similarity-workspace.tsx","utf8");
+  assert.match(ui,/Taramaya devam et/);
+  assert.match(ui,/bulkSimilarityAction\(selected,"continue"\)/);
 });
 
 test("koşu tablosu ve işaret izi sütunu hem migration'da hem çalışma anı şemasında var", () => {
@@ -1148,22 +1087,16 @@ test("koşu tablosu ve işaret izi sütunu hem migration'da hem çalışma anı 
 });
 
 test("durum adlandırması: başarısız/eksik/yapılmamış karşılaştırma 'Normal' DENMEZ", () => {
-  const app = readFileSync("app/components/evaluation-app.tsx", "utf8");
-  const label = app.slice(app.indexOf("function similarityStatusLabel"));
-  const body = label.slice(0, label.indexOf("\nfunction SimilarityCard"));
-  assert.match(body, /karşılaştırılabilecek başka rapor yok/, "Havuz boşsa bu açıkça söylenmelidir.");
-  assert.match(body, /karşılaştırılabilir özgün içerik bulunamadı/, "Boş içerik ayrı durumdur.");
-  assert.match(body, /kısmen tamamlandı/, "Kısmi tarama tamamlanmış gibi gösterilemez.");
-  assert.match(body, /yalnız doğrudan metin karşılaştırması/, "Anlamsal katman düşünce bu söylenmelidir.");
-  assert.match(body, /inceleme önerilir/, "Suçlayıcı 'ŞÜPHELİ' yerine inceleme önerisi kullanılır.");
-  assert.ok(!/"Normal"/.test(body), "Hiçbir durum ham 'Normal' etiketiyle geçiştirilemez.");
-  // Tarama, kanıt seçimi ve AI açıklaması tek sayıda birleştirilmez (madde 3).
-  assert.match(app, /Matematiksel olarak karşılaştırılan rapor/, "Tarama sayısı ayrı gösterilmelidir.");
-  assert.match(app, /AI açıklaması için seçilen kanıt/, "AI açıklamasına giden kanıt ayrı gösterilmelidir.");
+  const app=readFileSync("app/components/similarity-workspace.tsx","utf8");
+  assert.match(app,/Anlamsal veri eksik/);
+  assert.match(app,/Karşılaştırılabilir metin yok/);
+  assert.match(app,/Yeniden deneme gerekiyor/);
+  assert.match(app,/Önceki oranlar gizlendi/);
+  assert.doesNotMatch(app,/"Normal"|ŞÜPHELİ/);
 });
 
 test("otomatik benzerlikte üretken LLM maliyeti yoktur", () => {
-  const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  assert.doesNotMatch(route, /explainSimilarityMatches\(\{/);
-  assert.match(route, /llmApiCalls: 0/);
+  const route=readFileSync("app/api/applications/[id]/similarity/route.ts","utf8");
+  assert.doesNotMatch(route,/explainSimilarityMatches|generateContent/);
+  assert.match(route,/llmApiCalls:\s*0/);
 });

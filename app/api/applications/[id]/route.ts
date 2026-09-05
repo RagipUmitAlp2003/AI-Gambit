@@ -1,4 +1,6 @@
 import { env } from "cloudflare:workers";
+import { after } from "next/server";
+import { queueApprovedSimilarity, prepareApprovedSimilarity } from "../../../lib/similarity-preparation";
 import { handleError, json, jsonError, readJson, requirePermission } from "../../../lib/admin-guard";
 import { configuredByteLimit } from "../../../lib/request-guard";
 import {
@@ -350,6 +352,17 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
         return jsonError(400, "Ret kararı için yarışmacıya iletilecek bir gerekçe yazın.");
       }
       await saveApplicationReview(id, auth.account, review);
+      // Preparation failure must never roll back or delay the final judge decision.
+      if (review.status === "completed" && review.outcome === "accepted") {
+        try {
+          if (await queueApprovedSimilarity(id, auth.account)) {
+            after(async () => {
+              try { await prepareApprovedSimilarity(id, auth.account); }
+              catch (error) { console.error("[similarity-background]", error); }
+            });
+          }
+        } catch (error) { console.error("[similarity-queue] approval preserved", error); }
+      }
       // Karar veri tabanına yazıldı; bildirim başarısız olsa bile geri alınmaz.
       notification = await notifyOutcome(visibleApplication, review, request.url);
     } else return jsonError(400, "Başvuru işlemi tanınmadı.");

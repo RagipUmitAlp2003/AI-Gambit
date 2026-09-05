@@ -157,11 +157,11 @@ test("bozuk JSON ve üretim arızası fırlatmadan ok:false döner (senaryo 10)"
 
 /* ------------- Kaynak denetimi: rota kablolaması (iki aşamalı kayıt) ------------- */
 
-test("otomatik rota üretken LLM çağırmaz; matematiksel sonucu tek aşamada kaydeder", () => {
+test("hazırlık rotası üretken LLM çağırmaz ve yalnız önbellek hazırlar", () => {
   const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
-  assert.match(route, /await saveSimilarityResult\(\{ \.\.\.saveInput/);
+  assert.match(route, /prepareApprovedSimilarity/);
   assert.doesNotMatch(route, /explainSimilarityMatches\(\{/);
-  assert.match(route, /llmApiCalls: 0/);
+  assert.match(route, /llmApiCalls:\s*0/);
 });
 
 test("otomatik rotada LLM yüzdeyi, seviyeyi, sayfayı ve alıntıyı değiştiremez", () => {
@@ -172,8 +172,8 @@ test("otomatik rotada LLM yüzdeyi, seviyeyi, sayfayı ve alıntıyı değiştir
 test("otomatik rota her durumda üretken LLM'i kapalı tutar", () => {
   const route = readFileSync("app/api/applications/[id]/similarity/route.ts", "utf8");
   assert.doesNotMatch(route, /similarityLlmEnabled\(\)|body\.skipLlm|llmInputs/);
-  assert.match(route, /report\.llmStatus = "skipped"/);
-  assert.match(route, /llmApiCalls: 0/);
+  assert.match(route, /llmApiCalls:\s*0/);
+  assert.doesNotMatch(readFileSync("app/lib/similarity-bulk.ts", "utf8"), /similarity-llm|generateContent/);
   const config = readFileSync("app/lib/similarity-config.ts", "utf8");
   assert.match(config, /SIMILARITY_LLM_ENABLED/, "Eski dağıtımlar için yapılandırma geriye uyumlu kalır.");
 });

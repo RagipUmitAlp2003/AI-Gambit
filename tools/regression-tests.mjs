@@ -780,14 +780,10 @@ console.log("Integrity, lifecycle and login regression tests: PASS");
   // Katılımcı geri bildirimi kesinleşmiş sonuçlardan üretilir.
   assert(/effectiveVerdictOf\(decision\) === "OLUMSUZ"/.test(judgeReview),
     "Gelişime açık yönler kesin sonucu olumsuz kriterlerden gelmelidir.");
-  // Benzerlik ayrıntısında başka takımın PDF'ine doğrudan bağlantı YOKTUR.
-  // Çapalar önce doğrulanır: bileşen yeniden adlandırılırsa bu test SESSİZCE
-  // geçemez (indexOf -1 dilimi bütün denetimi boşa düşürürdü).
-  const similarityUiStart = app.indexOf("function SimilarityCard");
-  const similarityUiEnd = app.indexOf("function ApplicationDetail");
-  assert(similarityUiStart > -1 && similarityUiEnd > similarityUiStart,
-    "SimilarityCard/ApplicationDetail çapaları bulunamadı; bileşen adı değiştiyse bu test güncellenmelidir.");
-  const similarityUi = app.slice(similarityUiStart, similarityUiEnd);
+  // Benzerlik artık başvuru değerlendirmesinden bağımsız çalışma alanındadır;
+  // başka takımın PDF'ine doğrudan bağlantı yine gösterilmez.
+  const similarityUi = readFileSync("app/components/similarity-workspace.tsx", "utf8");
+  assert(/Benzerlik Analizi/.test(similarityUi), "Bağımsız benzerlik çalışma alanı bulunmalıdır.");
   assert(!/peerApplicationId\)\}\/file/.test(similarityUi),
     "Başka takımın PDF'ine doğrudan bağlantı eklenmemelidir.");
 

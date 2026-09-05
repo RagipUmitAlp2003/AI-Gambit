@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import ElapsedTime from "./elapsed-time";
+import SimilarityWorkspace from "./similarity-workspace";
 import { useLiveRefresh } from "./use-live-refresh";
 import { competitionReadOnly, COMPETITION_STATUS_LABELS } from "../lib/workflow-types";
 import TopbarSession from "./topbar-session";
@@ -39,7 +40,6 @@ import {
   type JudgeReview,
   type ReportEvaluation,
   type RuleVerdict,
-  type SimilarityReport,
   type StageResult,
 } from "../lib/types";
 
@@ -47,8 +47,7 @@ import {
  * Değerlendirme Atölyesi (Rol 02 · Hakem) — nihai hakem akışı.
  *
  *   1. Hakem "Yapay Zekâ Analizi Yap" düğmesine basar.
- *   2. AI yalnızca PDF'den değerlendirilebilen kriterleri analiz eder; benzerlik
- *      karşılaştırması aynı PDF metniyle PARALEL çalışır (bağımsız hata yönetimi).
+ *   2. AI yalnızca PDF'den değerlendirilebilen kriterleri analiz eder.
  *   3. Her kriter kartında AI ön değerlendirmesi (Uygun/Olumsuz) gösterilir;
  *      AI sonucu DEĞİŞTİRİLEMEZ ve denetim için korunur.
  *   4. Hakem her kriter için AYRI Onay veya Ret kararı verir; karar başlangıçta
@@ -56,12 +55,10 @@ import {
  *   5. Bütün kriterler sonuçlanmadan genel karar bölümü AÇILMAZ.
  *   6. Nihai ONAY/RET yalnızca hakemindir; sistem öneri bile üretmez.
  *
- * Benzerlik kontrolü bütün kriter analizlerinin altında ayrı bir nottur;
- * sayaçlara katılmaz ve hiçbir kararı otomatik değiştirmez.
+ * Benzerlik, nihai olarak onaylanan raporlar için ayrı çalışma alanındadır.
  */
 
-type Mode = "home" | "workshop" | "history";
-type BulkSimilaritySummary = Awaited<ReturnType<typeof workflowApi.bulkSimilarity>>;
+type Mode = "home" | "workshop" | "history" | "similarity";
 type Outcome = "accepted" | "rejected";
 
 const ANALYZABLE_STATUSES = ["assigned", "resubmitted", "analysis_failed"] as const;
@@ -123,10 +120,7 @@ function aiCounts(findings: CriterionFinding[]) {
  *   - Geçici hata (429/503) → aynı düğmeyle yeniden denenebilir
  *   - Kalıcı hata           → sunucunun gerekçesi olduğu gibi gösterilir
  */
-/** Benzerlik koşusunun (kriter analizinden bağımsız) istemci durumu. */
-type SimilarityRunState = { state: "running" | "partial" | "failed"; message: string };
 /** Benzerlik ucunun yanıt tipi; tek kaynak workflow-client'tır. */
-type SimilarityCheckResult = Awaited<ReturnType<typeof workflowApi.similarityCheck>>;
 
 function analysisFailureMessage(caught: unknown): string {
   if (caught instanceof ReportEngineError) {
@@ -158,11 +152,6 @@ function analysisFailureMessage(caught: unknown): string {
   return caught instanceof Error && caught.message ? caught.message : "Bilinmeyen hata.";
 }
 
-function sha256HexOf(bytes: ArrayBuffer): Promise<string> {
-  return crypto.subtle.digest("SHA-256", bytes)
-    .then((digest) => [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join(""));
-}
-
 /* ----------------------------------------------------------------------- */
 
 function VerdictBadge({ verdict }: { verdict: RuleVerdict }) {
@@ -179,6 +168,7 @@ function Rail({ mode, pending, completed, onNavigate }: {
     { id: "home", title: "Giriş", short: "Nereden devam edilecek?", badge: "◈" },
     { id: "workshop", title: "Değerlendirme Atölyesi", short: "Yarışma → başvuru → AI analizi → kriter kararları", badge: String(pending) },
     { id: "history", title: "Geçmiş değerlendirmeler", short: "Kararı verilmiş başvurular", badge: String(completed) },
+    { id: "similarity", title: "Benzerlik Analizi", short: "Onaylanan raporları birlikte karşılaştır", badge: "≈" },
   ];
   return (
     <nav className="step-rail" aria-label="Değerlendirme bölümleri">
@@ -218,7 +208,7 @@ function HomeView({ pending, completed, onChoose }: { pending: number; completed
         <div>
           <span className="section-kicker">Hakem girişi</span>
           <h1 id="eval-home-title">Nereden devam etmek istersiniz?</h1>
-          <p>Yeni başvuruları değerlendirmek için atölyeye, kararı verilmiş başvuruları görmek için geçmişe geçin.</p>
+          <p>Yeni başvuruları değerlendirin, geçmiş kararları açın veya onaylanan raporların benzerliğini topluca inceleyin.</p>
         </div>
       </div>
       <div className="eval-home-choices">
@@ -232,6 +222,12 @@ function HomeView({ pending, completed, onChoose }: { pending: number; completed
           <span className="eval-home-badge">{completed}</span>
           <strong>Geçmiş değerlendirmeler</strong>
           <p>Tamamlanan kararlar ve yarışmacıya iletilen sonuçlar; gerekirse yeniden açılabilir.</p>
+          <b aria-hidden="true">→</b>
+        </button>
+        <button type="button" className="eval-home-choice similarity" onClick={() => onChoose("similarity")}>
+          <span className="eval-home-badge">≈</span>
+          <strong>Benzerlik Analizi</strong>
+          <p>Yalnızca nihai olarak onaylanan raporları tek işlemle matematiksel olarak karşılaştırın.</p>
           <b aria-hidden="true">→</b>
         </button>
       </div>
@@ -861,133 +857,7 @@ function CriterionDecisionCard({ finding, decision, specSourcePage, reportPages,
  * denmez. "ŞÜPHELİ" gibi suçlayıcı ifade yerine "İnceleme önerilir" kullanılır;
  * karar her durumda hakemindir.
  */
-function similarityStatusLabel(report: SimilarityReport): string {
-  if (report.noComparableContent) return "karşılaştırılabilir özgün içerik bulunamadı";
-  if (report.level === "none" || report.comparedCount === 0) return "karşılaştırılabilecek başka rapor yok";
-  if (report.level === "review" || report.level === "high") return "inceleme önerilir";
-  if (report.poolTruncated) return "kısmen tamamlandı · belirgin eşleşme yok";
-  if (report.method === "minhash-only") return "yalnız doğrudan metin karşılaştırması · belirgin eşleşme yok";
-  return "tamamlandı · belirgin eşleşme yok";
-}
-
-function SimilarityCard({ report, application }: { report: SimilarityReport; application: CompetitionApplication }) {
-  const flagged = report.level === "review" || report.level === "high";
-  const stale = application.similarityStale || report.stale;
-  const hasSplit = typeof report.directMatchCount === "number" || typeof report.semanticMatchCount === "number";
-  return (
-    <section className={`eval-similarity-note level-${report.level}`} aria-label="Raporlar arası benzerlik">
-      {/*
-        Şüpheli/Normal işareti DÖRT AŞAMA KARTLARINDAN buraya taşındı
-        (madde 3): benzerlik ayrı bir sistemdir, aşama sonuçlarına ve kriter
-        sayaçlarına karışmaz ve hiçbir kararı otomatik değiştirmez.
-      */}
-      <h3 className="eval-similarity-title">Raporlar arası benzerlik — {similarityStatusLabel(report)}</h3>
-      {stale ? (
-        <p className="eval-similarity-stale">
-          Bu sonuç güncel değil: {application.similarityStaleReason || report.staleReason || "havuza yeni rapor geldi."}{" "}
-          “Analizi Yenile” ile güncelleyebilirsiniz.
-        </p>
-      ) : null}
-      <p>{report.note}</p>
-      {report.level !== "none" ? (
-        <dl className="eval-similarity-facts">
-          <div>
-            <dt>Matematiksel olarak karşılaştırılan rapor</dt>
-            <dd>{report.comparedCount}{report.poolTruncated ? " (havuz üst sınırı uygulandı; tarama tamamlanmadı)" : ""}</dd>
-          </div>
-          {/*
-            Tarama, kanıt seçimi ve AI açıklaması AYRI sayılardır (madde 3):
-            tek bir "incelendi" sayısında birleştirilmez. AI açıklaması yalnızca
-            seçilen eşleşme kanıtları için, en yakın TEK rapor üzerinden üretilir.
-          */}
-          <div>
-            <dt>AI açıklaması için seçilen kanıt</dt>
-            <dd>
-              {report.matches.length
-                ? `${Math.min(3, report.matches.length)} eşleşme · 1 rapor`
-                : "0 eşleşme · AI açıklaması istenmedi"}
-              {report.llmStatus === "failed" ? " · açıklama üretilemedi" : ""}
-              {report.llmStatus === "skipped" ? " · açıklama kapalı/uygun değil" : ""}
-            </dd>
-          </div>
-          {typeof report.comparableWords === "number" ? (
-            <div><dt>Karşılaştırılabilir özgün içerik</dt><dd>{report.comparableWords} kelime</dd></div>
-          ) : null}
-          <div><dt>Yaklaşık oran</dt><dd>{report.approxPercent === null ? "—" : `%${report.approxPercent}`}</dd></div>
-          {report.closestLabel ? <div><dt>En yakın rapor</dt><dd>{report.closestLabel}</dd></div> : null}
-          {hasSplit ? (
-            <div>
-              <dt>Eşleşme ayrımı</dt>
-              <dd>{report.directMatchCount ?? 0} doğrudan (MinHash) · {report.semanticMatchCount ?? 0} anlamsal</dd>
-            </div>
-          ) : null}
-        </dl>
-      ) : null}
-      {flagged && report.matches.length ? (
-        <details className="eval-similarity-detail">
-          <summary>Güçlü eşleşmeleri göster ({Math.min(3, report.matches.length)})</summary>
-          <ol>
-            {report.matches.slice(0, 3).map((match, index) => (
-              <li key={`${match.peerApplicationId}-${index}`}>
-                <div className="eval-similarity-match-head">
-                  <strong>{match.peerLabel}</strong>
-                  <span>{match.kind === "direct" ? "Doğrudan metin benzerliği" : "Anlamsal benzerlik"} · Hakem incelemesi gerekir</span>
-                </div>
-                <div className="eval-similarity-quotes">
-                  <div>
-                    <small>Bu rapor{match.ownPage ? ` · s. ${match.ownPage}` : ""}</small>
-                    <q>{match.ownQuote || "Alıntı yok"}</q>
-                    <a href={fileUrl(application, match.ownPage)} target="_blank" rel="noreferrer">Bu PDF&apos;i sayfada aç</a>
-                  </div>
-                  <div>
-                    {/* Başka takımın PDF'ine DOĞRUDAN BAĞLANTI verilmez; alıntı yeterlidir. */}
-                    <small>{match.peerLabel}{match.peerPage ? ` · s. ${match.peerPage}` : ""}</small>
-                    <q>{match.peerQuote || "Alıntı yok"}</q>
-                  </div>
-                </div>
-                {match.llmClassLabel ? (
-                  // Katman 3 açıklaması: sayfa/alıntı deterministik veridir;
-                  // model yalnızca sınıf + açıklama verir (madde 5).
-                  <p className="eval-similarity-llm">
-                    <strong>{match.llmClassLabel}</strong>
-                    {match.llmExplanation ? ` — ${match.llmExplanation}` : ""}
-                    {match.llmAssessment ? ` · ${match.llmAssessment}` : ""}
-                  </p>
-                ) : null}
-              </li>
-            ))}
-          </ol>
-        </details>
-      ) : null}
-      {report.llmStatus === "failed" ? (
-        <p className="eval-similarity-llmfail">Açıklama kontrolü tamamlanamadı; MinHash ve anlamsal sonuç geçerlidir.</p>
-      ) : null}
-      {/* Madde 7: uyarı her durumda AYRI bir öğe olarak gösterilir. */}
-      <p className="eval-similarity-disclaimer">Bu sonuç intihal veya otomatik ret kararı değildir.</p>
-    </section>
-  );
-}
-
-/**
- * Geriye uyum: `similarityReport` alanı olmayan ESKİ değerlendirme kayıtları
- * 3. aşama şeridinden kaldırılan benzerlik satırı yerine bu sade kartla
- * gösterilir; yapılandırılmış `stage.similarity` alanından okunur (regex yok).
- */
-function LegacySimilarityCard({ similarity }: { similarity: NonNullable<StageResult["similarity"]> }) {
-  return (
-    <section className="eval-similarity-note level-normal" aria-label="Raporlar arası benzerlik">
-      <h3 className="eval-similarity-title">Raporlar arası benzerlik</h3>
-      <p>
-        {similarity.status === "skipped"
-          ? "Karşılaştırılabilecek başka güncel rapor henüz bulunmuyor."
-          : `Önceki analizde ${similarity.percent === null || similarity.percent === undefined ? "benzerlik oranı hesaplanmadı" : `yaklaşık %${similarity.percent} benzerlik bulundu`}${similarity.closestTeam ? ` (en yakın: ${similarity.closestTeam})` : ""}. Ayrıntı için analizi yenileyin.`}
-      </p>
-      <p className="eval-similarity-disclaimer">Bu sonuç intihal veya otomatik ret kararı değildir.</p>
-    </section>
-  );
-}
-
-function ApplicationDetail({ application, profile, competition, analyzing, otherAnalysisRunning, progress, similarityRun, onAnalyze, onRetrySimilarity, onReviewSaved, onFinalize, onReopen, onDeleteAnalysis, onArchive }: {
+function ApplicationDetail({ application, profile, competition, analyzing, otherAnalysisRunning, progress, onAnalyze, onReviewSaved, onFinalize, onReopen, onDeleteAnalysis, onArchive }: {
   application: CompetitionApplication;
   competition: CompetitionWorkflow | null;
   /** Yarışmanın yayımlı profili; kriterlerin şartname kaynak sayfası buradan okunur. */
@@ -1000,11 +870,7 @@ function ApplicationDetail({ application, profile, competition, analyzing, other
    */
   otherAnalysisRunning: boolean;
   progress: string;
-  /** Benzerlik koşusu kriter analizinden bağımsız ilerler; null iken sonuç yerindedir. */
-  similarityRun: SimilarityRunState | null;
   onAnalyze: (application: CompetitionApplication, force?: boolean) => void;
-  /** Yalnızca benzerliği yeniden çalıştırır; kriter analizine dokunmaz. */
-  onRetrySimilarity: (application: CompetitionApplication) => Promise<void>;
   /** Taslak kaydından dönen güncel başvuru; listeyi tazeler, gezinme YAPMAZ. */
   onReviewSaved: (application: CompetitionApplication) => void;
   onFinalize: (application: CompetitionApplication, review: JudgeReview) => Promise<boolean>;
@@ -1337,13 +1203,6 @@ function ApplicationDetail({ application, profile, competition, analyzing, other
     }
   }
 
-  const similarityReport = evaluation?.similarityReport ?? null;
-  // Geriye uyum: eski kayıtta similarityReport yoksa 3. aşamaya yazılmış
-  // yapılandırılmış benzerlik alanı sade kartla gösterilir (madde 7).
-  const legacySimilarity = !similarityReport
-    ? evaluation?.stages.find((stage) => stage.stage === "category_similarity")?.similarity ?? null
-    : null;
-
   return (
     <section className="eval-detail" aria-labelledby="eval-detail-title">
       {/* Kanıt paneli: doğru sayfayı açar ve alıntıyı vurgular (madde 6). */}
@@ -1382,8 +1241,8 @@ function ApplicationDetail({ application, profile, competition, analyzing, other
             <strong>{application.status === "analysis_failed" ? "AI analizi tamamlanamadı veya eski sürümle yapılmış" : "Bu başvuru henüz analiz edilmedi"}</strong>
             <p>
               Yapay zekâ, yalnızca PDF&apos;den değerlendirilebilen yayımlı kriterleri rapor ile karşılaştırır ve her kriter için
-              Uygun/Olumsuz ön değerlendirme üretir; aynı anda rapor, aynı yarışmadaki diğer başvurularla benzerlik açısından
-              karşılaştırılır. Kriter kararları ve nihai karar sizindir.
+              Uygun/Olumsuz ön değerlendirme üretir. Kriter kararları ve nihai karar sizindir; raporlar arası
+              karşılaştırma, onay sonrasında ayrı Benzerlik Analizi alanında yapılır.
             </p>
           </div>
           {analyzing ? (
@@ -1553,33 +1412,6 @@ function ApplicationDetail({ application, profile, competition, analyzing, other
               </ul>
             ) : <p className="eval-result-empty">Bu analizde PDF&apos;den değerlendirilebilen kriter yok.</p>}
           </div>
-
-          {/* Benzerlik kontrolü: bütün kriter analizlerinin EN ALTINDA (madde 9.9).
-              Kriter analizinden BAĞIMSIZ ilerler (madde 4): süren, kısmi ve
-              başarısız durumlar birbirinden ayrı gösterilir, hiçbiri "Normal"
-              diye sunulmaz ve hakem kararlarını beklet(me)mez. */}
-          {similarityRun ? (
-            <section className="eval-similarity-note level-normal" aria-label="Raporlar arası benzerlik">
-              <h3 className="eval-similarity-title">
-                Raporlar arası benzerlik — {similarityRun.state === "running"
-                  ? "karşılaştırma sürüyor"
-                  : similarityRun.state === "partial" ? "kısmen tamamlandı" : "tamamlanamadı"}
-              </h3>
-              <p>
-                {similarityRun.state === "running"
-                  ? "Aynı yarışmadaki güncel başvurularla karşılaştırma sürüyor. Kriter kararlarınızı vermek için beklemeniz gerekmez."
-                  : similarityRun.message}
-              </p>
-              {similarityRun.state === "running" ? <ElapsedTime /> : (
-                <button type="button" className="secondary-button" disabled={readOnly} onClick={() => { void onRetrySimilarity(application); }}>
-                  Benzerliği yenile
-                </button>
-              )}
-              <p className="eval-similarity-disclaimer">Bu sonuç intihal veya otomatik ret kararı değildir.</p>
-            </section>
-          ) : similarityReport
-            ? <SimilarityCard report={similarityReport} application={application} />
-            : legacySimilarity ? <LegacySimilarityCard similarity={legacySimilarity} /> : null}
 
           {/*
             NİHAİ KARAR — bütün kriterler sonuçlanmadan AÇILMAZ. Sistem
@@ -1755,15 +1587,8 @@ export default function EvaluationApp() {
   const [competitionKey, setCompetitionKey] = useState<string | null>(null);
   const [applicationId, setApplicationId] = useState<string | null>(null);
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
-  /**
-   * Benzerlik, kriter analizinden BAĞIMSIZ ilerler (madde 4); durumu başvuru
-   * kimliğine göre burada tutulur ve kendi kartında gösterilir.
-   */
-  const [similarityState, setSimilarityState] = useState<Record<string, SimilarityRunState>>({});
   const [progress, setProgress] = useState("");
   const [competitionError, setCompetitionError] = useState("");
-  const [bulkSimilarity, setBulkSimilarity] = useState<BulkSimilaritySummary | null>(null);
-  const [bulkBusy, setBulkBusy] = useState(false);
   useLiveRefresh(async () => {
     try {
       const result = await workflowApi.competitions();
@@ -1813,151 +1638,6 @@ export default function EvaluationApp() {
     setError("");
   }
 
-  async function loadBulkSimilarity() {
-    const competition = competitions.find((item) => item.competitionKey === competitionKey);
-    if (!competition || competitionReadOnly(competition)) return;
-    setBulkBusy(true);
-    setError("");
-    try {
-      setBulkSimilarity(await workflowApi.bulkSimilarity(competition.id));
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Toplu benzerlik özeti hazırlanamadı.");
-    } finally {
-      setBulkBusy(false);
-    }
-  }
-
-  /** Sahipsiz reddedilmiş söz bırakmadan koşuyu sonuçlanmış hâle getirir. */
-  function settledSimilarity(
-    run: Promise<SimilarityCheckResult>,
-  ): Promise<{ ok: true; value: SimilarityCheckResult } | { ok: false; error: unknown }> {
-    return run.then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
-  }
-
-  /**
-   * BENZERLİĞİN BAĞIMSIZ TAKİBİ (madde 4).
-   *
-   * Kriter analizi kaydedildikten SONRA çalışır: sonucu geldiğinde sunucudaki
-   * yetkili kaydı `attach_similarity` ile analize iliştirir, gelmezse durumu
-   * kendi kartında gösterir. Hakem kararlarına, başka bir başvuruya ve daha
-   * yeni bir analiz sürümüne DOKUNMAZ — sunucu bunları CAS ile korur.
-   */
-  async function trackSimilarity(
-    applicationId: string,
-    /*
-     * Koşu, kriter analizi beklenirken de sürdüğü için SONUÇLANMIŞ biçimde
-     * (hata dâhil) geçilir: hiçbir aşamada sahipsiz reddedilmiş söz kalmaz.
-     */
-    run: Promise<{ ok: true; value: SimilarityCheckResult } | { ok: false; error: unknown }>,
-    rerun: () => Promise<SimilarityCheckResult>,
-  ): Promise<void> {
-    setSimilarityState((current) => ({ ...current, [applicationId]: { state: "running", message: "" } }));
-    let result: SimilarityCheckResult | null = null;
-    let failure = "";
-    const settled = await run;
-    if (settled.ok) {
-      result = settled.value;
-    } else {
-      const caught = settled.error;
-      failure = caught instanceof Error ? caught.message : "bilinmeyen hata";
-      if (caught instanceof WorkflowApiError && caught.status === 429) failure = `429 · ${failure}`;
-    }
-    // 429 / embedding kotası: kısa gecikmeyle BİR KEZ daha denenir (kontrolsüz tekrar yok).
-    const rateLimited = failure ? failure.includes("429") : result?.embeddingRateLimited === true;
-    if (rateLimited && !result?.similarity) {
-      await new Promise((resolve) => setTimeout(resolve, 2_500));
-      try {
-        result = await rerun();
-        failure = "";
-      } catch (retryCaught) {
-        failure = retryCaught instanceof Error ? retryCaught.message : "bilinmeyen hata";
-      }
-    }
-
-    if (result?.similarity) {
-      try {
-        const attached = await workflowApi.updateApplication(applicationId, "attach_similarity");
-        // Bu yanıt hazırlanırken yeni hakem taslağı kaydedilmiş olabilir.
-        // Bütün başvuruyu değiştirmek yerine yalnız aynı analizin benzerliğini al.
-        setApplications((current) => current.map((item) => {
-          const incoming = attached.application;
-          if (item.id !== applicationId || !item.evaluation || !incoming.evaluation
-            || item.evaluation.analyzedAt !== incoming.evaluation.analyzedAt
-            || item.evaluation.report.pdfHash !== incoming.evaluation.report.pdfHash) return item;
-          return {
-            ...item,
-            evaluation: { ...item.evaluation, similarityReport: incoming.evaluation.similarityReport },
-            similarityStale: incoming.similarityStale,
-            similarityStaleReason: incoming.similarityStaleReason,
-          };
-        }));
-        setSimilarityState((current) => {
-          const next = { ...current };
-          delete next[applicationId];
-          return next;
-        });
-        return;
-      } catch (attachError) {
-        failure = attachError instanceof Error ? attachError.message : "bilinmeyen hata";
-      }
-    }
-    setSimilarityState((current) => ({
-      ...current,
-      [applicationId]: result?.status === "partial" && !failure
-        ? { state: "partial", message: "Havuz taraması bu oturumda tamamlanamadı; benzerliği yenileyerek sürdürebilirsiniz." }
-        : { state: "failed", message: failure || "Benzerlik karşılaştırması tamamlanamadı." },
-    }));
-  }
-
-  /**
-   * "Benzerliği yenile" (madde 4): YALNIZCA benzerlik yeniden çalışır. Kriter
-   * analizi yeniden başlatılmaz, hakem kararları sıfırlanmaz; sonuç geldiğinde
-   * yalnızca `similarityReport` alanı güncellenir.
-   */
-  async function retrySimilarity(application: CompetitionApplication): Promise<void> {
-    if (similarityState[application.id]?.state === "running") return;
-    setSimilarityState((current) => ({ ...current, [application.id]: { state: "running", message: "" } }));
-    try {
-      const file = await workflowApi.applicationFile(application.id, application.fileName ?? "basvuru.pdf");
-      const pdfHash = await sha256HexOf(await file.arrayBuffer());
-      const extracted = await extractPdfText(file);
-      const runSimilarity = async () => {
-        let result = await workflowApi.similarityCheck(application.id, { pages: extracted.pages, pdfHash });
-        for (let attempt = 0; attempt < 12 && result.status === "partial" && result.resumeRunId; attempt += 1) {
-          result = await workflowApi.similarityCheck(application.id, {
-            pages: extracted.pages, pdfHash, resumeRunId: result.resumeRunId,
-          });
-        }
-        return result;
-      };
-      await trackSimilarity(application.id, settledSimilarity(runSimilarity()), runSimilarity);
-    } catch (caught) {
-      setSimilarityState((current) => ({
-        ...current,
-        [application.id]: {
-          state: "failed",
-          message: caught instanceof Error ? caught.message : "Benzerlik karşılaştırması tamamlanamadı.",
-        },
-      }));
-    }
-  }
-
-  /**
-   * Yapay Zekâ Analizi (madde 9.1).
-   *
-   * BÜTÜNLÜK (madde 3): istemci modele kriter ya da PDF GÖNDERMEZ. Sunucuya
-   * yalnızca başvuru kimliği gider; kriter seti (son yayımlanan sürüm) ve
-   * rapor PDF'i (R2'deki geçerli sürüm) sunucuda çözülür.
-   *
-   * PDF metni BİR KEZ çıkarılır ve iki işlem paylaşır. İkisi PARALEL başlar
-   * ama BİRLİKTE BEKLENMEZ (madde 4): kriter analizi biter bitmez kendi
-   * bütünlük kapılarından geçip kaydedilir ve hakem çalışmaya başlayabilir.
-   * Benzerlik kendi hızında sürer; bittiğinde sonucunu `attach_similarity`
-   * ile kayda iliştirir. Böylece uzun süren ya da başarısız olan bir
-   * benzerlik taraması hakem analizini BEKLETMEZ.
-   *
-   * @param force "Analizi yenile": sunucudaki kayıtlı sonuç atlanır.
-   */
   async function analyze(application: CompetitionApplication, force = false) {
     if (analyzingId) return;
     setAnalyzingId(application.id);
@@ -1971,29 +1651,9 @@ export default function EvaluationApp() {
       replaceApplication(current);
       setProgress("Rapor PDF'i okunuyor…");
       const file = await workflowApi.applicationFile(current.id, current.fileName ?? "basvuru.pdf");
-      // PDF bir kez okunur: metin çıkarımı ve benzerliğin PDF bağı aynı bayttan üretilir.
-      const pdfHash = await sha256HexOf(await file.arrayBuffer());
       const extracted = await extractPdfText(file);
 
-      setProgress("Rapor kriterlere göre analiz ediliyor… · Aynı yarışmadaki başvurularla benzerlik karşılaştırılıyor…");
-      /*
-       * Büyük havuz (madde 8): sunucu süre bütçesi dolunca "partial" +
-       * resumeRunId döndürür; koşu SINIRLI sayıda devam çağrısıyla sürdürülür
-       * (kontrolsüz tekrar yok). Devam çağrıları embedding API'sini yeniden
-       * ÇAĞIRMAZ; kesinti hâlinde ödenmiş maliyet sunucuda kalıcıdır.
-       */
-      const runSimilarity = async () => {
-        let result = await workflowApi.similarityCheck(current.id, { pages: extracted.pages, pdfHash });
-        for (let attempt = 0; attempt < 12 && result.status === "partial" && result.resumeRunId; attempt += 1) {
-          result = await workflowApi.similarityCheck(current.id, {
-            pages: extracted.pages, pdfHash, resumeRunId: result.resumeRunId,
-          });
-        }
-        return result;
-      };
-      // Benzerlik BAŞLATILIR ama beklenmez; hatası burada yutulmaz, aşağıdaki
-      // bağımsız takip zincirinde ele alınır.
-      const similarityPromise = settledSimilarity(runSimilarity());
+      setProgress("Rapor kriterlere göre analiz ediliyor…");
       const evaluation = await evaluateReport({
         applicationId: current.id, pages: extracted.pages, pageCount: extracted.pageCount, force,
       });
@@ -2004,8 +1664,6 @@ export default function EvaluationApp() {
       // Hakem analiz sürerken BAŞKA bir başvuruya geçmiş olabilir; oradaki
       // kaydedilmemiş kriter kararlarını silecek zorla gezinme yapılmaz.
       setApplicationId((currentId) => currentId === null || currentId === current.id ? saved.application.id : currentId);
-      // Kriter analizi elde: hakem benzerliği beklemeden çalışabilir.
-      trackSimilarity(current.id, similarityPromise, runSimilarity);
     } catch (caught) {
       /*
        * ANLAMLI HATA (madde 11): "API'yi kontrol edin" gibi genel bir metin
@@ -2085,7 +1743,7 @@ export default function EvaluationApp() {
     return true;
   }
 
-  const title = mode === "home" ? "Giriş" : mode === "workshop" ? "Değerlendirme Atölyesi" : "Geçmiş değerlendirmeler";
+  const title = mode === "home" ? "Giriş" : mode === "workshop" ? "Değerlendirme Atölyesi" : mode === "similarity" ? "Benzerlik Analizi" : "Geçmiş değerlendirmeler";
 
   return (
     <main className="app-shell">
@@ -2114,13 +1772,15 @@ export default function EvaluationApp() {
 
         {!loading && mode === "home" ? <HomeView pending={pending.length} completed={completed.length} onChoose={navigate} /> : null}
 
-        {!loading && mode !== "home" ? (
+        {!loading && mode === "similarity" ? <SimilarityWorkspace competitions={competitions} /> : null}
+
+        {!loading && (mode === "workshop" || mode === "history") ? (
           <section className="workspace eval-workshop" aria-labelledby="eval-workshop-title">
             <div className="workspace-heading">
               <div>
                 <span className="section-kicker">{history ? "Kararı verilmiş başvurular" : "Kriteri çıkarılmış yarışmalar"}</span>
                 <h1 id="eval-workshop-title">{history ? "Geçmiş değerlendirmeler" : "Yarışmayı seçin, başvuruyu açın"}</h1>
-                <p>{history ? "Tamamlanan kararlar ve yarışmacıya iletilen sonuçlar." : "Başvuruya tıklayın; Yapay Zekâ Analizi Yap düğmesiyle kriterler PDF ile karşılaştırılır ve benzerlik kontrol edilir."}</p>
+                <p>{history ? "Tamamlanan kararlar ve yarışmacıya iletilen sonuçlar." : "Başvuruya tıklayın; Yapay Zekâ Analizi Yap düğmesiyle kriterler PDF ile karşılaştırılır."}</p>
               </div>
             </div>
             <div className="eval-workshop-layout">
@@ -2130,34 +1790,9 @@ export default function EvaluationApp() {
                 competitions={competitions}
                 selectedKey={competitionKey}
                 history={history}
-                onSelect={(key) => { setCompetitionKey(key); setApplicationId(null); setBulkSimilarity(null); }}
+                onSelect={(key) => { setCompetitionKey(key); setApplicationId(null); }}
               />
               <div className="eval-workshop-main">
-                {competitionKey ? (
-                  <section className="eval-similarity-note level-normal" aria-label="Toplu benzerlik incelemesi">
-                    <h3 className="eval-similarity-title">Toplu benzerlik incelemesi</h3>
-                    <p>Güncel matematiksel sonuçlardan en güçlü beş rapor çifti hazırlanır. Bu işlem kriter veya nihai karar üretmez.</p>
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      disabled={bulkBusy || competitionReadOnly(competitions.find((item) => item.competitionKey === competitionKey))}
-                      onClick={() => { void loadBulkSimilarity(); }}
-                    >
-                      {bulkBusy ? "Hazırlanıyor…" : "Benzerlikleri toplu tara"}
-                    </button>
-                    {bulkBusy ? <ElapsedTime /> : null}
-                    {bulkSimilarity ? (
-                      <div aria-live="polite">
-                        <p>{bulkSimilarity.poolSize} rapor · {bulkSimilarity.possiblePairCount} olası çift · {bulkSimilarity.candidates.length} güçlü aday</p>
-                        {bulkSimilarity.missingCount ? <p>{bulkSimilarity.missingCount} raporun matematiksel analizi henüz güncel değil.</p> : null}
-                        <ol>{bulkSimilarity.candidates.map((pair) => (
-                          <li key={pair.pairKey}><strong>{pair.leftLabel} ↔ {pair.rightLabel}</strong> · yaklaşık %{pair.mathematicalPercent}</li>
-                        ))}</ol>
-                        <p>{bulkSimilarity.note}</p>
-                      </div>
-                    ) : null}
-                  </section>
-                ) : null}
                 {!competitionKey ? (
                   <p className="library-empty">Soldan bir yarışma seçin.</p>
                 ) : selected ? (
@@ -2169,9 +1804,7 @@ export default function EvaluationApp() {
                     analyzing={analyzingId === selected.id}
                     otherAnalysisRunning={analyzingId !== null && analyzingId !== selected.id}
                     progress={progress}
-                    similarityRun={similarityState[selected.id] ?? null}
                     onAnalyze={analyze}
-                    onRetrySimilarity={retrySimilarity}
                     onReviewSaved={replaceApplication}
                     onFinalize={finalize}
                     onReopen={reopen}

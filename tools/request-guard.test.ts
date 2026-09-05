@@ -164,10 +164,11 @@ test("handleError PayloadTooLargeError'ı 413 olarak eşler (ValidationError 400
   assert.ok(validationBranch > -1, "ValidationError 400 eşlemesi korunmalıdır.");
 });
 
-test("benzerlik ucu gövdeyi 8 MB akış kapısıyla okur (madde 9)", () => {
-  const route = readFileSync(new URL("../app/api/applications/[id]/similarity/route.ts", import.meta.url), "utf8");
-  assert.match(route, /readJson\(request,\s*configuredByteLimit\("SIMILARITY_MAX_BODY_BYTES",\s*8 \* 1024 \* 1024\)\)/,
-    "Benzerlik JSON gövdesi 8 MB akışlı tavanla okunmalıdır (kullanıcı kararı).");
+test("hazırlık ucu istemci PDF metni okumaz; toplu işlem gövdesi 4 KB ile sınırlıdır", () => {
+  const preparation = readFileSync(new URL("../app/api/applications/[id]/similarity/route.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(preparation, /request\.json\(|readJson\(request|request\.text\(/);
+  const bulk = readFileSync(new URL("../app/api/competitions/[id]/bulk-similarity/route.ts", import.meta.url), "utf8");
+  assert.match(bulk, /readJson\(request,4096\)/);
 });
 
 test("gövde biriktiren diğer uçlar da akışlı kapıyı kullanır (request.formData kalmadı)", () => {

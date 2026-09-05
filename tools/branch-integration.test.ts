@@ -105,7 +105,7 @@ test("istemci taslakları sıraya alır; nihai karar kuyruğu bekler; benzerlik 
   assert.match(app, /draftSavedAt: draftStamp\.current/);
   const track = app.slice(app.indexOf("async function trackSimilarity("), app.indexOf("async function retrySimilarity("));
   assert.doesNotMatch(track, /replaceApplication\(attached\.application\)/);
-  assert.match(track, /evaluation: \{ \.\.\.item\.evaluation, similarityReport:/);
+  assert.doesNotMatch(app, /async function trackSimilarity/);
   assert.match(reviewBody, /review\.draftScope\.analyzedAt !== draftScope\.analyzedAt/);
   assert.match(reviewBody, /storedStamp && \(review\.draftSavedAt \?\? null\) !== storedStamp/);
 });
